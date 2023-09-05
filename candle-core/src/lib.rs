@@ -41,6 +41,9 @@ mod conv;
 mod convert;
 pub mod cpu;
 pub mod cpu_backend;
+#[cfg(feature = "ubridge")]
+pub mod gcu_backend;
+
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 #[cfg(feature = "cudnn")]
@@ -82,6 +85,9 @@ pub use variable::Var;
 
 #[cfg(feature = "cuda")]
 pub use cuda_backend::{CudaDevice, CudaStorage};
+
+#[cfg(feature = "ubridge")]
+pub use gcu_backend::{GcuDevice, GcuStorage};
 
 #[cfg(not(feature = "cuda"))]
 pub use dummy_cuda_backend::{CudaDevice, CudaStorage};

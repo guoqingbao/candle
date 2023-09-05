@@ -28,12 +28,18 @@ safetensors = { workspace = true }
 thiserror = { workspace = true }
 zip = { workspace = true }
 
+ubridge = { path = "../../ubridge", version = "0.1.0", optional=true}
+uhal = { path = "../../UHHI/uhal", version = "0.1.0", optional=true}
+cust_core = { path = "../../UHHI/common_features/cust_core", version = "0.1.0", optional=true}
+
+float_eq = { version = "0.7.0"}
+
 [dev-dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
 
 [features]
-default = []
+default = ["ubridge", "uhal", "cust_core"]
 cuda = ["cudarc", "dep:candle-kernels"]
 cudnn = ["cuda", "cudarc/cudnn"]
 mkl = ["dep:libc", "dep:intel-mkl-src"]

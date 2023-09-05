@@ -484,6 +484,7 @@ impl Tensor {
         match &*self.storage() {
             Storage::Cpu(cpu_storage) => from_cpu_storage(cpu_storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Gcu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
         }
     }
 
@@ -1129,6 +1130,8 @@ impl Tensor {
         match &*self.storage() {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Gcu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+
         }
     }
 
@@ -1159,6 +1162,8 @@ impl Tensor {
         match &*self.storage() {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Gcu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+
         }
     }
 
@@ -1199,6 +1204,8 @@ impl Tensor {
         match &*self.storage() {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Gcu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+
         }
     }
 
@@ -1493,6 +1500,16 @@ impl Tensor {
                     Storage::Cuda(cuda.storage_from_cpu_storage(&cpu_storage)?)
                 }
                 (Storage::Cpu(storage), Device::Cpu) => Storage::Cpu(storage.clone()),
+                (Storage::Cpu(storage), Device::Gcu(gcu)) => {
+                    Storage::Gcu(gcu.storage_from_cpu_storage(&storage)?)
+                }
+                (Storage::Gcu(storage), Device::Gcu(gcu)) => {
+                    let cpu_storage = storage.to_cpu_storage()?;
+                    Storage::Gcu(gcu.storage_from_cpu_storage(&cpu_storage)?)
+                }
+                _=> {
+                    panic!("Not supported!")
+                }
             };
             let op = BackpropOp::new1(self, Op::ToDevice);
             let tensor_ = Tensor_ {

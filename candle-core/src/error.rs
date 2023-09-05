@@ -156,6 +156,10 @@ pub enum Error {
     #[error(transparent)]
     Cuda(Box<dyn std::error::Error + Send + Sync>),
 
+    // === Wrapped Errors ===
+    #[error(transparent)]
+    Gcu(Box<dyn std::error::Error + Send + Sync>),
+
     #[error(transparent)]
     TryFromIntError(#[from] core::num::TryFromIntError),
 

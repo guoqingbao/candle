@@ -10,7 +10,9 @@ pub fn device(cpu: bool) -> Result<Device> {
     } else {
         let device = Device::cuda_if_available(0)?;
         if !device.is_cuda() {
-            println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
+            // println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
+            println!("Cuda not available, Running on GCU!");
+            return Ok(Device::new_gcu(0)?);
         }
         Ok(device)
     }

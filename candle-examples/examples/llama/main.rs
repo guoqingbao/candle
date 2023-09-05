@@ -106,8 +106,7 @@ fn main() -> Result<()> {
     } else {
         None
     };
-
-    let device = candle_examples::device(args.cpu)?;
+    let device = candle_examples::device(false)?;
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
         Some("bf16") => DType::BF16,

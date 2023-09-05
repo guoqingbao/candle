@@ -14,6 +14,9 @@ impl Tensor {
             crate::DeviceLocation::Cuda { gpu_id } => {
                 format!(", cuda:{}", gpu_id)
             }
+            crate::DeviceLocation::Gcu { gpu_id } => {
+                format!(", gcu:{}", gpu_id)
+            }
         };
 
         write!(f, "Tensor[")?;
@@ -475,6 +478,9 @@ impl std::fmt::Display for Tensor {
             crate::DeviceLocation::Cpu => "".to_owned(),
             crate::DeviceLocation::Cuda { gpu_id } => {
                 format!(", cuda:{}", gpu_id)
+            }
+            crate::DeviceLocation::Gcu { gpu_id } => {
+                format!(", gcu:{}", gpu_id)
             }
         };
 

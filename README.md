@@ -10,6 +10,27 @@ and ease of use. Try our online demos:
 [LLaMA2](https://huggingface.co/spaces/lmz/candle-llama2),
 [yolo](https://huggingface.co/spaces/lmz/candle-yolo).
 
+## Candle GCU Backend
+### Workflow
+Candle -> GCU Backend -> Ubridge (http://git.enflame.cn/guoqing.bao/ubridge) -> UHHI (http://git.enflame.cn/guoqing.bao/UHHI) -> GCU Runtime (http://git.enflame.cn/sw/caps)
+
+### TODO
+Write corresponding GCU kernerls 
+
+### Sample (LLaMa2 Inference)
+Download LLaMa2 weights to a local folder, it should contains the following files:
+config.json             model-00001-of-00002.safetensors  pytorch_model-00001-of-00002.bin  special_tokens_map.json  tokenizer.model
+convert.py              model-00002-of-00002.safetensors  pytorch_model-00002-of-00002.bin  tokenizer_config.json    tosafetensor.py
+generation_config.json  pytorch_model.bin.index.json      tokenizer.json
+
+Run the following command:
+
+``` shell
+cargo run --example llama -- --local-weights THE_WEIGHT_FOLDER --prompt "Please give me 200 words about deep learning."
+```
+
+**The inference result is not correct because I haven't write all kernels. Currently, the entire workflow can be computed on GCU. There are 9 types of GCU kernels need to be implemented, i.e., affine, binary, cast, conv, matmul, fill, indexing, reduce, and unary. The referenceing CUDA kernels can be found in candle-kernels.**
+
 ## Get started
 
 Make sure that you have [`candle-core`](https://github.com/huggingface/candle/tree/main/candle-core) correctly installed as described in [**Installation**](https://huggingface.github.io/candle/guide/installation.html).

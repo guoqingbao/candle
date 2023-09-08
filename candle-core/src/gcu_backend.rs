@@ -205,8 +205,8 @@ impl GcuDevice {
         })
     }
 
-    pub fn get_or_load_func(&self, module_name: &str, kernel_path: &str) -> Result<GcuFunction> {
-        Ok(GcuFunction::new(module_name.to_string(), kernel_path.to_string()))
+    // pub fn get_or_load_func(&self, module_name: &str, kernel_path: &str) -> Result<GcuFunction> {
+        // Ok(GcuFunction::new(module_name.to_string(), kernel_path.to_string()))
     //     if !self.has_func(module_name) {
     //         // Leaking the string here is a bit sad but we need a &'static str and this is only
     //         // done once per kernel name.
@@ -225,7 +225,7 @@ impl GcuDevice {
     //             module_name: module_name.to_string(),
     //         })
             
-    }
+        // }
 }
 
 impl BackendDevice for GcuDevice {
@@ -557,7 +557,7 @@ impl Map1 for Affine {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("affine"), ubridge::AFFINE)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el) }?;
+        let out = dev.alloc::<T>(el)?;
         let params = (
             el,
             dims.len(),
@@ -1839,8 +1839,7 @@ impl BackendStorage for GcuStorage {
     ) -> Result<Self> {
         let elem_count = b * m * n;
         let dev = &self.device;
-        let kernel_name = "matmul".to_string();
-        let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+
         let slice = match (&self.slice, &rhs.slice) {
             (GcuStorageSlice::BF16(lhs), GcuStorageSlice::BF16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
@@ -1848,7 +1847,9 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(bf16::ONE, bf16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<bf16>(elem_count).w()?;
-                let params = (rhs, lhs, &out);
+                let params = (b, m, n, k, rhs, lhs, &out);
+                let kernel_name = "matmul_bf16".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
@@ -1858,7 +1859,9 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(f16::ONE, f16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<f16>(elem_count).w()?;
-                let params = (rhs, lhs, &out);
+                let params = (b, m, n, k, rhs, lhs, &out);
+                let kernel_name = "matmul_f16".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;
 
                 GcuStorageSlice::F16(out)
@@ -1869,7 +1872,9 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<f32>(elem_count).w()?;
-                let params = (rhs, lhs, &out);
+                let params = (b, m, n, k, rhs, lhs, &out);
+                let kernel_name = "matmul_f32".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
@@ -1879,7 +1884,9 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<f64>(elem_count).w()?;
-                let params = (rhs, lhs, &out);
+                let params = (b, m, n, k, rhs, lhs, &out);
+                let kernel_name = "matmul_f64".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
             }

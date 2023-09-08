@@ -2,13 +2,7 @@ use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{DType, Error, IntDType, Layout, Result, Shape, WithDType};
 use half::{bf16, f16};
-#[cfg(feature = "ubridge")]
-use ubridge::device_tensor::DeviceTensor;
-#[cfg(feature = "ubridge")]
-use ubridge::device_executor::DeviceExecutor;
 
-use std::any::{Any, TypeId};
-use std::mem::size_of;
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
 // intercept the oom errors to avoid panicking and provide a proper error.
 #[derive(Debug, Clone)]
@@ -1291,20 +1285,6 @@ impl MatMul {
     }
 }
 
-pub fn equals<U: 'static, V: 'static>() -> bool {
-    TypeId::of::<U>() == TypeId::of::<V>() && size_of::<U>() == size_of::<V>()
-}
-
-
-pub fn cast_ref<U: 'static, V: 'static>(u: &U) -> Option<&V> {
-    // if equals::<U, V>() {
-    Some(unsafe { std::mem::transmute::<&U, &V>(u) })
-    // } else {
-    //     None
-    // }
-}
-
-
 impl Map2 for MatMul {
     const OP: &'static str = "mat_mul";
 
@@ -1354,54 +1334,6 @@ impl Map2 for MatMul {
         let dst_rs = dst_strides[0];
         let dst_cs = dst_strides[1];
 
-        if (k > 1 && m < 12000 && k < 12000 && n < 12000)  {
-            match DeviceExecutor::get_gcu_executor(0) {
-                Some(gcu_executor) => {
-
-                    // let rawptr = lhs.as_ptr().cast::<f32>();
-                    // let ltensor = DeviceTensor::from_pointer(rawptr, m * k, vec![b, m, k]).unwrap();
-                    let ltensor = DeviceTensor::from_vec_shape(&vec![1.0f32; b*m*k], vec![b, m, k]).unwrap();
-                    // let rawptr = rhs.as_ptr().cast::<f32>();
-                    // let rtensor = DeviceTensor::from_pointer(rawptr, k * n, vec![b, k, n]).unwrap();
-                    let rtensor = DeviceTensor::from_vec_shape(&vec![1.0f32; b*k*n], vec![b, k, n]).unwrap();
-                    let mut dst: Vec<f32> = Vec::with_capacity(b * m * n);
-                    unsafe { dst.set_len(b * m * n); }
-
-                    if b > 1 {
-                        match gcu_executor.batch_matmul_owned(&ltensor, &rtensor, true) {
-                            Ok(tensor) => {
-                                match tensor.to_cpu(&mut dst) {
-                                    Ok(_) => {
-                                        let ret = cast_ref::<Vec<f32>, Vec<T>>(&dst).unwrap();
-                                        return Ok(ret.to_owned());
-                                    }
-                                    _=> {}
-                                }
-                            }
-                            _=> { panic!("Failed for gcu_executor.batch_matmul_owned!");}
-                        }
-                    } else {
-                        match gcu_executor.transposed_matmul_owned(&ltensor, &rtensor, true) {
-                            Ok(tensor) => {
-                                match tensor.to_cpu(&mut dst) {
-                                    Ok(_) => {
-                                        let ret = cast_ref::<Vec<f32>, Vec<T>>(&dst).unwrap();
-                                        return Ok(ret.to_owned());
-                                    }
-                                    _=> { panic!("Unable to copy results back to cpu!");}
-                                }
-                            }
-                            _=> {}
-                        }
-                    }
-
-                }
-                _=> {  }
-            }
-                
-
-        }
-
         let mut dst = vec![T::zero(); b * m * n];
         let num_threads = crate::utils::get_num_threads();
         let parallelism = if num_threads > 1 {
@@ -1409,7 +1341,6 @@ impl Map2 for MatMul {
         } else {
             Parallelism::None
         };
-
         for step in 0..b {
             let lhs_p = &lhs[step * a_skip..];
             let rhs_p = &rhs[step * b_skip..];
@@ -1438,8 +1369,6 @@ impl Map2 for MatMul {
                 )
             }
         }
-        println!("CPU: Left {:?}, Right {:?}", [b, m, k], [b, k, n]);
-
         Ok(dst)
     }
 

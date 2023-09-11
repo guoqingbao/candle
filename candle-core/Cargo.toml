@@ -39,7 +39,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 
 [features]
-default = ["ubridge", "uhal", "cust_core"]
+default = []
+gcu = ["ubridge", "uhal", "cust_core"]
 cuda = ["cudarc", "dep:candle-kernels"]
 cudnn = ["cuda", "cudarc/cudnn"]
 mkl = ["dep:libc", "dep:intel-mkl-src"]

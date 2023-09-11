@@ -19,14 +19,30 @@ Write corresponding GCU kernerls
 
 ### Sample (LLaMa2 Inference)
 Download LLaMa2 weights to a local folder, it should contains the following files:
+
 config.json             model-00001-of-00002.safetensors  pytorch_model-00001-of-00002.bin  special_tokens_map.json  tokenizer.model
+
 convert.py              model-00002-of-00002.safetensors  pytorch_model-00002-of-00002.bin  tokenizer_config.json    tosafetensor.py
+
 generation_config.json  pytorch_model.bin.index.json      tokenizer.json
 
-Run the following command:
+
+Run the following command for GCU:
 
 ``` shell
-cargo run --example llama -- --local-weights THE_WEIGHT_FOLDER --prompt "Please give me 200 words about deep learning."
+cargo run --example llama --release --features gcu -- --local-weights THE_WEIGHT_FOLDER --prompt "Please give me 200 words about deep learning."
+```
+
+Run the following command for GPU:
+
+``` shell
+cargo run --example llama --release --features cuda -- --local-weights THE_WEIGHT_FOLDER --prompt "Please give me 200 words about deep learning."
+```
+
+Run the following command for CPU:
+
+``` shell
+cargo run --example llama --release -- --local-weights THE_WEIGHT_FOLDER --prompt "Please give me 200 words about deep learning."
 ```
 
 **The inference result is not correct because I haven't write all kernels. Currently, the entire workflow can be computed on GCU. There are 9 types of GCU kernels need to be implemented, i.e., affine, binary, cast, conv, matmul, fill, indexing, reduce, and unary. The referenceing CUDA kernels can be found in candle-kernels.**

@@ -48,6 +48,7 @@ anyhow = { workspace = true }
 [features]
 default = []
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+gcu = ["candle/gcu"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 cudnn = ["candle/cudnn"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]

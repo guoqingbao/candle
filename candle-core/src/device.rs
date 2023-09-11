@@ -1,6 +1,10 @@
 use crate::backend::BackendDevice;
 use crate::cpu_backend::CpuDevice;
-use crate::gcu_backend::GcuDevice;
+#[cfg(feature = "gcu")]
+use crate::gcu_backend::GcuDevice as GcuDevice;
+#[cfg(not(feature = "gcu"))]
+use crate::CudaDevice as GcuDevice;
+
 use crate::{CpuStorage, DType, Result, Shape, Storage, WithDType};
 
 /// A `DeviceLocation` represents a physical device whereas multiple `Device`
@@ -16,7 +20,7 @@ pub enum DeviceLocation {
 pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
-    Gcu(crate::GcuDevice),
+    Gcu(GcuDevice),
 }
 
 // TODO: Should we back the cpu implementation using the NdArray crate or similar?
@@ -90,7 +94,7 @@ impl Device {
     }
 
     pub fn new_gcu(ordinal: usize) -> Result<Self> {
-        Ok(Self::Gcu(crate::GcuDevice::new(ordinal)?))
+        Ok(Self::Gcu(GcuDevice::new(ordinal)?))
     }
 
     pub fn same_device(&self, rhs: &Self) -> bool {

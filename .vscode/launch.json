@@ -1,7 +1,7 @@
 {
     "configurations": [
         {
-            "type": "cppdbg",
+            "type": "lldb",
             "request": "launch",
             "name": "run llama",
             "program": "${workspaceFolder}/target/debug/examples/llama",

@@ -3,6 +3,7 @@ use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType};
 use half::{bf16, f16};
 use ubridge::prelude::DevicePtr;
+use uhal::memory::DevicePointerTrait;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 pub use cust_core::_hidden::{DeviceCopy};
@@ -1856,27 +1857,68 @@ impl BackendStorage for GcuStorage {
             (GcuStorageSlice::F16(lhs), GcuStorageSlice::F16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = gemm_config(f16::ONE, f16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
-                let out = dev.alloc::<f16>(elem_count).w()?;
-                let params = (b, m, n, k, rhs, lhs, &out);
-                let kernel_name = "matmul_f16".to_string();
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
-                unsafe { func.launch(cfg, params) }.w()?;
+                if b > 0 { //TODO: fix launch kernel bug in CAPS/TopsCC
+                    let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
+                    let out = dev.alloc::<f16>(elem_count).w()?;
+                    let params = (b, m, n, k, rhs, lhs, &out);
+                    let kernel_name = "matmul_f16".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+                    GcuStorageSlice::F16(out)
 
-                GcuStorageSlice::F16(out)
+                } else {
+                    let cfg = GcuLaunchConfig::for_transpose(k as u32, n as u32);
+                    let tmp = dev.alloc::<f16>(k * n).w()?;
+    
+                    let params = (k, n, rhs, &tmp);
+                    let kernel_name = "transpose_f16".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::TRANSPOSE)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+                    println!("transpose_f16 [{}, {}]", k, n);
+                    
+                    let cfg = GcuLaunchConfig::for_dot(m as u32);
+                    let kernel_name = "dot_f16".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::DOT)?;
+    
+                    let out = dev.alloc::<f16>(elem_count).w()?;
+                    let params = (m, k, n, lhs, &tmp, &out);
+                    unsafe { func.launch(cfg, params) }.w()?;
+                    println!("dot_f16 [{}, {}, {}]", m, k, n);
+
+                    GcuStorageSlice::F16(out)
+                }
             }
             (GcuStorageSlice::F32(lhs), GcuStorageSlice::F32(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
-                let out = dev.alloc::<f32>(elem_count).w()?;
-                let params = (b, m, n, k, rhs, lhs, &out);
-                let kernel_name = "matmul_f32".to_string();
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
-                unsafe { func.launch(cfg, params) }.w()?;
-                GcuStorageSlice::F32(out)
+                if b > 0 { //TODO: fix launch kernel bug in CAPS/TopsCC
+                    let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
+                    let out = dev.alloc::<f32>(elem_count).w()?;
+                    let params = (b, m, n, k, rhs, lhs, &out);
+                    let kernel_name = "matmul_f32".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+                    GcuStorageSlice::F32(out)
+
+                } else {
+                    let cfg = GcuLaunchConfig::for_transpose(k as u32, n as u32);
+                    let tmp = dev.alloc::<f32>(k * n).w()?;
+    
+                    let params = (k, n, rhs, &tmp);
+                    let kernel_name = "transpose_f32".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::TRANSPOSE)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+    
+                    let cfg = GcuLaunchConfig::for_dot(m as u32);
+                    let kernel_name = "dot_f32".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::DOT)?;
+    
+                    let out = dev.alloc::<f32>(elem_count).w()?;
+                    let params = (m, k, n, lhs, &tmp, &out);
+                    unsafe { func.launch(cfg, params) }.w()?;
+                    GcuStorageSlice::F32(out)
+                }
+                
             }
             (GcuStorageSlice::F64(lhs), GcuStorageSlice::F64(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);

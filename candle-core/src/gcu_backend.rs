@@ -1857,7 +1857,7 @@ impl BackendStorage for GcuStorage {
             (GcuStorageSlice::F16(lhs), GcuStorageSlice::F16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
+                let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32);
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 if b == 1 {
                     // println!("DotLLM: {}, {}, {}", m, k, n);

@@ -1,5 +1,7 @@
 [build]
-rustflags = ["-C", "target-cpu=native"]
+# rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "link-args=-Wl,-rpath,/opt/tops/lib"]
+# rustflags = ["-C", "link-args=-Wl,-rpath,/xxx/caps/build/lib"] # for debug candle-gcu + topsruntime
 
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]

@@ -551,24 +551,23 @@ impl Map1 for Affine {
         layout: &Layout,
     ) -> Result<GcuSlice<T>> {
         let shape = layout.shape();
-        let dims = shape.dims();
+        // let dims = shape.dims();
         let el = shape.elem_count();
         let cfg = GcuLaunchConfig::for_num_elems(el as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat())?;
+        // let ds = dev.htod_copy([dims, layout.stride()].concat())?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("affine"), ubridge::AFFINE)?;
         // SAFETY: Set later by running the kernel.
         let out = dev.alloc::<T>(el)?;
         let params = (
             el,
-            dims.len(),
-            &ds,
             src,
             &out,
-            T::from_f64(self.0),
-            T::from_f64(self.1),
+            self.0 as f32,
+            self.1 as f32
+            // T::from_f64(self.0),
+            // T::from_f64(self.1),
         );
-        // SAFETY: ffi.
         unsafe { func.launch(cfg, params) }?;
         Ok(out)
     }

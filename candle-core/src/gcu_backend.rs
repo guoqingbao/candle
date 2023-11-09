@@ -1848,7 +1848,7 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(bf16::ONE, bf16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<bf16>(elem_count).w()?;
-                let params = (b, m, n, k, rhs, lhs, &out);
+                let params = (b, m, n, k, lhs, rhs, &out);
                 let kernel_name = "matmul_bf16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;
@@ -1857,15 +1857,17 @@ impl BackendStorage for GcuStorage {
             (GcuStorageSlice::F16(lhs), GcuStorageSlice::F16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32);
+                let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32, 64);
                 let out = dev.alloc::<f16>(elem_count).w()?;
-                if b == 1 {
-                    // println!("DotLLM: {}, {}, {}", m, k, n);
-                    let params = (m, k, n, rhs, lhs, &out);
+                if b == 1 || m == 1 {
+                    // println!("DotLLM 16: {}, {}, {}, grid {:?}, block {:?}", m, k, n, cfg.grid_dim, cfg.block_dim);
+                    let params = (if m==1 {b} else {m}, k, n, lhs, rhs, &out);
                     let kernel_name = "dotllm_f16".to_string();
                     let func = dev.get_or_load_func(&kernel_name, ubridge::DOTLLM)?;
                     unsafe { func.launch(cfg, params) }.w()?;
                 } else {
+                    println!("**DotLLM 16: {}, {}, {}, {}", b, m, k, n);
+
                     let params = (b, m, n, k, rhs, lhs, &out);
                     let kernel_name = "matmul_f16".to_string();
                     let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
@@ -1876,12 +1878,23 @@ impl BackendStorage for GcuStorage {
             (GcuStorageSlice::F32(lhs), GcuStorageSlice::F32(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
+                let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32, 32);
                 let out = dev.alloc::<f32>(elem_count).w()?;
-                let params = (b, m, n, k, rhs, lhs, &out);
-                let kernel_name = "matmul_f32".to_string();
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
-                unsafe { func.launch(cfg, params) }.w()?;
+                if b == 1 || m == 1 {
+                    // println!("DotLLM 32: {}, {}, {}, grid {:?}, block {:?}", m, k, n, cfg.grid_dim, cfg.block_dim);
+                    let params = (if m==1 {b} else {m}, k, n, lhs, rhs, &out);
+                    let kernel_name = "dotllm_f32".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::DOTLLM)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+                } else {
+                    println!("**DotLLM 32: {}, {}, {}, {}", b, m, k, n);
+
+                    let params = (b, m, n, k, rhs, lhs, &out);
+                    let kernel_name = "matmul_f32".to_string();
+                    let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                    unsafe { func.launch(cfg, params) }.w()?;
+                }
+
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F64(lhs), GcuStorageSlice::F64(rhs)) => {
@@ -1890,7 +1903,7 @@ impl BackendStorage for GcuStorage {
                 // let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
                 let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<f64>(elem_count).w()?;
-                let params = (b, m, n, k, rhs, lhs, &out);
+                let params = (b, m, n, k, lhs, rhs, &out);
                 let kernel_name = "matmul_f64".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 unsafe { func.launch(cfg, params) }.w()?;

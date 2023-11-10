@@ -1476,11 +1476,11 @@ impl BackendStorage for GcuStorage {
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
         let shape = layout.shape();
-        let dims = shape.dims();
+        // let dims = shape.dims();
         let el = shape.elem_count();
         let cfg = GcuLaunchConfig::for_num_elems(el as u32);
         let dev = self.device();
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        // let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
         let start_o = layout.start_offset();
         // This returns an i64 rather than a &i64, this is useful to get around some temporary
         // lifetime issue and is safe as long as self.slice does not go out of scope before inp
@@ -1494,63 +1494,63 @@ impl BackendStorage for GcuStorage {
             GcuStorageSlice::F32(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::F64(inp) => inp.slice(start_o..).device_ptr(),
         };
-        // let inp = &inp;
+        let inp = &inp;
 
         let kernel_name = format!("cast_{}_{}", self.dtype().as_str(), dtype.as_str());
         let func = dev.get_or_load_func(&kernel_name, ubridge::CAST)?;
         let slice = match dtype {
             DType::U8 => {
                 let out = dev.device.alloc::<u8>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el,  
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::U8(out)
             }
             DType::U32 => {
                 let out = dev.alloc::<u32>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::U32(out)
             }
             DType::I64 => {
                 let out = dev.alloc::<i64>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::I64(out)
             }
             DType::BF16 => {
                 let out = dev.alloc::<bf16>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             DType::F16 => {
                 let out = dev.alloc::<f16>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }
             DType::F32 => {
                 let out = dev.alloc::<f32>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             DType::F64 => {
                 let out = dev.alloc::<f64>(el).w()?;
-                let params = (el, dims.len(), &ds, 
-                    // *inp, 
+                let params = (el, 
+                    *inp, 
                     &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)

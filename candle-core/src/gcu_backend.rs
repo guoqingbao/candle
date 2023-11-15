@@ -14,6 +14,7 @@ use ubridge::gcu_device::{GcuFunction};
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::gcu_launch::{GcuLaunchConfig, GcuLaunchAsync};
 use ubridge::{*};
+use ubridge::gemm_tuner::{AtenGemmTuner, AtenGemmInfo, AtenGemmTune, GEMM_OP_PARAS, TopsopDataType};
 
 #[derive(Debug, Clone)]
 enum GcuStorageSlice {
@@ -715,16 +716,14 @@ impl<U: UnaryOpT> Map1 for U {
         layout: &Layout,
     ) -> Result<GcuSlice<T>> {
         let shape = layout.shape();
-        let dims = shape.dims();
+        // let dims = shape.dims();
         let el_count = shape.elem_count();
         let cfg = GcuLaunchConfig::for_num_elems(el_count as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        // let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), ubridge::UNARY)?;
-        // SAFETY: Set later by running the kernel.
         let out = dev.alloc::<T>(el_count).w()?;
-        let params = (el_count, dims.len(), &ds, src, &out);
-        // SAFETY: ffi.
+        let params = (el_count, src, &out);
         unsafe { func.launch(cfg, params) }.w()?;
         Ok(out)
     }
@@ -1245,19 +1244,17 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         dev: &GcuDevice,
     ) -> Result<GcuSlice<T>> {
         let shape = lhs_l.shape();
-        let dims = shape.dims();
+        // let dims = shape.dims();
         let elem_count = shape.elem_count();
         let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
-        let dims_and_strides = dev
-            .htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
-            ?;
+        // let dims_and_strides = dev
+        //     .htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
+        //     ?;
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), ubridge::BINARY)?;
-        // SAFETY: Set later by running the kernel.
         let out = dev.alloc::<T>(elem_count).w()?;
-        let params = (elem_count, dims.len(), &dims_and_strides, lhs, rhs, &out);
-        // SAFETY: ffi
+        let params = (elem_count, lhs, rhs, &out);
         unsafe { func.launch(cfg, params) }.w()?;
         Ok(out)
     }
@@ -1858,12 +1855,37 @@ impl BackendStorage for GcuStorage {
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32, 64);
                 let out = dev.alloc::<f16>(elem_count).w()?;
+                let bias = dev.alloc::<f16>(n).w()?;
                 if b == 1 || m == 1 {
-                    // println!("DotLLM 16: {}, {}, {}, grid {:?}, block {:?}", m, k, n, cfg.grid_dim, cfg.block_dim);
-                    let params = (if m==1 {b} else {m}, k, n, lhs, rhs, &out);
-                    let kernel_name = "dotllm_f16".to_string();
-                    let func = dev.get_or_load_func(&kernel_name, ubridge::DOTLLM)?;
-                    unsafe { func.launch(cfg, params) }.w()?;
+                    println!("DotLLM 16: {}, {}, {}, grid {:?}, block {:?}", m, k, n, cfg.grid_dim, cfg.block_dim);
+                    if false {
+                        let info = AtenGemmInfo::new(TopsopDataType::TopSopDataFp16, if m==1 {b} else {m}, m, k, n);
+        
+                        let mut tune = AtenGemmTune::default();
+                        let tuner = AtenGemmTuner::new();
+                        tuner.tuner(&info, &mut tune);
+                        let param = GEMM_OP_PARAS::new(&info, &tune);
+    
+                        let kernel_name = "gemm_f16".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::GEMM)?;
+    
+                        let cfg = GcuLaunchConfig::for_gemm();
+                        let params = (lhs, rhs, &out, &bias, 
+                            param.input_dtype, b, m, k, n,
+                            param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
+                            param.lhs_transpose, param.rhs_transpose,
+                            param.alpha, param.beta, param.addmm_beta, param.bias,
+                            param.sip_m, param.sip_k, param.sip_n
+                        );
+                        unsafe { func.launch(cfg, params) }.w()?;
+
+                    } else {
+                        let kernel_name = "dotllm_f16".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::DOTLLM)?;
+                        let params = (if m==1 {b} else {m}, k, n, lhs, rhs, &out);
+                        unsafe { func.launch(cfg, params) }.w()?;
+                    }
+
                 } else {
                     println!("**DotLLM 16: {}, {}, {}, {}", b, m, k, n);
 
@@ -1916,11 +1938,11 @@ impl BackendStorage for GcuStorage {
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
         let src_shape = src_l.shape();
-        let dims = src_shape.dims();
+        // let dims = src_shape.dims();
         let el_count = src_shape.elem_count();
         let cfg = GcuLaunchConfig::for_num_elems(el_count as u32);
         let dev = &self.device;
-        let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
+        // let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
         match (&self.slice, &mut dst.slice) {
             (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
                 let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
@@ -1928,9 +1950,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_bf16", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -1940,9 +1960,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_f16", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -1952,9 +1970,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_f32", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -1964,9 +1980,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_u8", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -1976,9 +1990,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_u32", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -1988,9 +2000,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_i64", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?
                 }
             }
@@ -2000,9 +2010,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_64", ubridge::UNARY)?;
-                    // SAFETY: Set later by running the kernel.
-                    let params = (el_count, dims.len(), &ds, &src, &dst);
-                    // SAFETY: ffi.
+                    let params = (el_count, &src, &dst);
                     unsafe { func.launch(cfg, params) }.w()?;
                 }
             }

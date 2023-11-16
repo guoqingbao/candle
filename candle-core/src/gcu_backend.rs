@@ -14,7 +14,6 @@ use ubridge::gcu_device::{GcuFunction};
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::gcu_launch::{GcuLaunchConfig, GcuLaunchAsync};
 use ubridge::{*};
-use ubridge::gemm_tuner::{AtenGemmTuner, AtenGemmInfo, AtenGemmTune, GEMM_OP_PARAS, TopsopDataType};
 
 #[derive(Debug, Clone)]
 enum GcuStorageSlice {
@@ -112,6 +111,12 @@ impl std::ops::Deref for GcuDevice {
 
     fn deref(&self) -> &Self::Target {
         &self.device
+    }
+}
+
+impl std::ops::DerefMut for GcuDevice {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.device
     }
 }
 
@@ -1841,29 +1846,28 @@ impl BackendStorage for GcuStorage {
             (GcuStorageSlice::BF16(lhs), GcuStorageSlice::BF16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = gemm_config(bf16::ONE, bf16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<bf16>(elem_count).w()?;
-                let params = (b, m, n, k, lhs, rhs, &out);
-                let kernel_name = "matmul_bf16".to_string();
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                let bias = dev.alloc::<bf16>(n).w()?;
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataBf16, b, m, k, n);
+                let kernel_name = "gemm_bf16".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::GEMM)?;
+                let cfg = GcuLaunchConfig::for_gemm();
+                let params = (lhs, rhs, &out, &bias, 
+                    param.input_dtype, b, m, k, n,
+                    param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
+                    param.lhs_transpose, param.rhs_transpose,
+                    param.alpha, param.beta, param.addmm_beta, param.bias,
+                    param.sip_m, param.sip_k, param.sip_n
+                );
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F16(lhs), GcuStorageSlice::F16(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32, 64);
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let bias = dev.alloc::<f16>(n).w()?;
-
-                let info = AtenGemmInfo::new(TopsopDataType::TopSopDataFp16, if m==1 {b} else {m}, m, k, n);
-
-                let mut tune = AtenGemmTune::default();
-                let tuner = AtenGemmTuner::new();
-                tuner.tuner(&info, &mut tune);
-                let param = GEMM_OP_PARAS::new(&info, &tune);
-
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp16, b, m, k, n);
                 let kernel_name = "gemm_f16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::GEMM)?;
 
@@ -1878,22 +1882,14 @@ impl BackendStorage for GcuStorage {
                 // println!("GEMM F16: [{} {}, {}, {}], SIP [{} {} {}]", b, m, k, n, param.sip_m, param.sip_k, param.sip_n);
 
                 unsafe { func.launch(cfg, params) }.w()?;
-
                 GcuStorageSlice::F16(out)
             }
             (GcuStorageSlice::F32(lhs), GcuStorageSlice::F32(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = GcuLaunchConfig::for_dot(m as u32, n as u32, 32);
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let bias = dev.alloc::<f32>(n).w()?;
-
-                let info = AtenGemmInfo::new(TopsopDataType::TopSopDataFp32, if m==1 {b} else {m}, m, k, n);
-
-                let mut tune = AtenGemmTune::default();
-                let tuner = AtenGemmTuner::new();
-                tuner.tuner(&info, &mut tune);
-                let param = GEMM_OP_PARAS::new(&info, &tune);
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp32, b, m, k, n);
 
                 let kernel_name = "gemm_f32".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::GEMM)?;
@@ -1907,35 +1903,26 @@ impl BackendStorage for GcuStorage {
                     param.sip_m, param.sip_k, param.sip_n
                 );
                 // println!("GEMM F32: [{} {}, {}, {}], SIP [{} {} {}]", b, m, k, n, param.sip_m, param.sip_k, param.sip_n);
-
                 unsafe { func.launch(cfg, params) }.w()?;
-
-                // if b == 1 || m == 1 {
-                //     // println!("DotLLM 32: {}, {}, {}, grid {:?}, block {:?}", m, k, n, cfg.grid_dim, cfg.block_dim);
-                //     let params = (if m==1 {b} else {m}, k, n, lhs, rhs, &out);
-                //     let kernel_name = "dotllm_f32".to_string();
-                //     let func = dev.get_or_load_func(&kernel_name, ubridge::DOTLLM)?;
-                //     unsafe { func.launch(cfg, params) }.w()?;
-                // } else {
-                //     println!("**DotLLM 32: {}, {}, {}, {}", b, m, k, n);
-
-                //     let params = (b, m, n, k, rhs, lhs, &out);
-                //     let kernel_name = "matmul_f32".to_string();
-                //     let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
-                //     unsafe { func.launch(cfg, params) }.w()?;
-                // }
-
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F64(lhs), GcuStorageSlice::F64(rhs)) => {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
-                // let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
-                let cfg = GcuLaunchConfig::for_num_elems(elem_count as u32);
                 let out = dev.alloc::<f64>(elem_count).w()?;
-                let params = (b, m, n, k, lhs, rhs, &out);
-                let kernel_name = "matmul_f64".to_string();
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                let bias = dev.alloc::<f64>(n).w()?;
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataF64, b, m, k, n);
+                let kernel_name = "gemm_f64".to_string();
+                let func = dev.get_or_load_func(&kernel_name, ubridge::GEMM)?;
+
+                let cfg = GcuLaunchConfig::for_gemm();
+                let params = (lhs, rhs, &out, &bias, 
+                    param.input_dtype, b, m, k, n,
+                    param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
+                    param.lhs_transpose, param.rhs_transpose,
+                    param.alpha, param.beta, param.addmm_beta, param.bias,
+                    param.sip_m, param.sip_k, param.sip_n
+                );
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
             }

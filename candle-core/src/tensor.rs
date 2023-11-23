@@ -1507,6 +1507,10 @@ impl Tensor {
                     let cpu_storage = storage.to_cpu_storage()?;
                     Storage::Gcu(gcu.storage_from_cpu_storage(&cpu_storage)?)
                 }
+                (Storage::Gcu(storage), Device::Cpu) => {
+                    let cpu_storage = storage.to_cpu_storage()?;
+                    Storage::Cpu(cpu_storage)
+                }
                 _=> {
                     panic!("Not supported!")
                 }

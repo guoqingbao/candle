@@ -1,4 +1,20 @@
+use std::sync::Arc;
+
 use crate::{Error, Result, Shape};
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum LayoutTransformOP {
+    TransformTranspose = 1,
+    TransformBroadcast = 2,
+    TransformPurmute = 3,
+    TransformNarrow = 4,
+}
+
+impl Into<usize> for LayoutTransformOP {
+    fn into(self) -> usize {
+        self as usize
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Layout {
@@ -6,6 +22,8 @@ pub struct Layout {
     // The strides are given in number of elements and not in bytes.
     stride: Vec<usize>,
     start_offset: usize,
+    pub transform_ops: Vec<LayoutTransformOP>,
+    pub backup: Vec<Layout>,
 }
 
 impl Layout {
@@ -14,21 +32,34 @@ impl Layout {
             shape,
             stride,
             start_offset,
+            transform_ops: Vec::<LayoutTransformOP>::new(),
+            backup: Vec::<Layout>::new(),
         }
     }
 
-    pub fn contiguous_with_offset<S: Into<Shape>>(shape: S, start_offset: usize) -> Self {
+    pub fn contiguous_with_offset<S: Into<Shape>>(shape: S, layout: &Layout) -> Self {
         let shape = shape.into();
         let stride = shape.stride_contiguous();
         Self {
             shape,
             stride,
-            start_offset,
+            start_offset: layout.start_offset,
+            transform_ops: layout.transform_ops.clone(),
+            backup: layout.backup.clone(),
         }
     }
 
     pub fn contiguous<S: Into<Shape>>(shape: S) -> Self {
-        Self::contiguous_with_offset(shape, 0)
+        // Self::contiguous_with_offset(shape, 0)
+        let shape = shape.into();
+        let stride = shape.stride_contiguous();
+        Self {
+            shape,
+            stride,
+            start_offset: 0,
+            transform_ops: Vec::<LayoutTransformOP>::new(),
+            backup: Vec::<Layout>::new(),
+        }
     }
 
     pub fn dims(&self) -> &[usize] {
@@ -92,10 +123,18 @@ impl Layout {
         }
         let mut dims = dims.to_vec();
         dims[dim] = len;
+
+        let mut transform_ops = self.transform_ops.clone();
+        transform_ops.insert(transform_ops.len(), LayoutTransformOP::TransformNarrow);
+        let mut backup = self.backup.clone();
+        backup.insert(backup.len(), self.clone());
+
         Ok(Self {
             shape: Shape::from(dims),
             stride: self.stride.clone(),
             start_offset: self.start_offset + self.stride[dim] * start,
+            transform_ops: transform_ops,
+            backup: backup,
         })
     }
 
@@ -113,10 +152,18 @@ impl Layout {
         let mut dims = self.shape().dims().to_vec();
         dims.swap(dim1, dim2);
         stride.swap(dim1, dim2);
+
+        let mut transform_ops = self.transform_ops.clone();
+        transform_ops.insert(transform_ops.len(), LayoutTransformOP::TransformTranspose);
+        let mut backup = self.backup.clone();
+        backup.insert(backup.len(), self.clone());
+
         Ok(Self {
             shape: Shape::from(dims),
             stride,
             start_offset: self.start_offset,
+            transform_ops: transform_ops,
+            backup: backup,
         })
     }
 
@@ -138,10 +185,18 @@ impl Layout {
             perm_stride[i] = stride[idx];
             perm_dims[i] = dims[idx];
         }
+
+        let mut transform_ops = self.transform_ops.clone();
+        transform_ops.insert(transform_ops.len(), LayoutTransformOP::TransformPurmute);
+        let mut backup = self.backup.clone();
+        backup.insert(backup.len(), self.clone());
+
         Ok(Self {
             shape: Shape::from(perm_dims),
             stride: perm_stride,
             start_offset: self.start_offset,
+            transform_ops: transform_ops,
+            backup: backup,
         })
     }
 
@@ -173,10 +228,18 @@ impl Layout {
             };
             stride.push(s)
         }
+
+        let mut transform_ops = self.transform_ops.clone();
+        transform_ops.insert(transform_ops.len(), LayoutTransformOP::TransformBroadcast);
+        let mut backup = self.backup.clone();
+        backup.insert(backup.len(), self.clone());
+
         Ok(Self {
             shape,
             stride,
             start_offset: self.start_offset,
+            transform_ops: transform_ops,
+            backup: backup,
         })
     }
 

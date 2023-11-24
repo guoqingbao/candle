@@ -1641,7 +1641,7 @@ impl Tensor {
             let tensor_ = Tensor_ {
                 id: TensorId::new(),
                 storage: self.storage.clone(),
-                layout: Layout::contiguous_with_offset(shape, self.layout.start_offset()),
+                layout: Layout::contiguous_with_offset(shape, &self.layout),
                 op,
                 is_variable: false,
                 dtype: self.dtype,

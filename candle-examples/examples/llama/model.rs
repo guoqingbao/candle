@@ -220,7 +220,7 @@ impl CausalSelfAttention {
         let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
         let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
         let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
-        let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
+        let rope = (x.broadcast_mul(&cos.to_device(&Device::Cpu)?)? + rotate_x.broadcast_mul(&sin.to_device(&Device::Cpu)?)?)?;
         Ok(rope)
     }
 
@@ -241,8 +241,14 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
+        let qdevice = q.device();
+        let q = q.to_device(&Device::Cpu)?;
+        let k = k.to_device(&Device::Cpu)?;
+
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let mut k = self.apply_rotary_emb(&k, index_pos)?;
+        let q = q.to_device(&qdevice)?;
+        let mut k = k.to_device(&qdevice)?;
 
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();

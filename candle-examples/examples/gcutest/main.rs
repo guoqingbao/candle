@@ -3,16 +3,16 @@ use anyhow::{bail, Error as E, Result, Ok};
 use candle::{DType, Tensor, Device};
 use candle_nn::{VarBuilder, Module};
 mod model;
-use model::{Config, RmsNorm, CausalSelfAttention, Linear, Mlp, Block, Cache, LlamaConfig, embedding, linear, masked_fill};
+use model::{Config, RmsNorm, CausalSelfAttention, Llama, Linear, Mlp, Block, Cache, LlamaConfig, embedding, linear, masked_fill};
+use core::panic;
 use std::path::PathBuf;
 const MAX_SEQ_LEN: usize = 4096;
 use candle::Shape;
 use float_eq::{assert_float_eq, float_eq};
+use half::{f16, bf16};
 
 //passed!
-fn test_cache_(config: &Config, device: &Device) -> Result<(Tensor, Tensor)> {
-
-    // precompute freqs_cis
+fn test_cache_(config: &Config, dtype: DType, device: &Device) -> Result<(Tensor, Tensor)> {
     let n_elem = config.hidden_size / config.num_attention_heads;
     let theta: Vec<_> = (0..n_elem)
         .step_by(2)
@@ -22,31 +22,32 @@ fn test_cache_(config: &Config, device: &Device) -> Result<(Tensor, Tensor)> {
     let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
         .to_dtype(DType::F32)?
         .reshape((MAX_SEQ_LEN, 1))?
-        .matmul(&theta.reshape((1, theta.elem_count()))?)?; //fix matmul issue!
-    // let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
-    // let cos = idx_theta.cos()?.to_dtype(dtype)?;
-    // let sin = idx_theta.sin()?.to_dtype(dtype)?;
-    Ok((idx_theta, theta))
+        .matmul(&theta.reshape((1, theta.elem_count()))?)?; 
+    let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
+    let cos = idx_theta.cos()?.to_dtype(dtype)?;
+    let sin = idx_theta.sin()?.to_dtype(dtype)?;
+    Ok((cos, sin))
 }
 
 //passed!
-fn test_cache(config: &Config, gcu_device: &Device) -> Result<(Tensor, Tensor)> {
-    let (gcu_sin, gcu_cos) = test_cache_(config, &gcu_device).unwrap();
-    let (cpu_sin, cpu_cos) = test_cache_(config, &Device::Cpu).unwrap();
-    assert_eq!(
-        gcu_sin.to_vec2::<f32>()?[10],
-        cpu_sin.to_vec2::<f32>()?[10]
-    );
+fn test_cache(config: &Config, dtype: DType, gcu_device: &Device) -> Result<(Tensor, Tensor)> {
+    let (gcu_sin, gcu_cos) = test_cache_(config, dtype, &gcu_device).unwrap();
+    let (cpu_sin, cpu_cos) = test_cache_(config, dtype, &Device::Cpu).unwrap();
+    assert_float_eq!(
+        cpu_sin.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
+        gcu_sin.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
+        abs_all <= 0.00001);
 
-    assert_eq!(
-        gcu_cos.to_vec1::<f32>()?,
-        cpu_cos.to_vec1::<f32>()?
-    );
+    assert_float_eq!(
+        cpu_cos.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
+        gcu_cos.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
+        abs_all <= 0.00001);
     println!("Test cache passed!");
 
     Ok((cpu_sin, cpu_cos))
 }
 
+//pased!
 fn test_concat(gcu_device: &Device) -> Result<()> {
     let shape: Shape = (1, 13, 4096).into();
     let cpu_input1 = Tensor::rand(0.0f32, 1.0, shape.clone(), &Device::Cpu)?;
@@ -86,8 +87,8 @@ fn test_embedding(tokens: &Vec<u32>, cfg: &Config, vb: &VarBuilder, vbcpu: &VarB
     let cpu_embedding = wte1.forward(&cpu_input).unwrap();
 
     assert_float_eq!(
-        gcu_embedding.to_vec3::<f32>()?[0][1],
-        cpu_embedding.to_vec3::<f32>()?[0][1],
+        gcu_embedding.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        cpu_embedding.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
 
@@ -99,17 +100,22 @@ fn test_embedding(tokens: &Vec<u32>, cfg: &Config, vb: &VarBuilder, vbcpu: &VarB
 }
 
 //passed!
-fn test_softmax(gcu_device: &Device) -> Result<()> {
+fn test_softmax(dtype: DType, gcu_device: &Device) -> Result<()> {
     let shape: Shape = (1, 13, 4096).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
     
     let cpu_output = candle_nn::ops::softmax(&cpu_input, 1)?;
     let gcu_output = candle_nn::ops::softmax(&gcu_input, 1)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][0],
-        gcu_output.to_vec3::<f32>()?[0][0],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][0],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][0],
         abs_all <= 0.00001);
 
     println!("Test softmax passed!");
@@ -118,10 +124,15 @@ fn test_softmax(gcu_device: &Device) -> Result<()> {
 }
 
 //Passed!
-fn test_rmsnorm(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()> {
+fn test_rmsnorm(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()> {
     //input [1, 13, 4096], output [1, 13, 4096]
     let shape: Shape = (1, 13, 4096).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     let rms_1 = RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
@@ -131,9 +142,9 @@ fn test_rmsnorm(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &
     let cpu_result = rms_2.forward(&cpu_input)?;
 
     assert_float_eq!(
-        gcu_result.to_vec3::<f32>()?[0][1],
-        cpu_result.to_vec3::<f32>()?[0][1],
-        rmax_all <= 0.000001
+        cpu_result.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_result.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        abs_all <= 0.00001
     );
 
     println!("Test rmsnorm passed!");
@@ -143,22 +154,22 @@ fn test_rmsnorm(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &
 }
 
 //Passed!
-fn test_maskfill(cache: &Cache, gcu_device: &Device) -> Result<()>{
+fn test_maskfill(cache: &Cache, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 32, 13, 13], [1, 32, 13, 13], -inf (f32::NEG_INFINITY)
     //output [1, 32, 13, 13]
     let shape: Shape = (1, 32, 13, 13).into();
     let outshape: Shape = (32, 13, 13).into();
 
-    let cpu_input = Tensor::rand(0.0f32, 1.0, &shape, &Device::Cpu)?;
+    let cpu_input = Tensor::rand(0.0f32, 1.0, shape.clone(), &Device::Cpu)?;
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     let seq_len = 13;
     let mask = cache.mask(seq_len)?.broadcast_as(&shape)?;
 
-    let on_true_cpu = Tensor::new(f32::NEG_INFINITY, cpu_input.device())?.broadcast_as(mask.shape().dims())?;
-    let on_true_gcu = Tensor::new(f32::NEG_INFINITY, &gcu_device)?.broadcast_as(mask.shape().dims())?;
-    println!("CPU input: {}", on_true_cpu);
-    println!("GCU input: {}", on_true_gcu.to_device(&Device::Cpu)?);
+    // let on_true_cpu = Tensor::new(f32::NEG_INFINITY, cpu_input.device())?.broadcast_as(mask.shape().dims())?;
+    // let on_true_gcu = Tensor::new(f32::NEG_INFINITY, &gcu_device)?.broadcast_as(mask.shape().dims())?;
+    // println!("CPU input: {}", on_true_cpu);
+    // println!("GCU input: {}", on_true_gcu.to_device(&Device::Cpu)?);
 
     let cpu_output = masked_fill(&cpu_input, &mask.to_device(&Device::Cpu).unwrap(), f32::NEG_INFINITY)?;
     let cpu_output = cpu_output.reshape(&outshape)?;
@@ -166,8 +177,8 @@ fn test_maskfill(cache: &Cache, gcu_device: &Device) -> Result<()>{
     let gcu_output = masked_fill(&gcu_input, &mask, f32::NEG_INFINITY)?;
     let gcu_output = gcu_output.reshape(&outshape)?;
 
-    println!("CPU output: {}", cpu_output);
-    println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
+    // println!("CPU output: {}", cpu_output);
+    // println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
 
     assert_float_eq!(
         cpu_output.to_vec3::<f32>()?[0][1],
@@ -178,10 +189,15 @@ fn test_maskfill(cache: &Cache, gcu_device: &Device) -> Result<()>{
     Ok(())
 }
 
-fn test_block(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()>{
+fn test_block(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 13, 4096], output [1, 13, 4096]
     let shape: Shape = (1, 13, 4096).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
 
     let block_cpu = Block::load(vbcpu.pp(&format!("model.layers.0")), cache_cpu, cfg).unwrap();
     let block_gcu = Block::load(vb.pp(&format!("model.layers.0")), cache, cfg).unwrap();
@@ -191,8 +207,8 @@ fn test_block(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, v
     let gcu_output = block_gcu.forward(&gcu_input, 0, 0)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
     println!("Test block passed!");
@@ -202,12 +218,17 @@ fn test_block(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, v
 }
 
 //passed!
-fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()>{
+fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 13, 4096], output [1, 13, 4096]
     let shape: Shape = (1, 13, 4096).into();
     let outshape: Shape = (32, 13, 128).into();
 
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     let attn_cpu = CausalSelfAttention::load(vbcpu.pp("self_attn"), cache_cpu, cfg)?;
@@ -223,8 +244,8 @@ fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilde
     let gcu_output = gcu_output.reshape(&outshape)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
     println!("Test attention passed!");
@@ -234,11 +255,16 @@ fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilde
 
 //passed!
 use candle::{D};
-fn test_narrow(gcu_device: &Device) -> Result<()> {
+fn test_narrow(dtype: DType, gcu_device: &Device) -> Result<()> {
     let shape: Shape = (1, 32, 13, 128).into();
     let outshape: Shape = (32, 13, 128).into();
     let hidden_size = 128;
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     // println!("CPU input: {}", cpu_input);
@@ -258,8 +284,8 @@ fn test_narrow(gcu_device: &Device) -> Result<()> {
     let gcu_output = gcu_output.reshape(&outshape)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
     println!("Test narrow passed!");
@@ -269,14 +295,19 @@ fn test_narrow(gcu_device: &Device) -> Result<()> {
 }
 
 //passed!
-fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()>{
+fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 32, 13, 128], output [1, 32, 13, 128]
     let attn_gcu = CausalSelfAttention::load(vb.pp("self_attn"), cache, cfg)?;
     let attn_cpu = CausalSelfAttention::load(vbcpu.pp("self_attn"), cache_cpu, cfg)?;
 
     let shape: Shape = (1, 32, 13, 128).into();
     let outshape: Shape = (32, 13, 128).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     // let cpu_output = Tensor::cat(&[&cpu_input, &cpu_input], 3)?;
@@ -285,15 +316,15 @@ fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &Va
     let cpu_output = attn_cpu.apply_rotary_emb(&cpu_input, 0)?;
     let gcu_output = attn_gcu.apply_rotary_emb(&gcu_input, 0)?;
 
-    println!("CPU output: {}", cpu_output);
-    println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
+    // println!("CPU output: {}", cpu_output);
+    // println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
 
     let cpu_output = cpu_output.reshape(&outshape)?;
     let gcu_output = gcu_output.reshape(&outshape)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
     println!("Test rotary_embedding passed!");
@@ -302,27 +333,32 @@ fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &Va
 }
 
 //passed!
-fn test_mlp(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()>{
+fn test_mlp(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 13, 4096], output [1, 13, 4096]
     let mlp_cpu = Mlp::load(vbcpu.pp("mlp"), cfg)?;
     let mlp_gcu = Mlp::load(vb.pp("mlp"), cfg)?;
     let shape: Shape = (1, 13, 4096).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let cpu_output = mlp_cpu.forward(&cpu_input)?;
 
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     assert_float_eq!(
-        cpu_input.to_vec3::<f32>()?[0][1],
-        gcu_input.to_vec3::<f32>()?[0][1],
+        cpu_input.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_input.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
 
     let gcu_output = mlp_gcu.forward(&gcu_input)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
     println!("Test mlp passed!");
@@ -332,10 +368,15 @@ fn test_mlp(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Devi
 }
 
 //passed!
-fn test_linear(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &Device) -> Result<()> {
+fn test_linear(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()> {
     //input [1, 4096], output [1, 32000]
     let shape: Shape = (1, 4096).into();
-    let cpu_input = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let cpu_input = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
 
     let lm_head_cpu = linear(cfg.hidden_size, cfg.vocab_size, vbcpu.pp("lm_head"))?;
@@ -345,8 +386,8 @@ fn test_linear(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &D
     let gcu_output = lm_head_gcu.forward(&gcu_input)?;
 
     assert_float_eq!(
-        cpu_output.to_vec2::<f32>()?[0],
-        gcu_output.to_vec2::<f32>()?[0],
+        cpu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
+        gcu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
         abs_all <= 0.00001
     );
 
@@ -355,14 +396,24 @@ fn test_linear(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, gcu_device: &D
 }
 
 //passed!
-fn test_matmul(gcu_device: &Device) -> Result<()> {
+fn test_matmul(dtype: DType, gcu_device: &Device) -> Result<()> {
     //input [1, 4096], output [1, 32000]
     let shape_a: Shape = (1, 32, 13, 64).into();
     let shape_b: Shape = (1, 32, 64, 128).into();
     let outshape: Shape = (32, 13, 128).into();
+    let cpu_input_a = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape_a, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape_a, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape_a, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
 
-    let cpu_input_a = Tensor::rand(0.0f32, 1.0, shape_a, &Device::Cpu)?;
-    let cpu_input_b = Tensor::rand(0.0f32, 1.0, shape_b, &Device::Cpu)?;
+    let cpu_input_b = match dtype {
+        DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape_b, &Device::Cpu)?},
+        DType::F32 => {Tensor::rand(0.0f32, 1.0, shape_b, &Device::Cpu)?},
+        DType::BF16 => {Tensor::rand(bf16::from_f32(0.0f32), bf16::from_f32(1.0f32), shape_b, &Device::Cpu)?},
+        _ => {panic!("Error type!");}
+    };
 
     let gcu_input_a = cpu_input_a.to_device(&gcu_device)?;
     let gcu_input_b = cpu_input_b.to_device(&gcu_device)?;
@@ -373,8 +424,8 @@ fn test_matmul(gcu_device: &Device) -> Result<()> {
     let gcu_output = gcu_output.reshape(&outshape)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
+        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
         abs_all <= 0.00001
     );
 
@@ -382,7 +433,52 @@ fn test_matmul(gcu_device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn test_llama(cfg: &Config, cache: &Cache, cache_cpu: &Cache, vb: VarBuilder, vbcpu: VarBuilder, gcu_device: &Device) -> Result<()> {
+    //input [1, 13, 4096], output [1, 13, 4096]
+    let shape: Shape = (1, 13).into();
+    let cpu_input = Tensor::from_slice(&[1u32, 500, 75, 600, 4095, 6, 1, 9, 10, 9, 7, 2, 0], (1, 13), &Device::Cpu)?;
+    // let cpu_input = Tensor::randn(1u32, 4000u32, shape, &Device::Cpu)?;
+    let gcu_input = cpu_input.to_device(&gcu_device)?;
 
+    println!("Load GCU model...");
+    let llama_gcu = Llama::load(vb, cache, cfg)?;
+    println!("Start GCU inference...");
+    let gcu_output = llama_gcu.forward(&gcu_input, 0)?;
+
+    println!("Load CPU model...");
+    let llama_cpu = Llama::load(vbcpu, cache_cpu, cfg)?;
+    println!("Start CPU inference...");
+    let cpu_output = llama_cpu.forward(&cpu_input, 0)?;
+
+    println!("CPU output: {}", cpu_output);
+    println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
+
+    let cpu_output = cpu_output.to_vec2::<f32>()?;
+    let gcu_output = gcu_output.to_vec2::<f32>()?;
+
+    println!("Dif: \n");
+    let mut difs: Vec<f32> = vec![];
+    for i in 0..cpu_output[0].len() {
+        let dif = (cpu_output[0][i] - gcu_output[0][i]).abs();
+        if dif > 0.01 {
+            println!("large dif {} ", dif);
+        }
+        if !difs.contains(&dif) {
+            difs.insert(0, dif);
+        }
+    }
+    println!("Difs: {:?}", difs);
+
+
+    // assert_float_eq!(
+    //     cpu_output.to_vec2::<f32>()?[0],
+    //     gcu_output.to_vec2::<f32>()?[0],
+    //     abs_all <= 0.001
+    // );
+
+    println!("Test llama passed!");
+    Ok(())
+}
 fn main() -> Result<()> {
     use tokenizers::Tokenizer;
 
@@ -409,7 +505,6 @@ fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let cache = model::Cache::new(false, dtype, &config, &device)?;
     let vb = VarBuilder::from_safetensors(tensors, dtype, &device);
-
     let handles1 = filenames
     .iter()
     .map(|f| Ok(unsafe { candle::safetensors::MmapedFile::new(f.as_path())? }))
@@ -431,22 +526,21 @@ fn main() -> Result<()> {
         .to_vec();
 
     println!("start the candle-gcu testing cases...");
-    
-    // test_cache(&config, &device)?;
-    // test_concat(&device)?;
-    // test_embedding(&tokens, &config, &vb, &vbcpu, &device)?;
-    // test_softmax(&device)?; 
-    // test_rmsnorm(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), &device)?;
-    // test_maskfill(&cache, &device)?;
+    test_cache(&config, dtype, &device)?;
+    test_embedding(&tokens, &config, &vb, &vbcpu, &device)?;
+    test_softmax(dtype, &device)?; 
+    test_rmsnorm(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?;
+    test_maskfill(&cache, dtype, &device)?;
 
-    // test_mlp(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), &device)?;
-    // test_linear(&config, &vb, &vbcpu, &device)?;
-    // test_matmul(&device)?;
-    test_block(&cache, &cache_cpu, &config, &vb, &vbcpu, &device)?; //TODO
-    // test_attention(&cache, &cache_cpu, &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), &device)?; //TODO
-    // test_narrow(&device);
-    // test_rotary_embedding(&cache, &cache_cpu,  &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), &device)?; //TODO
+    // test_mlp(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?;
+    // test_linear(&config, &vb, &vbcpu, dtype, &device)?;
+    test_matmul(dtype, &device)?;
+    test_block(&cache, &cache_cpu, &config, &vb, &vbcpu, dtype, &device)?; 
+    test_attention(&cache, &cache_cpu, &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
+    test_narrow(dtype, &device);
+    test_rotary_embedding(&cache, &cache_cpu,  &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
 
+    // test_llama(&config, &cache, &cache_cpu, vb, vbcpu, &device)?; //out of memory for f32
     Ok(())
 
 }

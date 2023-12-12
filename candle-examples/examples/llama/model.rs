@@ -1,6 +1,8 @@
+use candle::gcu_backend::DeviceCopy;
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{Embedding, Module, VarBuilder};
 use serde::Deserialize;
+use std::arch::x86_64;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -244,11 +246,11 @@ impl CausalSelfAttention {
         let qdevice = q.device();
         let q = q.to_device(&Device::Cpu)?;
         let k = k.to_device(&Device::Cpu)?;
+        let mut v = v.to_device(&Device::Cpu)?;
 
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let mut k = self.apply_rotary_emb(&k, index_pos)?;
-        let q = q.to_device(&qdevice)?;
-        let mut k = k.to_device(&qdevice)?;
+        let q = self.apply_rotary_emb(&q, index_pos)?;//cpu
+        let mut k = self.apply_rotary_emb(&k, index_pos)?;//cpu
+
 
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();
@@ -271,8 +273,13 @@ impl CausalSelfAttention {
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
 
-        let k = self.repeat_kv(k)?;
-        let v = self.repeat_kv(v)?;
+        let k = self.repeat_kv(k)?;//cpu
+        let v = self.repeat_kv(v)?;//cpu
+
+        let q = q.to_device(&qdevice)?;
+        let k = k.to_device(&qdevice)?;
+        let v = v.to_device(&qdevice)?;
+
 
         let y = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)

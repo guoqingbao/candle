@@ -248,11 +248,11 @@ impl CausalSelfAttention {
         let k = k.to_device(&Device::Cpu)?;
         let mut v = v.to_device(&Device::Cpu)?;
 
-        let q = self.apply_rotary_emb(&q, index_pos)?;//cpu
-        let mut k = self.apply_rotary_emb(&k, index_pos)?;//cpu
+        let q = self.apply_rotary_emb(&q, index_pos)?;//cpu, TODO on GCU
+        let mut k = self.apply_rotary_emb(&k, index_pos)?;//cpu, TODO on GCU
 
 
-        if self.cache.use_kv_cache {
+        if self.cache.use_kv_cache { //kv cache TODO on GCU
             let mut cache = self.cache.kvs.lock().unwrap();
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
                 k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
@@ -273,13 +273,12 @@ impl CausalSelfAttention {
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
 
-        let k = self.repeat_kv(k)?;//cpu
-        let v = self.repeat_kv(v)?;//cpu
-
         let q = q.to_device(&qdevice)?;
         let k = k.to_device(&qdevice)?;
         let v = v.to_device(&qdevice)?;
 
+        let k = self.repeat_kv(k)?;
+        let v = self.repeat_kv(v)?;
 
         let y = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)

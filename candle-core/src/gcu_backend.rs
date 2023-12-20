@@ -1434,21 +1434,21 @@ impl GcuStorage {
         let dims = to_shape.dims();
         let el_count = to_shape.elem_count();
         let dev = &self.device;
-        let start_offset = if to_l.start_offset() > 0 { self.relative_offset(origin_dims, dims, to_l.start_offset())} else {to_l.start_offset()};
+        let start_offset = to_l.start_offset();//if to_l.start_offset() > 0 { self.relative_offset(origin_dims, dims, to_l.start_offset())} else {to_l.start_offset()};
 
-        let mut origin_perm: Vec<usize> = (0..origin_dims.len()).collect();
-        origin_perm.sort_by(|&i1, &i2| src_l.stride()[i1].cmp(&src_l.stride()[i2]).reverse());
+        // let mut origin_perm: Vec<usize> = (0..origin_dims.len()).collect();
+        // origin_perm.sort_by(|&i1, &i2| src_l.stride()[i1].cmp(&src_l.stride()[i2]).reverse());
 
-        let mut perm: Vec<usize> = (0..dims.len()).collect();
-        if op==1 && origin_dims.len() == dims.len() {
-            perm = self.calculate_transpose_layout(origin_dims, dims);
-            if perm.len() != dims.len() {
-                perm = (0..dims.len()).collect();
-                perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
-            }
-        } else {
-            perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
-        }
+        // let mut perm: Vec<usize> = (0..dims.len()).collect();
+        // if op==1 && origin_dims.len() == dims.len() {
+        //     perm = self.calculate_transpose_layout(origin_dims, dims);
+        //     if perm.len() != dims.len() {
+        //         perm = (0..dims.len()).collect();
+        //         perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
+        //     }
+        // } else {
+        //     perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
+        // }
 
         // let ds = dev.htod_copy([origin_dims, origin_perm.as_slice(), dims, perm.as_slice()].concat()).w()?;
         let ds = dev.htod_copy([origin_dims, src_l.stride(), dims, to_l.stride()].concat()).w()?;

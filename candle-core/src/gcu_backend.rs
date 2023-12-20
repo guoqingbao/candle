@@ -1426,7 +1426,6 @@ impl GcuStorage {
     }
     fn copy_impl(&self, src: &Self, dst: &mut Self, dst_offset: usize, src_l: &Layout, to_l: &Layout, op: usize) -> Result<()> {
 
-        let cfg = GcuLaunchConfig::for_ucopy();
         let origin_shape = src_l.shape();
         let origin_dims = origin_shape.dims();
         let origin_el_count = origin_shape.elem_count();
@@ -1451,7 +1450,9 @@ impl GcuStorage {
             perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
         }
 
-        let ds = dev.htod_copy([origin_dims, origin_perm.as_slice(), dims, perm.as_slice()].concat()).w()?;
+        // let ds = dev.htod_copy([origin_dims, origin_perm.as_slice(), dims, perm.as_slice()].concat()).w()?;
+        let ds = dev.htod_copy([origin_dims, src_l.stride(), dims, to_l.stride()].concat()).w()?;
+        let cfg = dev.launch_cfg;
         match (&src.slice, &mut dst.slice) {
             (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
                 let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);

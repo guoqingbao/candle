@@ -311,6 +311,33 @@ fn test_narrow(dtype: DType, gcu_device: &Device) -> Result<()> {
 
 }
 
+
+fn test_transpose(dtype: DType, gcu_device: &Device) -> Result<()> {
+    let shape: Shape = (5, 6).into();
+    let cpu_input = Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?;
+
+    // let range = 128f32 * 4096f32;
+    // let cpu_input = Tensor::arange(0f32, range, &Device::Cpu)?.reshape(shape)?;
+    // let cpu_input = cpu_input.to_dtype(DType::F16)?;
+    let gcu_input = cpu_input.to_device(&gcu_device)?;
+
+    let cpu_output = cpu_input.transpose(0, 1)?;
+    let gcu_output = gcu_input.transpose(0, 1)?.contiguous()?;
+
+    println!("CPU output: {}", cpu_output);
+
+    println!("GCU output: {}", gcu_output.to_device(&Device::Cpu)?);
+
+    assert_float_eq!(
+        cpu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[1],
+        gcu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[1],
+        abs_all <= 0.000001
+    );
+    println!("Test transpose passed!");
+
+    Ok(())
+
+}
 //passed!
 fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 32, 13, 128], output [1, 32, 13, 128]

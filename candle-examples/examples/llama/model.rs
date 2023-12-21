@@ -221,8 +221,10 @@ impl CausalSelfAttention {
         let sin = sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
         let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
         let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
+        // let x1 = x1.contiguous()?;
+        // let x2 = x2.contiguous()?;
         let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
-        let rope = (x.broadcast_mul(&cos.to_device(&Device::Cpu)?)? + rotate_x.broadcast_mul(&sin.to_device(&Device::Cpu)?)?)?;
+        let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)
     }
 
@@ -243,14 +245,15 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
+
+
+        let q = self.apply_rotary_emb(&q, index_pos)?;
+        let mut k = self.apply_rotary_emb(&k, index_pos)?;
+
         let qdevice = q.device();
-        let q = q.to_device(&Device::Cpu)?;
-        let k = k.to_device(&Device::Cpu)?;
+        // let q = q.to_device(&Device::Cpu)?;
+        let mut k = k.to_device(&Device::Cpu)?;
         let mut v = v.to_device(&Device::Cpu)?;
-
-        let q = self.apply_rotary_emb(&q, index_pos)?;//cpu, TODO on GCU
-        let mut k = self.apply_rotary_emb(&k, index_pos)?;//cpu, TODO on GCU
-
 
         if self.cache.use_kv_cache { //kv cache TODO on GCU
             let mut cache = self.cache.kvs.lock().unwrap();
@@ -273,7 +276,7 @@ impl CausalSelfAttention {
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
 
-        let q = q.to_device(&qdevice)?;
+        // let q = q.to_device(&qdevice)?;
         let k = k.to_device(&qdevice)?;
         let v = v.to_device(&qdevice)?;
 

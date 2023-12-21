@@ -1245,7 +1245,7 @@ fn slice_src_and_dst<'a, T: DeviceCopy>(
     dst: &'a mut GcuSlice<T>,
     dst_offset: usize,
 ) -> (
-    GcuView<'a, T>, //TODO
+    GcuView<'a, T>, 
     GcuViewMut<'a, T>,
 ) {
     let src_offset = src_l.start_offset();
@@ -1388,148 +1388,6 @@ impl GcuStorage {
             device: dev.clone(),
         })
     }
-
-    fn calculate_transpose_layout(&self, input_shape: &[usize], output_shape: &[usize]) -> Vec<usize> {
-        assert_eq!(input_shape.len(), output_shape.len(), "Input and output shapes must have the same length");
-    
-        let ndim = input_shape.len();
-        let mut transpose_layout: Vec<usize> = Vec::with_capacity(ndim);
-    
-        let mut idx = 0;
-        for &dim in output_shape {
-            let index = input_shape.iter().position(|&x| x == dim);
-            match index {
-                Some(idx_) => {
-                    if !transpose_layout.contains(&idx_) {
-                        transpose_layout.push(idx_);
-                    }
-                }
-                _=> {
-                    transpose_layout.push(idx);
-                }
-            }
-            idx += 1;
-        }
-    
-        transpose_layout
-    }
-    fn relative_offset(&self, src_dim: &[usize], dst_dim: &[usize], start_offset: usize) -> usize {
-        let mut relative_offset = start_offset;
-        for i in 0..src_dim.len() {
-            let idx = src_dim.len() - i - 1;
-            if src_dim[idx] != dst_dim[idx] {
-                break;
-            }
-            relative_offset /= dst_dim[idx];
-        }
-        relative_offset
-    }
-    fn copy_impl(&self, src: &Self, dst: &mut Self, dst_offset: usize, src_l: &Layout, to_l: &Layout, op: usize) -> Result<()> {
-
-        let origin_shape = src_l.shape();
-        let origin_dims = origin_shape.dims();
-        let origin_el_count = origin_shape.elem_count();
-        
-        let to_shape = to_l.shape();
-        let dims = to_shape.dims();
-        let el_count = to_shape.elem_count();
-        let dev = &self.device;
-        let start_offset = to_l.start_offset();//if to_l.start_offset() > 0 { self.relative_offset(origin_dims, dims, to_l.start_offset())} else {to_l.start_offset()};
-
-        // let mut origin_perm: Vec<usize> = (0..origin_dims.len()).collect();
-        // origin_perm.sort_by(|&i1, &i2| src_l.stride()[i1].cmp(&src_l.stride()[i2]).reverse());
-
-        // let mut perm: Vec<usize> = (0..dims.len()).collect();
-        // if op==1 && origin_dims.len() == dims.len() {
-        //     perm = self.calculate_transpose_layout(origin_dims, dims);
-        //     if perm.len() != dims.len() {
-        //         perm = (0..dims.len()).collect();
-        //         perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
-        //     }
-        // } else {
-        //     perm.sort_by(|&i1, &i2| to_l.stride()[i1].cmp(&to_l.stride()[i2]).reverse());
-        // }
-
-        // let ds = dev.htod_copy([origin_dims, origin_perm.as_slice(), dims, perm.as_slice()].concat()).w()?;
-        let ds = dev.htod_copy([origin_dims, src_l.stride(), dims, to_l.stride()].concat()).w()?;
-        let cfg = dev.launch_cfg;
-        match (&src.slice, &mut dst.slice) {
-            (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_bf16", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::F16(src), GcuStorageSlice::F16(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_f16", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::F32(src), GcuStorageSlice::F32(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_f32", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::U8(src), GcuStorageSlice::U8(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_u8", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::U32(src), GcuStorageSlice::U32(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_u32", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::I64(src), GcuStorageSlice::I64(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_i64", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?
-                }
-            }
-            (GcuStorageSlice::F64(src), GcuStorageSlice::F64(dst)) => {
-                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
-                if to_l.is_contiguous() && origin_el_count==el_count {
-                    dev.dtod_copy(&src, &mut dst).w()?
-                } else {
-                    let func = dev.get_or_load_func("ucopy_64", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, start_offset, origin_dims.len(), dims.len(), ds.device_ptr(), op, src.device_ptr(), dst.device_ptr());
-                    unsafe { func.launch(&cfg, params) }.w()?;
-                }
-            }
-            _ => Err(GcuError::InternalError(
-                "dtype mismatch in copy_strided op",
-            ))?,
-        }
-        Ok(())
-    }
 }
 
 impl BackendStorage for GcuStorage {
@@ -1608,10 +1466,6 @@ impl BackendStorage for GcuStorage {
             let mut src_l = device.zeros_impl(src_shape, self.dtype())?;
             self.copy_strided_src(&mut src_l, 0, &dst_layout)?; //convert to contiguous
             
-            // let shape: Shape = (1, 5, 3).into();
-            // let trans = src_l.to_cpu_storage().unwrap();
-            // let t = from_storage(crate::Storage::Cpu(trans), shape, BackpropOp::none(), false);
-            // println!("{}", t);
             let slice = FastReduce(sum_dims, op).map(&src_l.slice, &device, layout)?;
             Ok(Self { slice, device })
         } else {
@@ -1634,7 +1488,7 @@ impl BackendStorage for GcuStorage {
         } else {
             let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
             self.copy_strided_src(&mut src, 0, layout)?;
-            let slice = U::V.map(&src.slice, &device, layout)?;
+            let slice = U::V.map(&src.slice, &device, &Layout::contiguous(layout.shape()))?;
             Ok(Self { slice, device })
         }
     }
@@ -1720,9 +1574,6 @@ impl BackendStorage for GcuStorage {
         f_l: &Layout,
     ) -> Result<Self> {
         let device = self.device().clone();
-        // let slice = WhereCond(self, layout).map(&t.slice, t_l, &f.slice, f_l, &device)?;
-        // return Ok(Self { slice, device });
-
         if t_l.is_contiguous() && f_l.is_contiguous() {
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&t.slice, t_l, &f.slice, f_l, &device)?;
@@ -2002,52 +1853,91 @@ impl BackendStorage for GcuStorage {
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
+        let src_shape = src_l.shape();
+        let dims = src_shape.dims();
+        let el_count = src_shape.elem_count();
+        let origin_l = if src_l.backup.len() > 0 {&src_l.backup[0]} else {&src_l};
+        let origin_shape = origin_l.shape();
+        let origin_el_count = origin_shape.elem_count();
         let dev = &self.device;
-        let mut layouts = src_l.backup.clone();
-        if layouts.len() == 0 {
-            return self.copy_impl(self, dst, dst_offset, src_l, src_l, 6);
-        }
-        layouts.insert(layouts.len(), src_l.clone());
-        let buffer = RefCell::<Vec<GcuStorage>>::default();
-        let mut buf = buffer.borrow_mut();
-        let mut count = 0;
-        if layouts.len() > 2 {
-            buf.insert(count, self.to_owned());
-            count += 1;
-        }
-        for i in 0..layouts.len() - 1 {
-            let transform_op = &src_l.transform_ops[i];
-            let origin_l = &layouts[i];
-            let to_l = if layouts.len() > 1 && i + 1 < layouts.len() {&layouts[i + 1]} else {&src_l};
-            let op : usize = transform_op.to_owned().into();
-            if i == 0 {
-                if i + 1 == layouts.len() - 1 {
-                    self.copy_impl(self, dst, dst_offset, origin_l, to_l, op)?;
-                } else {
-                    let src_ = buf.last().unwrap();
-                    let mut dst_ = dev.zeros_impl(to_l.shape(), self.dtype())?;
-                    self.copy_impl(src_, &mut dst_, 0, origin_l, to_l, op)?;
-                    buf.insert(count, dst_);
-                    count += 1;
-                }
-            } else {
-                let src_ = buf.last().unwrap();
-                if i + 1 == layouts.len() - 1 {
-                    self.copy_impl(src_, dst, dst_offset, origin_l, to_l, op)?;
-                } else {
-                    let mut dst_ = dev.zeros_impl(to_l.shape(), self.dtype())?;
-                    self.copy_impl(src_, &mut dst_, 0, origin_l, to_l, op)?;
-                    buf.insert(count, dst_);
-                    count += 1;
-                }
-            } 
 
-            if layouts.len() > 1 && i + 1 < layouts.len() {
-                layouts[i + 1] = Layout::contiguous(to_l.shape());
+        let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
+        let cfg = dev.launch_cfg;
+        match (&self.slice, &mut dst.slice) {
+            (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_bf16", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
             }
-
+            (GcuStorageSlice::F16(src), GcuStorageSlice::F16(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_f16", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
+            (GcuStorageSlice::F32(src), GcuStorageSlice::F32(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_f32", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
+            (GcuStorageSlice::U8(src), GcuStorageSlice::U8(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_u8", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
+            (GcuStorageSlice::U32(src), GcuStorageSlice::U32(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_u32", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
+            (GcuStorageSlice::I64(src), GcuStorageSlice::I64(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_i64", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
+            (GcuStorageSlice::F64(src), GcuStorageSlice::F64(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count==el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_64", ubridge::UNARY)?;
+                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    unsafe { func.launch(&cfg, params) }.w()?;
+                }
+            }
+            _ => Err(GcuError::InternalError(
+                "dtype mismatch in copy_strided op",
+            ))?,
         }
-        
         Ok(())
     }
 }

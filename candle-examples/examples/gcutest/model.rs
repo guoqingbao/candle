@@ -246,8 +246,6 @@ impl CausalSelfAttention {
         let sin = sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
         let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
         let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
-        let x1 = x1.contiguous()?;
-        let x2 = x2.contiguous()?;
         let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
         let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)

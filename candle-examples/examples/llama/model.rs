@@ -125,8 +125,8 @@ impl Cache {
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
-        let cos = idx_theta.cos()?.to_dtype(dtype)?;
-        let sin = idx_theta.sin()?.to_dtype(dtype)?;
+        let cos = idx_theta.cos()?.to_dtype(dtype)?.to_device(&Device::Cpu)?;
+        let sin = idx_theta.sin()?.to_dtype(dtype)?.to_device(&Device::Cpu)?;
         Ok(Self {
             masks: Arc::new(Mutex::new(HashMap::new())),
             use_kv_cache,
@@ -211,7 +211,31 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
     unimplemented!("compile with '--features flash-attn'")
 }
 
+fn rotate_half(xs: &Tensor) -> Result<Tensor> {
+    let last_dim = xs.dim(D::Minus1)?;
+    let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
+    let xs2 = xs.narrow(D::Minus1, last_dim / 2, last_dim - last_dim / 2)?;
+    Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
+}
+
 impl CausalSelfAttention {
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        index_pos: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
+        let cos = self.cache.cos.narrow(0, index_pos, seq_len)?;
+        let sin = self.cache.sin.narrow(0, index_pos, seq_len)?;
+        let cos = cos.broadcast_as(q.shape())?;
+        let sin = sin.broadcast_as(q.shape())?;
+
+        let q_embed = (q.mul(&cos)? + rotate_half(q)?.mul(&sin))?;
+        let k_embed = (k.mul(&cos)? + rotate_half(k)?.mul(&sin))?;
+        Ok((q_embed, k_embed))
+    }
+
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
         let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
@@ -221,8 +245,6 @@ impl CausalSelfAttention {
         let sin = sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
         let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
         let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
-        // let x1 = x1.contiguous()?;
-        // let x2 = x2.contiguous()?;
         let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
         let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)
@@ -245,15 +267,16 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-
-
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let mut k = self.apply_rotary_emb(&k, index_pos)?;
-
         let qdevice = q.device();
-        // let q = q.to_device(&Device::Cpu)?;
+        let q = q.to_device(&Device::Cpu)?;
         let mut k = k.to_device(&Device::Cpu)?;
         let mut v = v.to_device(&Device::Cpu)?;
+
+        // let q = self.apply_rotary_emb(&q, index_pos)?;
+        // let mut k = self.apply_rotary_emb(&k, index_pos)?;
+        let (q, mut k) = self.apply_rotary_emb_qkv(&q, &k, index_pos)?;
+
+
 
         if self.cache.use_kv_cache { //kv cache TODO on GCU
             let mut cache = self.cache.kvs.lock().unwrap();
@@ -276,7 +299,7 @@ impl CausalSelfAttention {
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
 
-        // let q = q.to_device(&qdevice)?;
+        let q = q.to_device(&qdevice)?;
         let k = k.to_device(&qdevice)?;
         let v = v.to_device(&qdevice)?;
 

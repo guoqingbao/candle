@@ -2,6 +2,7 @@ use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType, Tensor};
 use half::{bf16, f16};
+use rayon::range;
 use ubridge::prelude::DevicePtr;
 use uhal::memory::DevicePointerTrait;
 use std::cell::RefCell;
@@ -1940,5 +1941,78 @@ impl BackendStorage for GcuStorage {
             ))?,
         }
         Ok(())
+    }
+}
+
+pub struct Rope {
+    pub num_tokens: i32,
+    pub num_heads: i32,
+    pub head_size: i32,
+    pub gpt_neox: i32
+}
+impl crate::CustomOp3 for Rope {
+    // Box<dyn> does not support const yet, so use a function to get the name.
+    fn name(&self) -> &'static str {
+        "rope"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+        s3: &CpuStorage,
+        l3: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        crate::bail!("no cpu support for rope")
+    }
+
+
+    /// The forward pass, as run on a gcu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn gcu_fwd(
+        &self,
+        query: &GcuStorage,
+        query_l: &Layout,
+        key: &GcuStorage,
+        key_l: &Layout,
+        cos_sin: &GcuStorage,
+        cos_sin_l: &Layout,
+    ) -> Result<(GcuStorage, Shape)> {
+        let dev = &query.device;
+        let cfg = &dev.launch_cfg;
+        
+        let query_l = if query_l.backup.len() > 0 {&query_l.backup[0]} else {&query_l};
+        let shape = query_l.shape();
+
+        match (&query.slice, &key.slice, &cos_sin.slice) { 
+            (GcuStorageSlice::BF16(query_), GcuStorageSlice::BF16(key_), GcuStorageSlice::F32(cos_sin_)) => { 
+                let func = dev.get_or_load_func("rope_bf16", ubridge::UNARY)?;
+                let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
+                                self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                unsafe { func.launch(&cfg, params) }.w()?;
+            }
+            (GcuStorageSlice::F32(query_), GcuStorageSlice::F32(key_), GcuStorageSlice::F32(cos_sin_)) => { 
+                let func = dev.get_or_load_func("rope_f32", ubridge::UNARY)?;
+                let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
+                            self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                unsafe { func.launch(&cfg, params) }.w()?;
+            }
+            (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F32(cos_sin_)) => {
+                let func = dev.get_or_load_func("rope_f16", ubridge::UNARY)?;
+                let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
+                            self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                unsafe { func.launch(&cfg, params) }.w()?;
+            }
+            _=> Err(GcuError::InternalError(
+                "dtype mismatch in copy_strided op",
+            ))?,
+        };
+
+        let device = dev.clone();
+        Ok((GcuStorage { slice: query.slice.to_owned(), device }, shape.to_owned()))
+
+
     }
 }

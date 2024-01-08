@@ -182,9 +182,8 @@ impl Storage {
                 Ok((Self::Cuda(storage), shape))
             }
             Self::Gcu(storage) => {
-                // let (storage, shape) = c.cuda_fwd(storage, l)?; //TODO
-                // Ok((Self::Gcu(storage), shape))
-                panic!("Not impelemented!")
+                let (storage, shape) = c.gcu_fwd(storage, l)?;
+                Ok((Self::Gcu(storage), shape))
 
             }
         }
@@ -208,9 +207,8 @@ impl Storage {
                 Ok((Self::Cuda(s), shape))
             }
             (Self::Gcu(s1), Self::Gcu(s2)) => {
-                // let (s, shape) = c.cuda_fwd(s1, l1, s2, l2)?; //TODO
-                // Ok((Self::Gcu(s), shape))
-                panic!("Not impelemented!")
+                let (s, shape) = c.gcu_fwd(s1, l1, s2, l2)?;
+                Ok((Self::Gcu(s), shape))
             }
             _ => unreachable!(),
         }
@@ -236,10 +234,10 @@ impl Storage {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Cuda(s), shape))
             }
-            // (Self::Gcu(s1), Self::Gcu(s2), Self::Gcu(s3)) => {
-            //     let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3)?;
-            //     Ok((Self::Gcu(s), shape))
-            // }
+            (Self::Gcu(s1), Self::Gcu(s2), Self::Gcu(s3)) => {
+                let (s, shape) = c.gcu_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::Gcu(s), shape))
+            }
             _ => unreachable!(),
         }
     }

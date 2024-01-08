@@ -106,6 +106,7 @@ pub struct Cache {
     kvs: Arc<Mutex<Vec<Option<(Tensor, Tensor)>>>>,
     cos: Tensor,
     sin: Tensor,
+    cos_sin: Tensor,
     device: Device,
 }
 
@@ -124,9 +125,11 @@ impl Cache {
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
+        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?; //must be float32;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
-        let cos = idx_theta.cos()?.to_dtype(dtype)?.to_device(&Device::Cpu)?;
-        let sin = idx_theta.sin()?.to_dtype(dtype)?.to_device(&Device::Cpu)?;
+        let cos = idx_theta.cos()?.to_dtype(dtype)?;
+        let sin = idx_theta.sin()?.to_dtype(dtype)?;
+
         Ok(Self {
             masks: Arc::new(Mutex::new(HashMap::new())),
             use_kv_cache,
@@ -134,6 +137,7 @@ impl Cache {
             device: device.clone(),
             cos,
             sin,
+            cos_sin,
         })
     }
 
@@ -218,6 +222,25 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
     Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
 }
 
+use candle::gcu_backend::Rope;
+pub fn fused_rope(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    num_tokens: i32,
+    num_heads: i32,
+    head_size: i32,
+    gpt_neox: i32,
+) -> Result<Tensor> {
+    let op = Rope {
+        num_tokens,
+        num_heads,
+        head_size,
+        gpt_neox
+    };
+    x.apply_op3(cos, sin, op)
+}
+
 impl CausalSelfAttention {
     fn apply_rotary_emb_qkv(
         &self,
@@ -250,6 +273,15 @@ impl CausalSelfAttention {
         Ok(rope)
     }
 
+    pub fn apply_rotary_emb_fused(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
+        let _enter = self.span_rot.enter();
+        let (_, head_size, seq_len, hidden_size) = query.dims4()?;
+        let cos_sin = self.cache.cos_sin.narrow(0, index_pos, seq_len)?;
+        //cost_sin must be type of float32
+        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, head_size as i32, hidden_size as i32, 1)?;
+        Ok((query.contiguous()?, key.contiguous()?))
+    }
+
     fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
         let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
@@ -267,16 +299,17 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
+        let (q, mut k) = if q.device().is_cpu() { 
+            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
+        } 
+        else {
+            self.apply_rotary_emb_fused(&q, &k, index_pos)?
+        };
+
         let qdevice = q.device();
-        let q = q.to_device(&Device::Cpu)?;
+        // let q = q.to_device(&Device::Cpu)?;
         let mut k = k.to_device(&Device::Cpu)?;
         let mut v = v.to_device(&Device::Cpu)?;
-
-        // let q = self.apply_rotary_emb(&q, index_pos)?;
-        // let mut k = self.apply_rotary_emb(&k, index_pos)?;
-        let (q, mut k) = self.apply_rotary_emb_qkv(&q, &k, index_pos)?;
-
-
 
         if self.cache.use_kv_cache { //kv cache TODO on GCU
             let mut cache = self.cache.kvs.lock().unwrap();
@@ -299,7 +332,7 @@ impl CausalSelfAttention {
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
 
-        let q = q.to_device(&qdevice)?;
+        // let q = q.to_device(&qdevice)?;
         let k = k.to_device(&qdevice)?;
         let v = v.to_device(&qdevice)?;
 

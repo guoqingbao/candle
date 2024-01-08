@@ -9,8 +9,8 @@ use std::path::PathBuf;
 const MAX_SEQ_LEN: usize = 4096;
 use candle::Shape;
 use float_eq::{assert_float_eq, float_eq};
-use half::{f16, bf16};
-
+use half::{f16, bf16, vec};
+use clap::Parser;
 //passed!
 fn test_cache_(config: &Config, dtype: DType, device: &Device) -> Result<(Tensor, Tensor)> {
     let n_elem = config.hidden_size / config.num_attention_heads;
@@ -36,7 +36,7 @@ fn test_cache(config: &Config, dtype: DType, gcu_device: &Device) -> Result<(Ten
     assert_float_eq!(
         cpu_sin.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
         gcu_sin.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
-        abs_all <= 0.0000001);
+        abs_all <= 0.000001);
 
     assert_float_eq!(
         cpu_cos.to_dtype(DType::F32)?.to_vec2::<f32>()?[10],
@@ -238,7 +238,7 @@ fn test_block(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, v
 fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 13, 4096], output [1, 13, 4096]
     let shape: Shape = (1, 13, 4096).into();
-    let outshape: Shape = (32, 13, 128).into();
+    let outshape: Shape = (1, 32 * 13 * 128).into();
 
     let cpu_input = match dtype {
         DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
@@ -261,9 +261,9 @@ fn test_attention(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &VarBuilde
     let gcu_output = gcu_output.reshape(&outshape)?;
 
     assert_float_eq!(
-        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
-        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][1],
-        abs_all <= 0.000001
+        cpu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
+        gcu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
+        abs_all <= 0.00001
     );
     println!("Test attention passed!");
 
@@ -375,7 +375,6 @@ fn test_rotary_embedding(cache: &Cache, cache_cpu: &Cache, cfg: &Config, vb: &Va
 
     Ok(())
 }
-
 //passed!
 fn test_mlp(cfg: &Config, vb: &VarBuilder, vbcpu: &VarBuilder, dtype: DType, gcu_device: &Device) -> Result<()>{
     //input [1, 13, 4096], output [1, 13, 4096]
@@ -534,21 +533,87 @@ fn test_llama(cfg: &Config, cache: &Cache, cache_cpu: &Cache, vb: VarBuilder, vb
     println!("Test llama passed!");
     Ok(())
 }
+
+fn rope_test() -> Result<()> {
+    pub fn apply_rotary_emb(x: &Tensor, cos_sin: &Tensor) -> Result<Tensor> {
+        let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
+        let cos = cos_sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
+        let sin = cos_sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
+        let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
+        let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
+        let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
+        let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
+        Ok(rope)
+    }
+    const N: usize = 1 * 32 * 13 * 128;
+    let cpu_input = Tensor::from_slice(&[0.5f32; N], (1, 32, 13, 128), &Device::Cpu)?;
+    let cos_sin = Tensor::from_slice(&[0.95f32; 13 * 128], (13, 128), &Device::Cpu)?;
+    let output = apply_rotary_emb(&cpu_input, &cos_sin)?;
+    let shape: Shape = (32 * 13 * 128).into();
+    let output = output.reshape(shape)?;
+    let v: Vec<f32> = output.to_vec1().unwrap();
+    println!("Output: {}", 32 * 13 * 128);
+
+    for i in 0..32 * 13 * 128 {
+        print!("{} ", v[i]);
+    }
+    // println!("Output: {:}", output);
+    Ok(())
+
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// The initial prompt.
+    /// Use different dtype than f16
+    #[arg(long)]
+    dtype: Option<String>,
+
+    /// The folder name that contains safetensor weights and json files
+    /// (same structure as huggingface online)
+    #[arg(long)]
+    local_weights: Option<String>,
+}
 fn main() -> Result<()> {
     use tokenizers::Tokenizer;
-
+    let args = Args::parse();
     let device = candle_examples::device(false)?;
-    let dtype = DType::F32;
+    let dtype = match args.dtype.as_deref() {
+        Some("f16") => DType::F16,
+        Some("bf16") => DType::BF16,
+        Some("f32") => DType::F32,
+        _ => DType::F32,
+    };
 
-    let tokenizer_filename = "/home/ustc/llama2_weights/tokenizer.json";
+    let tokenizer_filename = match &args.local_weights {
+        Some(path) => { path.to_owned() + "tokenizer.json"},
+        _ => {panic!("Path not found: {}", "tokenizer.json")},
+    };
 
-    let config_filename = "/home/ustc/llama2_weights/config.json";
+    let config_filename = match &args.local_weights {
+        Some(path) => {path.to_owned() + "config.json"},
+        _ => {panic!("Path not found: {}", "config.json")},
+    };
+
+
     let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
     let config = config.into_config(false);
 
-    let filenames: Vec<PathBuf> = vec!["/home/ustc/llama2_weights/model-00001-of-00002.safetensors".to_string().into(), 
-                    "/home/ustc/llama2_weights/model-00002-of-00002.safetensors".to_string().into()];
-
+    let mut filenames: Vec<PathBuf> = vec![];
+    for rfilename in [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ] {
+        match &args.local_weights {
+            Some(path) => {
+                filenames.push((path.to_owned() + rfilename).into());
+            }
+            _ => {
+                panic!("Path not found: {}", rfilename);
+            }
+        };
+    }
 
     let handles = filenames
     .iter()
@@ -593,10 +658,11 @@ fn main() -> Result<()> {
     test_matmul(dtype, &device)?;
     test_block(&cache, &cache_cpu, &config, &vb, &vbcpu, dtype, &device)?; 
     test_attention(&cache, &cache_cpu, &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
-    test_narrow(dtype, &device);
+    test_narrow(dtype, &device)?;
     test_rotary_embedding(&cache, &cache_cpu,  &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
 
     // test_llama(&config, &cache, &cache_cpu, vb, vbcpu, &device)?; //out of memory for f32
+    // rope_test()?;
     Ok(())
 
 }

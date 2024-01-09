@@ -615,27 +615,10 @@ fn main() -> Result<()> {
         };
     }
 
-    let handles = filenames
-    .iter()
-    .map(|f| Ok(unsafe { candle::safetensors::MmapedFile::new(f.as_path())? }))
-    .collect::<Result<Vec<_>>>()?;
-    let tensors: Vec<_> = handles
-        .iter()
-        .map(|h| Ok(h.deserialize()?))
-        .collect::<Result<Vec<_>>>()?;
     let cache = model::Cache::new(false, dtype, &config, &device)?;
-    let vb = VarBuilder::from_safetensors(tensors, dtype, &device);
-    let handles1 = filenames
-    .iter()
-    .map(|f| Ok(unsafe { candle::safetensors::MmapedFile::new(f.as_path())? }))
-    .collect::<Result<Vec<_>>>()?;
-    let tensors1: Vec<_> = handles1
-        .iter()
-        .map(|h| Ok(h.deserialize()?))
-        .collect::<Result<Vec<_>>>()?;
-    let vbcpu = VarBuilder::from_safetensors(tensors1, dtype, &Device::Cpu);
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)?}; 
+    let vbcpu = unsafe {VarBuilder::from_mmaped_safetensors(&filenames, dtype, &Device::Cpu)?};
     let cache_cpu = model::Cache::new(false, dtype, &config, &Device::Cpu)?;
-
 
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
     let prompt = "Please give me 200 words about deep learning!";

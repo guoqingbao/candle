@@ -292,6 +292,9 @@ impl BackendDevice for GcuDevice {
         })
     }
 
+    fn set_seed(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
     fn rand_uniform(&self, shape: &Shape, dtype: DType, lo: f64, up: f64) -> Result<GcuStorage> {
         let elem_count = shape.elem_count();
         // let curand = self.curand.lock().unwrap();
@@ -591,6 +594,31 @@ impl Map1 for Elu {
         let out = dev.alloc::<T>(el)?;
         let params = (el, dims.len(), ds.device_ptr(), T::from_f64(self.0), src.device_ptr(), out.device_ptr());
         unsafe { func.launch(&dev.launch_cfg, params) }?;
+        Ok(out)
+    }
+}
+
+
+struct Powf(f64);
+impl Map1 for Powf {
+    fn f<T: DeviceCopy + WithDType>(
+        &self,
+        src: &GcuSlice<T>,
+        dev: &GcuDevice,
+        layout: &Layout,
+    ) -> Result<GcuSlice<T>> {
+        let shape = layout.shape();
+        let dims = shape.dims();
+        let el = shape.elem_count();
+        let cfg = GcuLaunchConfig::for_threds(12);
+        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let src = &src.slice(layout.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), ubridge::UNARY)?;
+        // SAFETY: Set later by running the kernel.
+        let out = unsafe { dev.alloc::<T>(el) }.w()?;
+        let params = (el, dims.len(), &ds, T::from_f64(self.0), src, &out);
+        // SAFETY: ffi.
+        unsafe { func.launch(&cfg, params) }.w()?;
         Ok(out)
     }
 }
@@ -1438,6 +1466,26 @@ impl BackendStorage for GcuStorage {
         let device = self.device().clone();
         let slice = Elu(alpha).map(&self.slice, &device, layout)?;
         Ok(Self { slice, device })
+    }
+
+    fn powf(&self, layout: &Layout, e: f64) -> Result<Self> { //TODO
+        let device = self.device().clone();
+        let slice = Powf(e).map(&self.slice, &device, layout)?;
+        Ok(Self { slice, device })
+    }
+
+    fn conv_transpose1d(
+        &self,
+        _l: &Layout,
+        _kernel: &Self,
+        _kernel_l: &Layout,
+        _params: &crate::conv::ParamsConvTranspose1D,
+    ) -> Result<Self> {
+        todo!()
+    }
+
+    fn upsample_nearest1d(&self, _: &Layout, _: usize) -> Result<Self> {
+        crate::bail!("upsample-nearest1d is not supported on gcu")
     }
 
     fn reduce_op(&self, op: ReduceOp, layout: &Layout, sum_dims: &[usize]) -> Result<Self> {

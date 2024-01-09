@@ -1,15 +1,18 @@
+//! A `VarBuilder` is used to retrieve variables used by a model. These variables can either come
+//! from a pre-trained checkpoint, e.g. using `VarBuilder::from_mmaped_safetensors`, or initialized
+//! for training, e.g. using `VarBuilder::from_varmap`.
 use crate::VarMap;
 use candle::{safetensors::Load, DType, Device, Error, Result, Shape, Tensor};
 use safetensors::{slice::IndexOp, tensor::SafeTensors};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// A structure used to retrieve variables, these variables can either come from storage or be
 /// generated via some form of initialization.
 ///
 /// The way to retrieve variables is defined in the backend embedded in the `VarBuilder`.
 pub struct VarBuilderArgs<'a, B: Backend> {
-    data: Rc<TensorData<B>>,
+    data: Arc<TensorData<B>>,
     path: Vec<String>,
     _phantom: std::marker::PhantomData<&'a B>,
 }
@@ -37,10 +40,10 @@ struct TensorData<B: Backend> {
 /// A trait that defines how tensor data is retrieved.
 ///
 /// Typically this would use disk storage in some specific format, or random initialization.
-/// Note that there is a speciliazed version of this trait (`SimpleBackend`) that can be used most
+/// Note that there is a specialized version of this trait (`SimpleBackend`) that can be used most
 /// of the time. The main restriction is that it doesn't allow for specific args (besides
 /// initialization hints).
-pub trait Backend {
+pub trait Backend: Send + Sync {
     type Hints: Default;
 
     /// Retrieve a tensor with some target shape.
@@ -52,9 +55,11 @@ pub trait Backend {
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor>;
+
+    fn contains_tensor(&self, name: &str) -> bool;
 }
 
-pub trait SimpleBackend {
+pub trait SimpleBackend: Send + Sync {
     /// Retrieve a tensor based on a target name and shape.
     fn get(
         &self,
@@ -64,6 +69,8 @@ pub trait SimpleBackend {
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor>;
+
+    fn contains_tensor(&self, name: &str) -> bool;
 }
 
 impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
@@ -78,6 +85,10 @@ impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
     ) -> Result<Tensor> {
         self.as_ref().get(s, name, h, dtype, dev)
     }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.as_ref().contains_tensor(name)
+    }
 }
 
 impl<'a, B: Backend> VarBuilderArgs<'a, B> {
@@ -88,12 +99,37 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
             device: dev.clone(),
         };
         Self {
-            data: Rc::new(data),
+            data: Arc::new(data),
             path: vec![],
             _phantom: std::marker::PhantomData,
         }
     }
 
+    /// Returns the prefix of the `VarBuilder`.
+    pub fn prefix(&self) -> String {
+        self.path.join(".")
+    }
+
+    /// Returns a new `VarBuilder` using the root path.
+    pub fn root(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            path: vec![],
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns a new `VarBuilder` with the prefix set to `prefix`.
+    pub fn set_prefix(&self, prefix: impl ToString) -> Self {
+        Self {
+            data: self.data.clone(),
+            path: vec![prefix.to_string()],
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Return a new `VarBuilder` adding `s` to the current prefix. This can be think of as `cd`
+    /// into a directory.
     pub fn push_prefix<S: ToString>(&self, s: S) -> Self {
         let mut path = self.path.clone();
         path.push(s.to_string());
@@ -109,10 +145,12 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
         self.push_prefix(s)
     }
 
+    /// The device used by default.
     pub fn device(&self) -> &Device {
         &self.data.device
     }
 
+    /// The dtype used by default.
     pub fn dtype(&self) -> DType {
         self.data.dtype
     }
@@ -123,6 +161,14 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
         } else {
             [&self.path.join("."), tensor_name].join(".")
         }
+    }
+
+    /// This returns true only if a tensor with the passed in name is available. E.g. when passed
+    /// `a`, true is returned if `prefix.a` exists but false is returned if only `prefix.a.b`
+    /// exists.
+    pub fn contains_tensor(&self, tensor_name: &str) -> bool {
+        let path = self.path(tensor_name);
+        self.data.backend.contains_tensor(&path)
     }
 
     /// Retrieve the tensor associated with the given name at the current path.
@@ -145,9 +191,14 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
 }
 
 struct Zeros;
+
 impl SimpleBackend for Zeros {
     fn get(&self, s: Shape, _: &str, _: crate::Init, dtype: DType, dev: &Device) -> Result<Tensor> {
         Tensor::zeros(s, dtype, dev)
+    }
+
+    fn contains_tensor(&self, _name: &str) -> bool {
+        true
     }
 }
 
@@ -179,6 +230,10 @@ impl SimpleBackend for HashMap<String, Tensor> {
         }
         tensor.to_device(dev)?.to_dtype(dtype)
     }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
 }
 
 impl SimpleBackend for VarMap {
@@ -191,6 +246,10 @@ impl SimpleBackend for VarMap {
         dev: &Device,
     ) -> Result<Tensor> {
         VarMap::get(self, s, name, h, dtype, dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.data().lock().unwrap().contains_key(name)
     }
 }
 
@@ -228,6 +287,10 @@ impl<'a> SimpleBackend for SafeTensorWithRouting<'a> {
         }
         Ok(tensor)
     }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.routing.contains_key(name)
+    }
 }
 
 impl SimpleBackend for candle::npy::NpzTensors {
@@ -257,6 +320,95 @@ impl SimpleBackend for candle::npy::NpzTensors {
         }
         Ok(tensor)
     }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).map_or(false, |v| v.is_some())
+    }
+}
+
+impl SimpleBackend for candle::pickle::PthTensors {
+    fn get(
+        &self,
+        s: Shape,
+        path: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        let tensor = match self.get(path)? {
+            None => Err(Error::CannotFindTensor {
+                path: path.to_string(),
+            }
+            .bt())?,
+            Some(tensor) => tensor,
+        };
+        let tensor = tensor.to_device(dev)?.to_dtype(dtype)?;
+        if tensor.shape() != &s {
+            Err(candle::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {path}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).map_or(false, |v| v.is_some())
+    }
+}
+
+impl SimpleBackend for candle::safetensors::MmapedSafetensors {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
+        if tensor.shape() != &s {
+            Err(candle::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).is_ok()
+    }
+}
+
+impl SimpleBackend for candle::safetensors::BufferedSafetensors {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
+        if tensor.shape() != &s {
+            Err(candle::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).is_ok()
+    }
 }
 
 impl<'a> VarBuilder<'a> {
@@ -267,65 +419,86 @@ impl<'a> VarBuilder<'a> {
             device,
         };
         Self {
-            data: Rc::new(data),
+            data: Arc::new(data),
             path: vec![],
             _phantom: std::marker::PhantomData,
         }
     }
 
+    /// Initializes a `VarBuilder` that uses zeros for any tensor.
     pub fn zeros(dtype: DType, dev: &Device) -> Self {
         Self::new(Box::new(Zeros), dtype, dev.clone())
     }
 
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a hashtable. An error is
+    /// returned if no tensor is available under the requested path or on shape mismatches.
     pub fn from_tensors(ts: HashMap<String, Tensor>, dtype: DType, dev: &Device) -> Self {
         Self::new(Box::new(ts), dtype, dev.clone())
     }
 
+    /// Initializes a `VarBuilder` using a `VarMap`. The requested tensors are created and
+    /// initialized on new paths, the same tensor is used if the same path is requested multiple
+    /// times. This is commonly used when initializing a model before training.
+    ///
+    /// Note that it is possible to load the tensor values after model creation using the `load`
+    /// method on `varmap`, this can be used to start model training from an existing checkpoint.
     pub fn from_varmap(varmap: &VarMap, dtype: DType, dev: &Device) -> Self {
         Self::new(Box::new(varmap.clone()), dtype, dev.clone())
     }
 
-    pub fn from_safetensors(safetensors: Vec<SafeTensors<'a>>, dtype: DType, dev: &Device) -> Self {
-        let mut routing = HashMap::new();
-        for (index, sf) in safetensors.iter().enumerate() {
-            for k in sf.names() {
-                routing.insert(k.to_string(), index);
-            }
-        }
-        let tensors = SafeTensorWithRouting {
-            routing,
-            safetensors,
-        };
-        Self::new(Box::new(tensors), dtype, dev.clone())
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
+    /// files.
+    ///
+    /// # Safety
+    ///
+    /// The unsafe is inherited from [`memmap2::MmapOptions`].
+    pub unsafe fn from_mmaped_safetensors<P: AsRef<std::path::Path>>(
+        paths: &[P],
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Self> {
+        let tensors = candle::safetensors::MmapedSafetensors::multi(paths)?;
+        Ok(Self::new(Box::new(tensors), dtype, dev.clone()))
     }
 
+    /// Initializes a `VarBuilder` from a binary builder in the safetensor format.
+    pub fn from_buffered_safetensors(data: Vec<u8>, dtype: DType, dev: &Device) -> Result<Self> {
+        let tensors = candle::safetensors::BufferedSafetensors::new(data)?;
+        Ok(Self::new(Box::new(tensors), dtype, dev.clone()))
+    }
+
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a numpy npz file.
     pub fn from_npz<P: AsRef<std::path::Path>>(p: P, dtype: DType, dev: &Device) -> Result<Self> {
         let npz = candle::npy::NpzTensors::new(p)?;
         Ok(Self::new(Box::new(npz), dtype, dev.clone()))
     }
+
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a pytorch pth file.
+    pub fn from_pth<P: AsRef<std::path::Path>>(p: P, dtype: DType, dev: &Device) -> Result<Self> {
+        let pth = candle::pickle::PthTensors::new(p)?;
+        Ok(Self::new(Box::new(pth), dtype, dev.clone()))
+    }
 }
 
-pub struct ShardedSafeTensors<'a>(SafeTensorWithRouting<'a>);
-pub type ShardedVarBuilder<'a> = VarBuilderArgs<'a, ShardedSafeTensors<'a>>;
+pub struct ShardedSafeTensors(candle::safetensors::MmapedSafetensors);
 
-impl<'a> ShardedSafeTensors<'a> {
-    pub fn var_builder(
-        safetensors: Vec<SafeTensors<'a>>,
+pub type ShardedVarBuilder<'a> = VarBuilderArgs<'a, ShardedSafeTensors>;
+
+impl ShardedSafeTensors {
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
+    /// files and make them usable in a sharded way.
+    ///
+    /// # Safety
+    ///
+    /// The unsafe is inherited from [`memmap2::MmapOptions`].
+    pub unsafe fn var_builder<P: AsRef<std::path::Path>>(
+        paths: &[P],
         dtype: DType,
         dev: &Device,
-    ) -> ShardedVarBuilder<'a> {
-        let mut routing = HashMap::new();
-        for (index, sf) in safetensors.iter().enumerate() {
-            for k in sf.names() {
-                routing.insert(k.to_string(), index);
-            }
-        }
-        let tensors = SafeTensorWithRouting {
-            routing,
-            safetensors,
-        };
+    ) -> Result<ShardedVarBuilder<'static>> {
+        let tensors = candle::safetensors::MmapedSafetensors::multi(paths)?;
         let backend = ShardedSafeTensors(tensors);
-        VarBuilderArgs::new_with_args(backend, dtype, dev)
+        Ok(VarBuilderArgs::new_with_args(backend, dtype, dev))
     }
 }
 
@@ -357,34 +530,29 @@ impl Default for Shard {
 /// `get_sharded("tensor", 0, 0, 2)` means `tensor.i((..512))`
 /// `get_sharded("tensor", 0, 1, 2)` means `tensor.i((512..))`
 /// `get_sharded("tensor", 1, 0, 2)` means `tensor.i((.., ..512))`
-impl<'a> Backend for ShardedSafeTensors<'a> {
+impl Backend for ShardedSafeTensors {
     type Hints = Shard;
 
     fn get(
         &self,
-        _target_shape: Shape, // The size is not checked for ShardedTensors
+        target_shape: Shape, // The size is only checked when the world size is 1.
         path: &str,
         h: Self::Hints,
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor> {
+        if h.world_size == 1 {
+            // There is no sharding to be applied here so we use the default backend to speed
+            // things up.
+            return SimpleBackend::get(&self.0, target_shape, path, Default::default(), dtype, dev);
+        }
+
         let Shard {
             dim,
             rank,
             world_size,
         } = h;
-        let SafeTensorWithRouting {
-            routing,
-            safetensors,
-        } = &self.0;
-        let index = routing.get(path).ok_or_else(|| {
-            Error::CannotFindTensor {
-                path: path.to_string(),
-            }
-            .bt()
-        })?;
-
-        let view = safetensors[*index].tensor(path)?;
+        let view = self.0.get(path)?;
         let view_dtype = view.dtype();
         let mut shape = view.shape().to_vec();
         let size = shape[dim];
@@ -424,5 +592,9 @@ impl<'a> Backend for ShardedSafeTensors<'a> {
         let view_dtype: DType = view_dtype.try_into()?;
         let raw: Vec<u8> = iterator.into_iter().flatten().cloned().collect();
         Tensor::from_raw_buffer(&raw, view_dtype, &shape, dev)?.to_dtype(dtype)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.0.get(name).is_ok()
     }
 }

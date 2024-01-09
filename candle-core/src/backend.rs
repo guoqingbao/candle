@@ -15,6 +15,8 @@ pub trait BackendStorage: Sized {
 
     fn affine(&self, _: &Layout, _: f64, _: f64) -> Result<Self>;
 
+    fn powf(&self, _: &Layout, _: f64) -> Result<Self>;
+
     fn elu(&self, _: &Layout, _: f64) -> Result<Self>;
 
     fn reduce_op(&self, _: ReduceOp, _: &Layout, _: &[usize]) -> Result<Self>;
@@ -37,6 +39,14 @@ pub trait BackendStorage: Sized {
         _params: &crate::conv::ParamsConv1D,
     ) -> Result<Self>;
 
+    fn conv_transpose1d(
+        &self,
+        _l: &Layout,
+        _kernel: &Self,
+        _kernel_l: &Layout,
+        _params: &crate::conv::ParamsConvTranspose1D,
+    ) -> Result<Self>;
+
     fn conv2d(
         &self,
         _l: &Layout,
@@ -55,6 +65,7 @@ pub trait BackendStorage: Sized {
 
     fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self>;
     fn max_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self>;
+    fn upsample_nearest1d(&self, _: &Layout, _: usize) -> Result<Self>;
     fn upsample_nearest2d(&self, _: &Layout, _: usize, _: usize) -> Result<Self>;
 
     fn gather(&self, _: &Layout, _: &Self, _: &Layout, _: usize) -> Result<Self>;
@@ -108,4 +119,6 @@ pub trait BackendDevice: Sized + std::fmt::Debug + Clone {
     fn rand_uniform(&self, _: &Shape, _: DType, _: f64, _: f64) -> Result<Self::Storage>;
 
     fn rand_normal(&self, _: &Shape, _: DType, _: f64, _: f64) -> Result<Self::Storage>;
+
+    fn set_seed(&self, _: u64) -> Result<()>;
 }

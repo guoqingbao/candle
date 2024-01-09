@@ -10,9 +10,14 @@
 
 # Reference Guide
 
-- [Running a model](inference/README.md)
+- [Running a model](inference/inference.md)
     - [Using the hub](inference/hub.md)
-- [Error management]()
+- [Error management](error_manage.md)
+- [Training](training/training.md)
+    - [Simplified](training/simplified.md)
+    - [MNIST](training/mnist.md)
+    - [Fine-tuning]()
+    - [Serialization]()
 - [Advanced Cuda usage]()
     - [Writing a custom kernel]()
     - [Porting a custom kernel]()
@@ -21,7 +26,3 @@
     - [Creating a WASM app]()
     - [Creating a REST api webserver]()
     - [Creating a desktop Tauri app]()
-- [Training]()
-    - [MNIST]()
-    - [Fine-tuning]()
-    - [Serialization]()

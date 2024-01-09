@@ -59,8 +59,7 @@ fn dft<T: Float>(inp: &[T]) -> Vec<T> {
     let n = inp.len();
     let two_pi = T::PI() + T::PI();
 
-    let mut out = Vec::new();
-    out.reserve(2 * n);
+    let mut out = Vec::with_capacity(2 * n);
     let n_t = T::from(n).unwrap();
     for k in 0..n {
         let k_t = T::from(k).unwrap();
@@ -168,7 +167,7 @@ fn log_mel_spectrogram_<T: Float + std::fmt::Display>(
     let n_len = samples.len() / fft_step;
 
     // pad audio with at least one extra chunk of zeros
-    let pad = 100 * worker::CHUNK_LENGTH / 2;
+    let pad = 100 * worker::m::CHUNK_LENGTH / 2;
     let n_len = if n_len % pad != 0 {
         (n_len / pad + 1) * pad
     } else {
@@ -200,15 +199,16 @@ fn log_mel_spectrogram_<T: Float + std::fmt::Display>(
 }
 
 pub fn pcm_to_mel<T: Float + std::fmt::Display>(
+    cfg: &worker::m::Config,
     samples: &[T],
     filters: &[T],
 ) -> anyhow::Result<Vec<T>> {
     let mel = log_mel_spectrogram_(
         samples,
         filters,
-        worker::N_FFT,
-        worker::HOP_LENGTH,
-        worker::N_MELS,
+        worker::m::N_FFT,
+        worker::m::HOP_LENGTH,
+        cfg.num_mel_bins,
         false,
     );
     Ok(mel)

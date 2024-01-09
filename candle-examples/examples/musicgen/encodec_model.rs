@@ -1,7 +1,6 @@
-use crate::nn::{conv1d, conv1d_weight_norm, Conv1d, Conv1dConfig, VarBuilder};
-use anyhow::Result;
-use candle::{DType, IndexOp, Tensor};
-use candle_nn::Module;
+use crate::nn::conv1d_weight_norm;
+use candle::{DType, IndexOp, Module, Result, Tensor};
+use candle_nn::{conv1d, Conv1d, Conv1dConfig, VarBuilder};
 
 // Encodec Model
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/encodec/modeling_encodec.py
@@ -9,6 +8,7 @@ use candle_nn::Module;
 #[derive(Debug, Clone, PartialEq)]
 enum NormType {
     WeightNorm,
+    TimeGroupNorm,
     None,
 }
 
@@ -183,7 +183,7 @@ impl EncodecResidualVectorQuantizer {
     fn decode(&self, codes: &Tensor) -> Result<Tensor> {
         let mut quantized_out = Tensor::zeros((), DType::F32, codes.device())?;
         if codes.dim(0)? != self.layers.len() {
-            anyhow::bail!(
+            candle::bail!(
                 "codes shape {:?} does not match the number of quantization layers {}",
                 codes.shape(),
                 self.layers.len()
@@ -200,25 +200,34 @@ impl EncodecResidualVectorQuantizer {
 // https://github.com/huggingface/transformers/blob/abaca9f9432a84cfaa95531de4c72334f38a42f2/src/transformers/models/encodec/modeling_encodec.py#L226
 #[derive(Debug)]
 struct EncodecLSTM {
-    layers: Vec<(Tensor, Tensor, Tensor, Tensor)>,
+    layers: Vec<candle_nn::LSTM>,
 }
 
 impl EncodecLSTM {
     fn load(dim: usize, vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let vb = &vb.pp("lstm");
         let mut layers = vec![];
-        for i in 0..cfg.num_lstm_layers {
-            let w_hh = vb.get((4 * dim, dim), &format!("weight_hh_l{i}"))?;
-            let w_ih = vb.get((4 * dim, dim), &format!("weight_ih_l{i}"))?;
-            let b_hh = vb.get(4 * dim, &format!("bias_hh_l{i}"))?;
-            let b_ih = vb.get(4 * dim, &format!("bias_ih_l{i}"))?;
-            layers.push((w_hh, w_ih, b_hh, b_ih))
+        for layer_idx in 0..cfg.num_lstm_layers {
+            let config = candle_nn::LSTMConfig {
+                layer_idx,
+                ..Default::default()
+            };
+            let lstm = candle_nn::lstm(dim, dim, config, vb.clone())?;
+            layers.push(lstm)
         }
         Ok(Self { layers })
     }
+}
 
-    fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
-        todo!()
+impl Module for EncodecLSTM {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        use candle_nn::RNN;
+        let mut xs = xs.clone();
+        for layer in self.layers.iter() {
+            let states = layer.seq(&xs)?;
+            xs = layer.states_to_tensor(&states)?;
+        }
+        Ok(xs)
     }
 }
 
@@ -248,7 +257,9 @@ impl EncodecConvTranspose1d {
             bias,
         })
     }
+}
 
+impl Module for EncodecConvTranspose1d {
     fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
         todo!()
     }
@@ -258,6 +269,7 @@ impl EncodecConvTranspose1d {
 struct EncodecConv1d {
     causal: bool,
     conv: Conv1d,
+    norm: Option<candle_nn::GroupNorm>,
 }
 
 impl EncodecConv1d {
@@ -278,10 +290,11 @@ impl EncodecConv1d {
                     padding: 0,
                     stride,
                     groups: 1,
+                    dilation: 1,
                 },
                 vb.pp("conv"),
             )?,
-            NormType::None => conv1d(
+            NormType::None | NormType::TimeGroupNorm => conv1d(
                 in_c,
                 out_c,
                 kernel_size,
@@ -289,21 +302,34 @@ impl EncodecConv1d {
                     padding: 0,
                     stride,
                     groups: 1,
+                    dilation: 1,
                 },
                 vb.pp("conv"),
             )?,
         };
+        let norm = match cfg.norm_type {
+            NormType::None | NormType::WeightNorm => None,
+            NormType::TimeGroupNorm => {
+                let gn = candle_nn::group_norm(1, out_c, 1e-5, vb.pp("norm"))?;
+                Some(gn)
+            }
+        };
         Ok(Self {
             causal: cfg.use_causal_conv,
             conv,
+            norm,
         })
     }
+}
 
+impl Module for EncodecConv1d {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         // TODO: padding, depending on causal.
         let xs = self.conv.forward(xs)?;
-        // If we add support for NormType "time_group_norm", we should add some normalization here.
-        Ok(xs)
+        match &self.norm {
+            None => Ok(xs),
+            Some(norm) => xs.apply(norm),
+        }
     }
 }
 
@@ -319,7 +345,7 @@ impl EncodecResnetBlock {
         let h = dim / cfg.compress;
         let mut layer = Layer::new(vb.pp("block"));
         if dilations.len() != 2 {
-            anyhow::bail!("expected dilations of size 2")
+            candle::bail!("expected dilations of size 2")
         }
         // TODO: Apply dilations!
         layer.inc();
@@ -339,7 +365,9 @@ impl EncodecResnetBlock {
             shortcut,
         })
     }
+}
 
+impl Module for EncodecResnetBlock {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let residual = xs.clone();
         let xs = xs.elu(1.)?;
@@ -438,8 +466,17 @@ impl EncodecEncoder {
         })
     }
 
-    fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
-        todo!()
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut xs = xs.apply(&self.init_conv)?;
+        for (resnets, conv) in self.sampling_layers.iter() {
+            for resnet in resnets.iter() {
+                xs = xs.apply(resnet)?;
+            }
+            xs = xs.elu(1.0)?.apply(conv)?;
+        }
+        xs.apply(&self.final_lstm)?
+            .elu(1.0)?
+            .apply(&self.final_conv)
     }
 }
 
@@ -506,8 +543,15 @@ impl EncodecDecoder {
         })
     }
 
-    fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
-        todo!()
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut xs = xs.apply(&self.init_conv)?.apply(&self.init_lstm)?;
+        for (conv, resnets) in self.sampling_layers.iter() {
+            xs = xs.elu(1.)?.apply(conv)?;
+            for resnet in resnets.iter() {
+                xs = xs.apply(resnet)?
+            }
+        }
+        xs.elu(1.)?.apply(&self.final_conv)
     }
 }
 

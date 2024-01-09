@@ -52,9 +52,12 @@ mod device;
 pub mod display;
 mod dtype;
 mod dummy_cuda_backend;
+mod dummy_metal_backend;
 pub mod error;
 mod indexer;
 pub mod layout;
+#[cfg(feature = "metal")]
+pub mod metal_backend;
 #[cfg(feature = "mkl")]
 mod mkl;
 pub mod npy;
@@ -62,6 +65,7 @@ mod op;
 pub mod pickle;
 pub mod quantized;
 pub mod safetensors;
+pub mod scalar;
 pub mod shape;
 mod storage;
 mod strided_index;
@@ -92,8 +96,53 @@ pub use gcu_backend::{GcuDevice, GcuStorage};
 #[cfg(not(feature = "cuda"))]
 pub use dummy_cuda_backend::{CudaDevice, CudaStorage};
 
+#[cfg(feature = "metal")]
+pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
+
+#[cfg(not(feature = "metal"))]
+pub use dummy_metal_backend::{MetalDevice, MetalError, MetalStorage};
+
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;
 
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
+
+pub trait ToUsize2 {
+    fn to_usize2(self) -> (usize, usize);
+}
+
+impl ToUsize2 for usize {
+    fn to_usize2(self) -> (usize, usize) {
+        (self, self)
+    }
+}
+
+impl ToUsize2 for (usize, usize) {
+    fn to_usize2(self) -> (usize, usize) {
+        self
+    }
+}
+
+// A simple trait defining a module with forward method using a single argument.
+pub trait Module {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor>;
+}
+
+impl<T: Fn(&Tensor) -> Result<Tensor>> Module for T {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self(xs)
+    }
+}
+
+// A trait defining a module with forward method using a single tensor argument and a flag to
+// separate the training and evaluation behaviors.
+pub trait ModuleT {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Result<Tensor>;
+}
+
+impl<M: Module> ModuleT for M {
+    fn forward_t(&self, xs: &Tensor, _train: bool) -> Result<Tensor> {
+        self.forward(xs)
+    }
+}

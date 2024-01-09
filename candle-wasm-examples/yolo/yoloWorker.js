@@ -1,5 +1,18 @@
 //load the candle yolo wasm module
-import init, { Model } from "./build/m.js";
+import init, { Model, ModelPose } from "./build/m.js";
+
+async function fetchArrayBuffer(url) {
+  const cacheName = "yolo-candle-cache";
+  const cache = await caches.open(cacheName);
+  const cachedResponse = await cache.match(url);
+  if (cachedResponse) {
+    const data = await cachedResponse.arrayBuffer();
+    return new Uint8Array(data);
+  }
+  const res = await fetch(url, { cache: "force-cache" });
+  cache.put(url, res.clone());
+  return new Uint8Array(await res.arrayBuffer());
+}
 
 class Yolo {
   static instance = {};
@@ -11,10 +24,13 @@ class Yolo {
       await init();
 
       self.postMessage({ status: `loading model ${modelID}:${modelSize}` });
-      const modelRes = await fetch(modelURL);
-      const yoloArrayBuffer = await modelRes.arrayBuffer();
-      const weightsArrayU8 = new Uint8Array(yoloArrayBuffer);
-      this.instance[modelID] = new Model(weightsArrayU8, modelSize);
+      const weightsArrayU8 = await fetchArrayBuffer(modelURL);
+      if (/pose/.test(modelID)) {
+        // if pose model, use ModelPose
+        this.instance[modelID] = new ModelPose(weightsArrayU8, modelSize);
+      } else {
+        this.instance[modelID] = new Model(weightsArrayU8, modelSize);
+      }
     } else {
       self.postMessage({ status: "model already loaded" });
     }

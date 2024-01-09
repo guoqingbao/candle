@@ -8,8 +8,8 @@ mod model;
 use model::{Multiples, YoloV8, YoloV8Pose};
 
 use candle::{DType, Device, IndexOp, Result, Tensor};
-use candle_examples::object_detection::{non_maximum_suppression, Bbox, KeyPoint};
 use candle_nn::{Module, VarBuilder};
+use candle_transformers::object_detection::{non_maximum_suppression, Bbox, KeyPoint};
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
 
@@ -61,10 +61,11 @@ pub fn report_detect(
     nms_threshold: f32,
     legend_size: u32,
 ) -> Result<DynamicImage> {
+    let pred = pred.to_device(&Device::Cpu)?;
     let (pred_size, npreds) = pred.dims2()?;
     let nclasses = pred_size - 4;
     // The bounding boxes grouped by (maximum) class index.
-    let mut bboxes: Vec<Vec<Bbox>> = (0..nclasses).map(|_| vec![]).collect();
+    let mut bboxes: Vec<Vec<Bbox<Vec<KeyPoint>>>> = (0..nclasses).map(|_| vec![]).collect();
     // Extract the bounding boxes for which confidence is above the threshold.
     for index in 0..npreds {
         let pred = Vec::<f32>::try_from(pred.i((.., index))?)?;
@@ -83,7 +84,7 @@ pub fn report_detect(
                     xmax: pred[0] + pred[2] / 2.,
                     ymax: pred[1] + pred[3] / 2.,
                     confidence,
-                    keypoints: vec![],
+                    data: vec![],
                 };
                 bboxes[class_index].push(bbox)
             }
@@ -153,6 +154,7 @@ pub fn report_pose(
     confidence_threshold: f32,
     nms_threshold: f32,
 ) -> Result<DynamicImage> {
+    let pred = pred.to_device(&Device::Cpu)?;
     let (pred_size, npreds) = pred.dims2()?;
     if pred_size != 17 * 3 + 4 + 1 {
         candle::bail!("unexpected pred-size {pred_size}");
@@ -176,7 +178,7 @@ pub fn report_pose(
                 xmax: pred[0] + pred[2] / 2.,
                 ymax: pred[1] + pred[3] / 2.,
                 confidence,
-                keypoints,
+                data: keypoints,
             };
             bboxes.push(bbox)
         }
@@ -204,7 +206,7 @@ pub fn report_pose(
                 image::Rgb([255, 0, 0]),
             );
         }
-        for kp in b.keypoints.iter() {
+        for kp in b.data.iter() {
             if kp.mask < 0.6 {
                 continue;
             }
@@ -219,8 +221,8 @@ pub fn report_pose(
         }
 
         for &(idx1, idx2) in KP_CONNECTIONS.iter() {
-            let kp1 = &b.keypoints[idx1];
-            let kp2 = &b.keypoints[idx2];
+            let kp1 = &b.data[idx1];
+            let kp2 = &b.data[idx2];
             if kp1.mask < 0.6 || kp2.mask < 0.6 {
                 continue;
             }
@@ -253,6 +255,14 @@ enum YoloTask {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// Run on CPU rather than on GPU.
+    #[arg(long)]
+    cpu: bool,
+
+    /// Enable tracing (generates a trace-timestamp.json file).
+    #[arg(long)]
+    tracing: bool,
+
     /// Model weights, in safetensors format.
     #[arg(long)]
     model: Option<String>,
@@ -363,6 +373,7 @@ impl Task for YoloV8Pose {
 }
 
 pub fn run<T: Task>(args: Args) -> anyhow::Result<()> {
+    let device = candle_examples::device(args.cpu)?;
     // Create the model and load the weights from the file.
     let multiples = match args.which {
         Which::N => Multiples::n(),
@@ -372,9 +383,7 @@ pub fn run<T: Task>(args: Args) -> anyhow::Result<()> {
         Which::X => Multiples::x(),
     };
     let model = args.model()?;
-    let weights = unsafe { candle::safetensors::MmapedFile::new(model)? };
-    let weights = weights.deserialize()?;
-    let vb = VarBuilder::from_safetensors(vec![weights], DType::F32, &Device::Cpu);
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model], DType::F32, &device)? };
     let model = T::load(vb, multiples)?;
     println!("model loaded");
     for image_name in args.images.iter() {
@@ -405,7 +414,7 @@ pub fn run<T: Task>(args: Args) -> anyhow::Result<()> {
             Tensor::from_vec(
                 data,
                 (img.height() as usize, img.width() as usize, 3),
-                &Device::Cpu,
+                &device,
             )?
             .permute((2, 0, 1))?
         };
@@ -430,7 +439,19 @@ pub fn run<T: Task>(args: Args) -> anyhow::Result<()> {
 }
 
 pub fn main() -> anyhow::Result<()> {
+    use tracing_chrome::ChromeLayerBuilder;
+    use tracing_subscriber::prelude::*;
+
     let args = Args::parse();
+
+    let _guard = if args.tracing {
+        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
+        tracing_subscriber::registry().with(chrome_layer).init();
+        Some(guard)
+    } else {
+        None
+    };
+
     match args.task {
         YoloTask::Detect => run::<YoloV8>(args)?,
         YoloTask::Pose => run::<YoloV8Pose>(args)?,

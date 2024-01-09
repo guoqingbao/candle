@@ -7,6 +7,8 @@ pub mod gguf_file;
 pub mod k_quants;
 #[cfg(target_feature = "neon")]
 pub mod neon;
+#[cfg(target_feature = "simd128")]
+pub mod simd128;
 pub mod utils;
 
 pub use k_quants::GgmlType;
@@ -229,12 +231,40 @@ impl QTensor {
     }
 }
 
-#[derive(Debug)]
-pub struct QMatMul(QTensor);
+#[derive(Clone, Debug)]
+pub enum QMatMul {
+    QTensor(std::sync::Arc<QTensor>),
+    Tensor(Tensor),
+}
+
+thread_local! {
+    static DEQUANTIZE_ALL: bool = {
+        match std::env::var("CANDLE_DEQUANTIZE_ALL") {
+            Ok(s) => {
+                !s.is_empty() && s != "0"
+            },
+            Err(_) => false,
+        }
+    }
+}
 
 impl QMatMul {
-    pub fn from_qtensor(qtensor: QTensor) -> Self {
-        Self(qtensor)
+    pub fn from_arc(qtensor: std::sync::Arc<QTensor>) -> Result<Self> {
+        let dequantize = match qtensor.dtype() {
+            GgmlDType::F32 | GgmlDType::F16 => true,
+            _ => DEQUANTIZE_ALL.with(|b| *b),
+        };
+        let t = if dequantize {
+            let tensor = qtensor.dequantize(&Device::Cpu)?;
+            Self::Tensor(tensor)
+        } else {
+            Self::QTensor(qtensor)
+        };
+        Ok(t)
+    }
+
+    pub fn from_qtensor(qtensor: QTensor) -> Result<Self> {
+        Self::from_arc(std::sync::Arc::new(qtensor))
     }
 }
 
@@ -277,8 +307,18 @@ impl crate::CustomOp1 for QTensor {
     }
 }
 
-impl QMatMul {
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.apply_op1_no_bwd(&self.0)
+impl crate::Module for QMatMul {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::QTensor(t) => xs.apply_op1_no_bwd(t.as_ref()),
+            Self::Tensor(w) => {
+                let w = match *xs.dims() {
+                    [b1, b2, _, _] => w.broadcast_left((b1, b2))?.t()?,
+                    [bsize, _, _] => w.broadcast_left(bsize)?.t()?,
+                    _ => w.t()?,
+                };
+                xs.matmul(&w)
+            }
+        }
     }
 }

@@ -1,8 +1,8 @@
 use crate::model::{Cache, Config, Llama};
 use byteorder::{LittleEndian, ReadBytesExt};
-use candle::{DType, Device, IndexOp, Result, Shape, Tensor, D};
-use candle_nn::{ops::softmax, VarBuilder};
-use rand::{distributions::Distribution, SeedableRng};
+use candle::{DType, Device, IndexOp, Result, Shape, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::generation::LogitsProcessor;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 use wasm_bindgen::prelude::*;
@@ -24,7 +24,7 @@ macro_rules! console_log {
 }
 
 // Communication to the worker happens through bincode, the model weights and configs are fetched
-// on the main thread and transfered via the following structure.
+// on the main thread and transferred via the following structure.
 #[derive(Serialize, Deserialize)]
 pub struct ModelData {
     pub tokenizer: Vec<u8>,
@@ -49,45 +49,11 @@ fn read_tensor<R: std::io::Read, S: Into<Shape>>(
     Ok(tensor)
 }
 
-struct Model {
-    cache: Cache,
-    config: Config,
-    llama: Llama,
-    tokenizer: Tokenizer,
-}
-
-pub struct LogitsProcessor {
-    rng: rand::rngs::StdRng,
-    temperature: Option<f64>,
-}
-
-impl LogitsProcessor {
-    pub fn new(seed: u64, temperature: Option<f64>) -> Self {
-        Self {
-            rng: rand::rngs::StdRng::seed_from_u64(seed),
-            temperature,
-        }
-    }
-
-    pub fn sample(&mut self, logits: &Tensor) -> Result<u32> {
-        let logits = logits.to_dtype(DType::F32)?;
-        let next_token = if let Some(temperature) = self.temperature {
-            let prs = softmax(&(&logits / temperature)?, D::Minus1)?;
-            let prs: Vec<f32> = prs.to_vec1()?;
-            let distr =
-                rand::distributions::WeightedIndex::new(prs).map_err(candle::Error::wrap)?;
-            distr.sample(&mut self.rng) as u32
-        } else {
-            let logits_v: Vec<f32> = logits.to_vec1()?;
-            logits_v
-                .iter()
-                .enumerate()
-                .max_by(|(_, u), (_, v)| u.total_cmp(v))
-                .map(|(i, _)| i as u32)
-                .unwrap()
-        };
-        Ok(next_token)
-    }
+pub struct Model {
+    pub cache: Cache,
+    pub config: Config,
+    pub llama: Llama,
+    pub tokenizer: Tokenizer,
 }
 
 impl Model {
@@ -96,12 +62,18 @@ impl Model {
         link: &WorkerLink<Worker>,
         id: HandlerId,
         temp: f64,
+        top_p: f64,
         prompt: String,
     ) -> Result<()> {
         let dev = Device::Cpu;
         let temp = if temp <= 0. { None } else { Some(temp) };
-        console_log!("{temp:?} {prompt}");
-        let mut logits_processor = LogitsProcessor::new(299792458, temp);
+        let top_p = if top_p <= 0. || top_p >= 1.0 {
+            None
+        } else {
+            Some(top_p)
+        };
+        console_log!("temp: {temp:?} top_p: {top_p:?} prompt: {prompt}");
+        let mut logits_processor = LogitsProcessor::new(299792458, temp, top_p);
         let mut index_pos = 0;
         let mut tokens = self
             .tokenizer
@@ -275,7 +247,7 @@ impl TransformerWeights {
 }
 
 impl Model {
-    fn load(md: ModelData) -> Result<Self> {
+    pub fn load(md: ModelData) -> Result<Self> {
         let dev = Device::Cpu;
         let mut model = std::io::Cursor::new(md.model);
         let config = Config::from_reader(&mut model)?;
@@ -302,7 +274,7 @@ pub struct Worker {
 #[derive(Serialize, Deserialize)]
 pub enum WorkerInput {
     ModelData(ModelData),
-    Run(f64, String),
+    Run(f64, f64, String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -335,7 +307,7 @@ impl yew_agent::Worker for Worker {
                 }
                 Err(err) => Err(format!("model creation error {err:?}")),
             },
-            WorkerInput::Run(temp, prompt) => match &mut self.model {
+            WorkerInput::Run(temp, top_p, prompt) => match &mut self.model {
                 None => Err("model has not been set yet".to_string()),
                 Some(model) => {
                     {
@@ -345,7 +317,7 @@ impl yew_agent::Worker for Worker {
                         }
                     }
                     let result = model
-                        .run(&self.link, id, temp, prompt)
+                        .run(&self.link, id, temp, top_p, prompt)
                         .map_err(|e| e.to_string());
                     Ok(WorkerOutput::GenerationDone(result))
                 }

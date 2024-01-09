@@ -10,41 +10,56 @@ extern crate accelerate_src;
 extern crate intel_mkl_src;
 
 use anyhow::{Error as E, Result};
-use candle::{DType, Device, IndexOp, Tensor};
+use candle::{Device, IndexOp, Tensor};
 use candle_nn::{ops::softmax, VarBuilder};
 use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use rand::{distributions::Distribution, SeedableRng};
 use tokenizers::Tokenizer;
 
-mod audio;
-mod model;
-use model::{Config, Whisper};
 mod multilingual;
+use candle_transformers::models::whisper::{self as m, audio, Config};
 
-const DTYPE: DType = DType::F32;
+pub enum Model {
+    Normal(m::model::Whisper),
+    Quantized(m::quantized_model::Whisper),
+}
 
-// Audio parameters.
-const SAMPLE_RATE: usize = 16000;
-const N_FFT: usize = 400;
-const N_MELS: usize = 80;
-const HOP_LENGTH: usize = 160;
-const CHUNK_LENGTH: usize = 30;
-const N_SAMPLES: usize = CHUNK_LENGTH * SAMPLE_RATE; // 480000 samples in a 30-second chunk
-const N_FRAMES: usize = N_SAMPLES / HOP_LENGTH; // 3000 frames in a mel spectrogram input
+// Maybe we should use some traits rather than doing the dispatch for all these.
+impl Model {
+    pub fn config(&self) -> &Config {
+        match self {
+            Self::Normal(m) => &m.config,
+            Self::Quantized(m) => &m.config,
+        }
+    }
 
-const NO_SPEECH_THRESHOLD: f64 = 0.6;
-const LOGPROB_THRESHOLD: f64 = -1.0;
-const TEMPERATURES: [f64; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
-const COMPRESSION_RATIO_THRESHOLD: f64 = 2.4;
+    pub fn encoder_forward(&mut self, x: &Tensor, flush: bool) -> candle::Result<Tensor> {
+        match self {
+            Self::Normal(m) => m.encoder.forward(x, flush),
+            Self::Quantized(m) => m.encoder.forward(x, flush),
+        }
+    }
 
-// Tokenizer dependent bits.
-const SOT_TOKEN: &str = "<|startoftranscript|>";
-const TRANSCRIBE_TOKEN: &str = "<|transcribe|>";
-const TRANSLATE_TOKEN: &str = "<|translate|>";
-const NO_TIMESTAMPS_TOKEN: &str = "<|notimestamps|>";
-const EOT_TOKEN: &str = "<|endoftext|>";
-const NO_SPEECH_TOKEN: &str = "<|nocaptions|>";
+    pub fn decoder_forward(
+        &mut self,
+        x: &Tensor,
+        xa: &Tensor,
+        flush: bool,
+    ) -> candle::Result<Tensor> {
+        match self {
+            Self::Normal(m) => m.decoder.forward(x, xa, flush),
+            Self::Quantized(m) => m.decoder.forward(x, xa, flush),
+        }
+    }
+
+    pub fn decoder_final_linear(&self, x: &Tensor) -> candle::Result<Tensor> {
+        match self {
+            Self::Normal(m) => m.decoder.final_linear(x),
+            Self::Quantized(m) => m.decoder.final_linear(x),
+        }
+    }
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -66,7 +81,7 @@ struct Segment {
 }
 
 struct Decoder {
-    model: Whisper,
+    model: Model,
     rng: rand::rngs::StdRng,
     task: Option<Task>,
     timestamps: bool,
@@ -85,7 +100,7 @@ struct Decoder {
 impl Decoder {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        model: Whisper,
+        model: Model,
         tokenizer: Tokenizer,
         seed: u64,
         device: &Device,
@@ -94,12 +109,12 @@ impl Decoder {
         timestamps: bool,
         verbose: bool,
     ) -> Result<Self> {
-        let no_timestamps_token = token_id(&tokenizer, NO_TIMESTAMPS_TOKEN)?;
+        let no_timestamps_token = token_id(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
         // Suppress the notimestamps token when in timestamps mode.
         // https://github.com/openai/whisper/blob/e8622f9afc4eba139bf796c210f5c01081000472/whisper/decoding.py#L452
-        let suppress_tokens: Vec<f32> = (0..model.config.vocab_size as u32)
+        let suppress_tokens: Vec<f32> = (0..model.config().vocab_size as u32)
             .map(|i| {
-                if model.config.suppress_tokens.contains(&i)
+                if model.config().suppress_tokens.contains(&i)
                     || timestamps && i == no_timestamps_token
                 {
                     f32::NEG_INFINITY
@@ -109,11 +124,17 @@ impl Decoder {
             })
             .collect();
         let suppress_tokens = Tensor::new(suppress_tokens.as_slice(), device)?;
-        let sot_token = token_id(&tokenizer, SOT_TOKEN)?;
-        let transcribe_token = token_id(&tokenizer, TRANSCRIBE_TOKEN)?;
-        let translate_token = token_id(&tokenizer, TRANSLATE_TOKEN)?;
-        let eot_token = token_id(&tokenizer, EOT_TOKEN)?;
-        let no_speech_token = token_id(&tokenizer, NO_SPEECH_TOKEN)?;
+        let sot_token = token_id(&tokenizer, m::SOT_TOKEN)?;
+        let transcribe_token = token_id(&tokenizer, m::TRANSCRIBE_TOKEN)?;
+        let translate_token = token_id(&tokenizer, m::TRANSLATE_TOKEN)?;
+        let eot_token = token_id(&tokenizer, m::EOT_TOKEN)?;
+        let no_speech_token = m::NO_SPEECH_TOKENS
+            .iter()
+            .find_map(|token| token_id(&tokenizer, token).ok());
+        let no_speech_token = match no_speech_token {
+            None => anyhow::bail!("unable to find any non-speech token"),
+            Some(n) => n,
+        };
         Ok(Self {
             model,
             rng: rand::rngs::StdRng::seed_from_u64(seed),
@@ -134,11 +155,11 @@ impl Decoder {
 
     fn decode(&mut self, mel: &Tensor, t: f64) -> Result<DecodingResult> {
         let model = &mut self.model;
-        let audio_features = model.encoder.forward(mel, true)?;
+        let audio_features = model.encoder_forward(mel, true)?;
         if self.verbose {
             println!("audio features: {:?}", audio_features.dims());
         }
-        let sample_len = model.config.max_target_positions / 2;
+        let sample_len = model.config().max_target_positions / 2;
         let mut sum_logprob = 0f64;
         let mut no_speech_prob = f64::NAN;
         let mut tokens = vec![self.sot_token];
@@ -146,11 +167,8 @@ impl Decoder {
             tokens.push(language_token);
         }
         match self.task {
-            Some(Task::Transcribe) => tokens.push(self.transcribe_token),
+            None | Some(Task::Transcribe) => tokens.push(self.transcribe_token),
             Some(Task::Translate) => tokens.push(self.translate_token),
-            None => {
-                // Nothing in this case, same as the Python implementation.
-            }
         }
         if !self.timestamps {
             tokens.push(self.no_timestamps_token);
@@ -161,12 +179,12 @@ impl Decoder {
             // The model expects a batch dim but this inference loop does not handle
             // it so we add it at this point.
             let tokens_t = tokens_t.unsqueeze(0)?;
-            let ys = model.decoder.forward(&tokens_t, &audio_features, i == 0)?;
+            let ys = model.decoder_forward(&tokens_t, &audio_features, i == 0)?;
 
             // Extract the no speech probability on the first iteration by looking at the first
             // token logits and the probability for the according token.
             if i == 0 {
-                let logits = model.decoder.final_linear(&ys.i(..1)?)?.i(0)?.i(0)?;
+                let logits = model.decoder_final_linear(&ys.i(..1)?)?.i(0)?.i(0)?;
                 no_speech_prob = softmax(&logits, 0)?
                     .i(self.no_speech_token as usize)?
                     .to_scalar::<f32>()? as f64;
@@ -174,8 +192,7 @@ impl Decoder {
 
             let (_, seq_len, _) = ys.dims3()?;
             let logits = model
-                .decoder
-                .final_linear(&ys.i((..1, seq_len - 1..))?)?
+                .decoder_final_linear(&ys.i((..1, seq_len - 1..))?)?
                 .i(0)?
                 .i(0)?;
             // TODO: Besides suppress tokens, we should apply the heuristics from
@@ -204,7 +221,7 @@ impl Decoder {
             let prob = softmax(&logits, candle::D::Minus1)?
                 .i(next_token as usize)?
                 .to_scalar::<f32>()? as f64;
-            if next_token == self.eot_token || tokens.len() > model.config.max_target_positions {
+            if next_token == self.eot_token || tokens.len() > model.config().max_target_positions {
                 break;
             }
             sum_logprob += prob.ln();
@@ -223,17 +240,17 @@ impl Decoder {
     }
 
     fn decode_with_fallback(&mut self, segment: &Tensor) -> Result<DecodingResult> {
-        for (i, &t) in TEMPERATURES.iter().enumerate() {
+        for (i, &t) in m::TEMPERATURES.iter().enumerate() {
             let dr: Result<DecodingResult> = self.decode(segment, t);
-            if i == TEMPERATURES.len() - 1 {
+            if i == m::TEMPERATURES.len() - 1 {
                 return dr;
             }
             // On errors, we try again with a different temperature.
             match dr {
                 Ok(dr) => {
-                    let needs_fallback = dr.compression_ratio > COMPRESSION_RATIO_THRESHOLD
-                        || dr.avg_logprob < LOGPROB_THRESHOLD;
-                    if !needs_fallback || dr.no_speech_prob > NO_SPEECH_THRESHOLD {
+                    let needs_fallback = dr.compression_ratio > m::COMPRESSION_RATIO_THRESHOLD
+                        || dr.avg_logprob < m::LOGPROB_THRESHOLD;
+                    if !needs_fallback || dr.no_speech_prob > m::NO_SPEECH_THRESHOLD {
                         return Ok(dr);
                     }
                 }
@@ -251,13 +268,13 @@ impl Decoder {
         let mut segments = vec![];
         while seek < content_frames {
             let start = std::time::Instant::now();
-            let time_offset = (seek * HOP_LENGTH) as f64 / SAMPLE_RATE as f64;
-            let segment_size = usize::min(content_frames - seek, N_FRAMES);
+            let time_offset = (seek * m::HOP_LENGTH) as f64 / m::SAMPLE_RATE as f64;
+            let segment_size = usize::min(content_frames - seek, m::N_FRAMES);
             let mel_segment = mel.narrow(2, seek, segment_size)?;
-            let segment_duration = (segment_size * HOP_LENGTH) as f64 / SAMPLE_RATE as f64;
+            let segment_duration = (segment_size * m::HOP_LENGTH) as f64 / m::SAMPLE_RATE as f64;
             let dr = self.decode_with_fallback(&mel_segment)?;
             seek += segment_size;
-            if dr.no_speech_prob > NO_SPEECH_THRESHOLD && dr.avg_logprob < LOGPROB_THRESHOLD {
+            if dr.no_speech_prob > m::NO_SPEECH_THRESHOLD && dr.avg_logprob < m::LOGPROB_THRESHOLD {
                 println!("no speech detected, skipping {seek} {dr:?}");
                 continue;
             }
@@ -334,7 +351,7 @@ enum Task {
     Translate,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum WhichModel {
     Tiny,
     #[value(name = "tiny.en")]
@@ -350,17 +367,30 @@ enum WhichModel {
     MediumEn,
     Large,
     LargeV2,
+    LargeV3,
+    #[value(name = "distil-medium.en")]
+    DistilMediumEn,
+    #[value(name = "distil-large-v2")]
+    DistilLargeV2,
 }
 
 impl WhichModel {
     fn is_multilingual(&self) -> bool {
         match self {
-            Self::Tiny | Self::Base | Self::Small | Self::Medium | Self::Large | Self::LargeV2 => {
-                true
+            Self::Tiny
+            | Self::Base
+            | Self::Small
+            | Self::Medium
+            | Self::Large
+            | Self::LargeV2
+            | Self::LargeV3
+            | Self::DistilLargeV2 => true,
+            Self::TinyEn | Self::BaseEn | Self::SmallEn | Self::MediumEn | Self::DistilMediumEn => {
+                false
             }
-            Self::TinyEn | Self::BaseEn | Self::SmallEn | Self::MediumEn => false,
         }
     }
+
     fn model_and_revision(&self) -> (&'static str, &'static str) {
         match self {
             Self::Tiny => ("openai/whisper-tiny", "main"),
@@ -373,6 +403,9 @@ impl WhichModel {
             Self::MediumEn => ("openai/whisper-medium.en", "main"),
             Self::Large => ("openai/whisper-large", "refs/pr/36"),
             Self::LargeV2 => ("openai/whisper-large-v2", "refs/pr/57"),
+            Self::LargeV3 => ("openai/whisper-large-v3", "main"),
+            Self::DistilMediumEn => ("distil-whisper/distil-medium.en", "main"),
+            Self::DistilLargeV2 => ("distil-whisper/distil-large-v2", "main"),
         }
     }
 }
@@ -410,6 +443,9 @@ struct Args {
     #[arg(long)]
     tracing: bool,
 
+    #[arg(long)]
+    quantized: bool,
+
     /// Language.
     #[arg(long)]
     language: Option<String>,
@@ -434,7 +470,6 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let _guard = if args.tracing {
-        println!("tracing...");
         let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
         tracing_subscriber::registry().with(chrome_layer).init();
         Some(guard)
@@ -442,10 +477,13 @@ fn main() -> Result<()> {
         None
     };
     let device = candle_examples::device(args.cpu)?;
-    let (default_model, default_revision) = args.model.model_and_revision();
+    let (default_model, default_revision) = if args.quantized {
+        ("lmz/candle-whisper", "main")
+    } else {
+        args.model.model_and_revision()
+    };
     let default_model = default_model.to_string();
     let default_revision = default_revision.to_string();
-    let path = std::path::PathBuf::from(default_model.clone());
     let (model_id, revision) = match (args.model_id, args.revision) {
         (Some(model_id), Some(revision)) => (model_id, revision),
         (Some(model_id), None) => (model_id, "main".to_string()),
@@ -453,20 +491,7 @@ fn main() -> Result<()> {
         (None, None) => (default_model, default_revision),
     };
 
-    let (config_filename, tokenizer_filename, weights_filename, input) = if path.exists() {
-        let mut config_filename = path.clone();
-        config_filename.push("config.json");
-        let mut tokenizer_filename = path.clone();
-        tokenizer_filename.push("tokenizer.json");
-        let mut model_filename = path;
-        model_filename.push("model.safetensors");
-        (
-            config_filename,
-            tokenizer_filename,
-            model_filename,
-            std::path::PathBuf::from(args.input.expect("You didn't specify a file to read from yet, are using a local model, please add `--input example.wav` to read some audio file")),
-        )
-    } else {
+    let (config_filename, tokenizer_filename, weights_filename, input) = {
         let api = Api::new()?;
         let dataset = api.dataset("Narsil/candle-examples".to_string());
         let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
@@ -480,24 +505,41 @@ fn main() -> Result<()> {
             println!("No audio file submitted: Downloading https://huggingface.co/datasets/Narsil/candle_demo/blob/main/samples_jfk.wav");
             dataset.get("samples_jfk.wav")?
         };
-        (
-            repo.get("config.json")?,
-            repo.get("tokenizer.json")?,
-            repo.get("model.safetensors")?,
-            sample,
-        )
+        let (config, tokenizer, model) = if args.quantized {
+            let ext = match args.model {
+                WhichModel::TinyEn => "tiny-en",
+                WhichModel::Tiny => "tiny",
+                _ => unimplemented!("no quantized support for {:?}", args.model),
+            };
+            (
+                repo.get(&format!("config-{ext}.json"))?,
+                repo.get(&format!("tokenizer-{ext}.json"))?,
+                repo.get(&format!("model-{ext}-q80.gguf"))?,
+            )
+        } else {
+            let config = repo.get("config.json")?;
+            let tokenizer = repo.get("tokenizer.json")?;
+            let model = repo.get("model.safetensors")?;
+            (config, tokenizer, model)
+        };
+        (config, tokenizer, model, sample)
     };
+    let config: Config = serde_json::from_str(&std::fs::read_to_string(config_filename)?)?;
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
-    let mel_bytes = include_bytes!("melfilters.bytes");
+    let mel_bytes = match config.num_mel_bins {
+        80 => include_bytes!("melfilters.bytes").as_slice(),
+        128 => include_bytes!("melfilters128.bytes").as_slice(),
+        nmel => anyhow::bail!("unexpected num_mel_bins {nmel}"),
+    };
     let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
     <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(mel_bytes, &mut mel_filters);
 
     let mut input = std::fs::File::open(input)?;
     let (header, data) = wav::read(&mut input)?;
     println!("loaded wav data: {header:?}");
-    if header.sampling_rate != SAMPLE_RATE as u32 {
-        anyhow::bail!("wav file must have a {} sampling rate", SAMPLE_RATE)
+    if header.sampling_rate != m::SAMPLE_RATE as u32 {
+        anyhow::bail!("wav file must have a {} sampling rate", m::SAMPLE_RATE)
     }
     let data = data.as_sixteen().expect("expected 16 bit wav file");
     let pcm_data: Vec<_> = data[..data.len() / header.channel_count as usize]
@@ -505,16 +547,24 @@ fn main() -> Result<()> {
         .map(|v| *v as f32 / 32768.)
         .collect();
     println!("pcm data loaded {}", pcm_data.len());
-    let mel = audio::pcm_to_mel(&pcm_data, &mel_filters)?;
+    let mel = audio::pcm_to_mel(&config, &pcm_data, &mel_filters);
     let mel_len = mel.len();
-    let mel = Tensor::from_vec(mel, (1, N_MELS, mel_len / N_MELS), &device)?;
+    let mel = Tensor::from_vec(
+        mel,
+        (1, config.num_mel_bins, mel_len / config.num_mel_bins),
+        &device,
+    )?;
     println!("loaded mel: {:?}", mel.dims());
 
-    let weights = unsafe { candle::safetensors::MmapedFile::new(weights_filename)? };
-    let weights = weights.deserialize()?;
-    let vb = VarBuilder::from_safetensors(vec![weights], DTYPE, &device);
-    let config: Config = serde_json::from_str(&std::fs::read_to_string(config_filename)?)?;
-    let mut model = Whisper::load(&vb, config)?;
+    let mut model = if args.quantized {
+        let vb =
+            candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&weights_filename)?;
+        Model::Quantized(m::quantized_model::Whisper::load(&vb, config)?)
+    } else {
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename], m::DTYPE, &device)? };
+        Model::Normal(m::model::Whisper::load(&vb, config)?)
+    };
 
     let language_token = match (args.model.is_multilingual(), args.language) {
         (true, None) => Some(multilingual::detect_language(&mut model, &tokenizer, &mel)?),

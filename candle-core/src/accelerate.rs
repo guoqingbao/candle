@@ -50,6 +50,8 @@ mod ffi {
         pub fn vvcos(dst: *mut c_double, src: *const c_double, len: *const c_int);
         pub fn vvlogf(dst: *mut c_float, src: *const c_float, len: *const c_int);
         pub fn vvlog(dst: *mut c_double, src: *const c_double, len: *const c_int);
+        pub fn vvtanhf(dst: *mut c_float, src: *const c_float, len: *const c_int);
+        pub fn vvtanh(dst: *mut c_double, src: *const c_double, len: *const c_int);
 
         pub fn vDSP_vaddD(
             _: *const c_double,
@@ -309,6 +311,26 @@ pub fn vd_cos(a: &[f64], y: &mut [f64]) {
     unsafe { ffi::vvcos(y.as_mut_ptr(), a.as_ptr(), &(a_len as i32)) }
 }
 #[inline]
+pub fn vs_tanh(a: &[f32], y: &mut [f32]) {
+    let a_len = a.len();
+    let y_len = y.len();
+    if a_len != y_len {
+        panic!("a and y have different lengths {a_len} <> {y_len}")
+    }
+    unsafe { ffi::vvtanhf(y.as_mut_ptr(), a.as_ptr(), &(a_len as i32)) }
+}
+
+#[inline]
+pub fn vd_tanh(a: &[f64], y: &mut [f64]) {
+    let a_len = a.len();
+    let y_len = y.len();
+    if a_len != y_len {
+        panic!("a and y have different lengths {a_len} <> {y_len}")
+    }
+    unsafe { ffi::vvtanh(y.as_mut_ptr(), a.as_ptr(), &(a_len as i32)) }
+}
+
+#[inline]
 pub fn vs_ln(a: &[f32], y: &mut [f32]) {
     let a_len = a.len();
     let y_len = y.len();
@@ -346,6 +368,38 @@ pub fn vd_sqr(a: &[f64], y: &mut [f64]) {
         panic!("a and y have different lengths {a_len} <> {y_len}")
     }
     y.iter_mut().zip(a.iter()).for_each(|(y, a)| *y = *a * *a)
+}
+
+#[inline]
+pub fn vs_tanh_inplace(y: &mut [f32]) {
+    unsafe { ffi::vvtanhf(y.as_mut_ptr(), y.as_ptr(), &(y.len() as i32)) }
+}
+
+#[inline]
+pub fn vd_tanh_inplace(y: &mut [f64]) {
+    unsafe { ffi::vvtanh(y.as_mut_ptr(), y.as_ptr(), &(y.len() as i32)) }
+}
+
+#[inline]
+pub fn vs_gelu(vs: &[f32], ys: &mut [f32]) {
+    for (&v, y) in vs.iter().zip(ys.iter_mut()) {
+        *y = (2.0f32 / std::f32::consts::PI).sqrt() * v * (1.0 + 0.044715 * v * v)
+    }
+    vs_tanh_inplace(ys);
+    for (&v, y) in vs.iter().zip(ys.iter_mut()) {
+        *y = 0.5 * v * (1.0 + *y)
+    }
+}
+
+#[inline]
+pub fn vd_gelu(vs: &[f64], ys: &mut [f64]) {
+    for (&v, y) in vs.iter().zip(ys.iter_mut()) {
+        *y = (2.0f64 / std::f64::consts::PI).sqrt() * v * (1.0 + 0.044715 * v * v)
+    }
+    vd_tanh_inplace(ys);
+    for (&v, y) in vs.iter().zip(ys.iter_mut()) {
+        *y = 0.5 * v * (1.0 + *y)
+    }
 }
 
 macro_rules! binary_op {

@@ -14,8 +14,7 @@ use clap::Parser;
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use tokenizers::Tokenizer;
 
-mod model;
-use model::{Config, Falcon};
+use candle_transformers::models::falcon::{Config, Falcon};
 
 struct TextGeneration {
     model: Falcon,
@@ -26,17 +25,25 @@ struct TextGeneration {
     repeat_last_n: usize,
 }
 
+struct GenerationOptions {
+    temp: Option<f64>,
+    top_p: Option<f64>,
+    repeat_penalty: f32,
+    repeat_last_n: usize,
+}
+
 impl TextGeneration {
     fn new(
         model: Falcon,
         tokenizer: Tokenizer,
+        generation_options: GenerationOptions,
         seed: u64,
-        temp: Option<f64>,
         device: &Device,
-        repeat_penalty: f32,
-        repeat_last_n: usize,
     ) -> Self {
-        let logits_processor = LogitsProcessor::new(seed, temp);
+        let logits_processor =
+            LogitsProcessor::new(seed, generation_options.temp, generation_options.top_p);
+        let repeat_penalty = generation_options.repeat_penalty;
+        let repeat_last_n = generation_options.repeat_last_n;
         Self {
             model,
             tokenizer,
@@ -119,6 +126,10 @@ struct Args {
     #[arg(long)]
     temperature: Option<f64>,
 
+    /// Nucleus sampling probability cutoff.
+    #[arg(long)]
+    top_p: Option<f64>,
+
     /// The seed to use when generating random samples.
     #[arg(long, default_value_t = 299792458)]
     seed: u64,
@@ -154,47 +165,30 @@ fn main() -> Result<()> {
         args.revision,
     ));
     let tokenizer_filename = repo.get("tokenizer.json")?;
-    let mut filenames = vec![];
-    for rfilename in [
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-    ] {
-        let filename = repo.get(rfilename)?;
-        filenames.push(filename);
-    }
+    let filenames = candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?;
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
     let start = std::time::Instant::now();
-    let weights = filenames
-        .iter()
-        .map(|f| Ok(unsafe { candle::safetensors::MmapedFile::new(f)? }))
-        .collect::<Result<Vec<_>>>()?;
-    let weights = weights
-        .iter()
-        .map(|f| Ok(f.deserialize()?))
-        .collect::<Result<Vec<_>>>()?;
-
     let dtype = if args.use_f32 {
         DType::F32
     } else {
         DType::BF16
     };
-    let vb = VarBuilder::from_safetensors(weights, dtype, &device);
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
     let config = Config::falcon7b();
     config.validate()?;
     let model = Falcon::load(vb, config)?;
     println!("loaded the model in {:?}", start.elapsed());
 
-    let mut pipeline = TextGeneration::new(
-        model,
-        tokenizer,
-        args.seed,
-        args.temperature,
-        &device,
-        args.repeat_penalty,
-        args.repeat_last_n,
-    );
+    let generation_options = GenerationOptions {
+        temp: args.temperature,
+        top_p: args.top_p,
+        repeat_penalty: args.repeat_penalty,
+        repeat_last_n: args.repeat_last_n,
+    };
+    let mut pipeline =
+        TextGeneration::new(model, tokenizer, generation_options, args.seed, &device);
     pipeline.run(&args.prompt, args.sample_len)?;
     Ok(())
 }

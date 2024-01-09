@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust
-//! use candle::{Tensor, Device::Cpu};
+//! use candle::{Tensor, Device::Cpu, test_utils::to_vec3_round};
 //! use candle_nn::{LayerNorm, Module};
 //! # fn main() -> candle::Result<()> {
 //!
@@ -20,15 +20,15 @@
 //!     &Cpu)?;
 //! let ys = layer.forward(&xs)?;
 //! assert_eq!(
-//!     ys.to_vec3::<f32>()?,
-//!     &[[[-1.2247356, 0.0,  1.2247356],
-//!        [-1.2247356, 0.0,  1.2247356],
-//!        [ 1.2247356, 0.0, -1.2247356]]]);
+//!     to_vec3_round(&ys, 4)?,
+//!     &[[[-1.2247, 0.0,  1.2247],
+//!        [-1.2247, 0.0,  1.2247],
+//!        [ 1.2247, 0.0, -1.2247]]]);
 //! # Ok(()) }
 //! ```
 //!
 //! [`Layer Normalization`]: https://arxiv.org/abs/1607.06450
-use candle::{DType, Result, Tensor};
+use candle::{DType, Result, Tensor, D};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerNormConfig {
@@ -60,7 +60,7 @@ impl From<f64> for LayerNormConfig {
 }
 
 // This layer norm version handles both weight and bias so removes the mean.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LayerNorm {
     weight: Tensor,
     bias: Option<Tensor>,
@@ -95,6 +95,14 @@ impl LayerNorm {
             eps,
         }
     }
+
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    pub fn bias(&self) -> Option<&Tensor> {
+        self.bias.as_ref()
+    }
 }
 
 impl crate::Module for LayerNorm {
@@ -104,15 +112,15 @@ impl crate::Module for LayerNorm {
             DType::F16 | DType::BF16 => DType::F32,
             d => d,
         };
-        let (_bsize, _seq_len, hidden_size) = x.dims3()?;
+        let hidden_size = x.dim(D::Minus1)?;
         let x = x.to_dtype(internal_dtype)?;
         let x = if self.remove_mean {
-            let mean_x = (x.sum_keepdim(2)? / hidden_size as f64)?;
+            let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
             x.broadcast_sub(&mean_x)?
         } else {
             x
         };
-        let norm_x = (x.sqr()?.sum_keepdim(2)? / hidden_size as f64)?;
+        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
         let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
         let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(&self.weight)?;
         match &self.bias {
@@ -143,7 +151,7 @@ pub fn layer_norm<C: Into<LayerNormConfig>>(
 }
 
 /// RmsNorm is a specialized version of the LayerNorm module.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RmsNorm(LayerNorm);
 
 impl RmsNorm {

@@ -1,4 +1,4 @@
-use candle::{safetensors::Load, DType, Device, Result, Shape, Tensor, Var};
+use candle::{DType, Device, Result, Shape, Tensor, Var};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -40,18 +40,50 @@ impl VarMap {
     /// Note that values for variables that are currently not in the map are not kept.
     pub fn load<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref();
-        let data = unsafe { candle::safetensors::MmapedFile::new(path)? };
-        let data = data.deserialize()?;
+        let data = unsafe { candle::safetensors::MmapedSafetensors::new(path)? };
         let mut tensor_data = self.data.lock().unwrap();
         for (name, var) in tensor_data.iter_mut() {
-            match data.tensor(name) {
-                Ok(data) => {
-                    let data: Tensor = data.load(var.device())?;
-                    if let Err(err) = var.set(&data) {
-                        candle::bail!("error setting {name} using data from {path:?}: {err}",)
+            let data = data.load(name, var.device())?;
+            if let Err(err) = var.set(&data) {
+                candle::bail!("error setting {name} using data from {path:?}: {err}",)
+            }
+        }
+        Ok(())
+    }
+
+    /// Set a named variable to some value.
+    pub fn set_one<K: AsRef<str>, V: AsRef<Tensor>>(&mut self, name: K, value: V) -> Result<()> {
+        let tensor_data = self.data.lock().unwrap();
+        let name = name.as_ref();
+        match tensor_data.get(name) {
+            None => candle::bail!("cannot find {name} in VarMap"),
+            Some(var) => {
+                if let Err(err) = var.set(value.as_ref()) {
+                    candle::bail!("error setting {name}: {err}",)
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Set some named variables to some values.
+    ///
+    /// If an error is returned, some of the variables might have already been set to their new
+    /// values.
+    pub fn set<I: Iterator<Item = (K, V)>, K: AsRef<String>, V: AsRef<Tensor>>(
+        &mut self,
+        iter: I,
+    ) -> Result<()> {
+        let tensor_data = self.data.lock().unwrap();
+        for (name, value) in iter {
+            let name = name.as_ref();
+            match tensor_data.get(name) {
+                None => candle::bail!("cannot find {name} in VarMap"),
+                Some(var) => {
+                    if let Err(err) = var.set(value.as_ref()) {
+                        candle::bail!("error setting {name}: {err}",)
                     }
                 }
-                Err(_) => candle::bail!("cannot find tensor for {name}"),
             }
         }
         Ok(())

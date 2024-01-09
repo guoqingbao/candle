@@ -34,6 +34,9 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
     /// Dot product used as a building block for quantized mat-mul.
     /// n is the number of elements to be considered.
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32>;
+
+    /// Generic implementation of the dot product without simd optimizations.
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +88,7 @@ const _: () = assert!(std::mem::size_of::<BlockQ8_0>() == 34);
 pub struct BlockQ8_1 {
     pub(crate) d: f16,
     pub(crate) s: f16,
-    pub(crate) qs: [u8; QK8_1],
+    pub(crate) qs: [i8; QK8_1],
 }
 const _: () = assert!(std::mem::size_of::<BlockQ8_1>() == 36);
 
@@ -225,15 +228,17 @@ impl GgmlType for BlockQ4_0 {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q4_0_q8_0(n, xs, ys);
 
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q4_0_q8_0(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = QK8_0;
-        let nb = n / qk;
         if n % QK8_0 != 0 {
             crate::bail!("vec_dot_q4_0_q8_0: {n} is not divisible by {qk}")
         }
-        if nb % 2 != 0 {
-            crate::bail!("vec_dot_q4_0_q8_0: {nb} is not even")
-        }
-
         // Generic implementation.
         let mut sumf = 0f32;
         for (xs, ys) in xs.iter().zip(ys.iter()) {
@@ -255,6 +260,10 @@ impl GgmlType for BlockQ4_1 {
     type VecDotType = BlockQ8_1;
 
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         // ggml_vec_dot_q4_1_q8_1
         let qk = QK8_1;
         if n % qk != 0 {
@@ -278,6 +287,7 @@ impl GgmlType for BlockQ4_1 {
             }
 
             sumf += sumi as f32 * f16::to_f32(xs.d) * f16::to_f32(ys.d)
+                + f16::to_f32(xs.m) * f16::to_f32(ys.s)
         }
         Ok(sumf)
     }
@@ -353,7 +363,10 @@ impl GgmlType for BlockQ5_0 {
         if nb % 2 != 0 {
             crate::bail!("vec_dot_q5_0_q8_0: {n}, nb is not divisible by 2")
         }
+        Self::vec_dot_unopt(n, xs, ys)
+    }
 
+    fn vec_dot_unopt(_n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         // Generic implementation.
         let mut sumf = 0f32;
 
@@ -444,6 +457,10 @@ impl GgmlType for BlockQ5_1 {
     type VecDotType = BlockQ8_1;
 
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = Self::BLCK_SIZE;
         if n % Self::BLCK_SIZE != 0 {
             crate::bail!("vec_dot_q5_1_q8_1: {n} is not divisible by {qk}")
@@ -471,6 +488,7 @@ impl GgmlType for BlockQ5_1 {
             }
 
             sumf += sumi as f32 * f16::to_f32(xs.d) * f16::to_f32(ys.d)
+                + f16::to_f32(xs.m) * f16::to_f32(ys.s)
         }
         Ok(sumf)
     }
@@ -604,6 +622,13 @@ impl GgmlType for BlockQ8_0 {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q8_0_q8_0(n, xs, ys);
 
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q8_0_q8_0(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = QK8_0;
         if n % QK8_0 != 0 {
             crate::bail!("vec_dot_q8_0_q8_0: {n} is not divisible by {qk}")
@@ -629,7 +654,11 @@ impl GgmlType for BlockQ8_1 {
     const BLCK_SIZE: usize = QK8_1;
     type VecDotType = BlockQ8_1;
 
-    fn vec_dot(_n: usize, _xs: &[Self], _ys: &[Self::VecDotType]) -> Result<f32> {
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(_n: usize, _xs: &[Self], _ys: &[Self::VecDotType]) -> Result<f32> {
         unimplemented!("no support for vec-dot on Q8_1")
     }
 
@@ -652,8 +681,8 @@ impl GgmlType for BlockQ8_1 {
             for j in 0..Self::BLCK_SIZE / 2 {
                 let v0 = xs[j] * id;
                 let v1 = xs[j + Self::BLCK_SIZE / 2] * id;
-                ys.qs[j] = f32::round(v0) as u8;
-                ys.qs[j + Self::BLCK_SIZE / 2] = f32::round(v1) as u8;
+                ys.qs[j] = f32::round(v0) as i8;
+                ys.qs[j + Self::BLCK_SIZE / 2] = f32::round(v1) as i8;
                 sum += ys.qs[j] as i32 + ys.qs[j + Self::BLCK_SIZE / 2] as i32;
             }
             ys.s = f16::from_f32(sum as f32) * ys.d;
@@ -671,7 +700,21 @@ impl GgmlType for BlockQ2K {
     const BLCK_SIZE: usize = QK_K;
     type VecDotType = BlockQ8K;
 
+    #[allow(unreachable_code)]
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        #[cfg(target_feature = "avx")]
+        return super::avx::vec_dot_q2k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "neon")]
+        return super::neon::vec_dot_q2k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q2k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if n % QK_K != 0 {
             crate::bail!("vec_dot_q2k_q8k: {n} is not divisible by {QK_K}")
         }
@@ -692,18 +735,17 @@ impl GgmlType for BlockQ2K {
 
             let mut isum = 0;
             let mut is = 0;
-            let mut d;
             for _ in 0..(QK_K / 128) {
                 let mut shift = 0;
                 for _ in 0..4 {
-                    d = (sc[is] & 0xF) as i32;
+                    let d = (sc[is] & 0xF) as i32;
                     is += 1;
                     let mut isuml = 0;
                     for l in 0..16 {
                         isuml += q8[l] as i32 * (((q2[l] >> shift) & 3) as i32);
                     }
                     isum += d * isuml;
-                    d = (sc[is] & 0xF) as i32;
+                    let d = (sc[is] & 0xF) as i32;
                     is += 1;
                     isuml = 0;
                     for l in 16..32 {
@@ -834,7 +876,18 @@ impl GgmlType for BlockQ3K {
     const BLCK_SIZE: usize = QK_K;
     type VecDotType = BlockQ8K;
 
+    #[allow(unreachable_code)]
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        #[cfg(target_feature = "avx")]
+        return super::avx::vec_dot_q3k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "neon")]
+        return super::neon::vec_dot_q3k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if n % QK_K != 0 {
             crate::bail!("vec_dot_q3k_q8k: {n} is not divisible by {QK_K}")
         }
@@ -1061,7 +1114,6 @@ impl GgmlType for BlockQ3K {
             let d_all = block.d.to_f32();
             let mut m = 1;
             let mut is = 0;
-            let mut dl;
 
             // Dequantize both 128 long blocks
             // 32 qs values per 128 long block
@@ -1072,7 +1124,7 @@ impl GgmlType for BlockQ3K {
                     for (scale_index, scale_scoped_y) in
                         shift_scoped_y.chunks_exact_mut(16).enumerate()
                     {
-                        dl = d_all * (scales[is] as f32 - 32.0);
+                        let dl = d_all * (scales[is] as f32 - 32.0);
                         for (i, inner_y) in scale_scoped_y.iter_mut().enumerate() {
                             let new_y = dl
                                 * (((qs[i + 16 * scale_index] >> shift) & 3) as i8
@@ -1104,9 +1156,19 @@ impl GgmlType for BlockQ4K {
 
     #[allow(unreachable_code)]
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        #[cfg(target_feature = "avx")]
+        return super::avx::vec_dot_q4k_q8k(n, xs, ys);
+
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q4k_q8k(n, xs, ys);
 
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q4k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if n % QK_K != 0 {
             crate::bail!("vec_dot_q4k_q8k: {n} is not divisible by {QK_K}")
         }
@@ -1285,7 +1347,18 @@ impl GgmlType for BlockQ5K {
     const BLCK_SIZE: usize = QK_K;
     type VecDotType = BlockQ8K;
 
+    #[allow(unreachable_code)]
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        #[cfg(target_feature = "avx")]
+        return super::avx::vec_dot_q5k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "neon")]
+        return super::neon::vec_dot_q5k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if n % QK_K != 0 {
             crate::bail!("vec_dot_q5k_q8k: {n} is not divisible by {QK_K}")
         }
@@ -1503,6 +1576,13 @@ impl GgmlType for BlockQ6K {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q6k_q8k(n, xs, ys);
 
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q6k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if n % QK_K != 0 {
             crate::bail!("vec_dot_q6k_q8k: {n} is not divisible by {QK_K}")
         }
@@ -1671,8 +1751,38 @@ impl GgmlType for BlockQ8K {
     const BLCK_SIZE: usize = QK_K;
     type VecDotType = BlockQ8K;
 
-    fn vec_dot(_n: usize, _xs: &[Self], _ys: &[Self::VecDotType]) -> Result<f32> {
-        unreachable!()
+    #[allow(unreachable_code)]
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        #[cfg(target_feature = "avx")]
+        return super::avx::vec_dot_q8k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "neon")]
+        return super::neon::vec_dot_q8k_q8k(n, xs, ys);
+
+        #[cfg(target_feature = "simd128")]
+        return super::simd128::vec_dot_q8k_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        let qk = QK_K;
+        if n % QK_K != 0 {
+            crate::bail!("vec_dot_q8k_q8k: {n} is not divisible by {qk}")
+        }
+
+        // Generic implementation.
+        let mut sumf = 0f32;
+        for (xs, ys) in xs.iter().zip(ys.iter()) {
+            let sum_i = xs
+                .qs
+                .iter()
+                .zip(ys.qs.iter())
+                .map(|(&x, &y)| x as i32 * y as i32)
+                .sum::<i32>();
+            sumf += sum_i as f32 * xs.d * ys.d
+        }
+        Ok(sumf)
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) -> Result<()> {
@@ -1778,6 +1888,10 @@ impl GgmlType for f32 {
     type VecDotType = f32;
 
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if xs.len() < n {
             crate::bail!("size mismatch {} < {n}", xs.len())
         }
@@ -1812,6 +1926,10 @@ impl GgmlType for f16 {
     type VecDotType = f16;
 
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         if xs.len() < n {
             crate::bail!("size mismatch {} < {n}", xs.len())
         }

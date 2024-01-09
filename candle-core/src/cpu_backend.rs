@@ -2,6 +2,10 @@ use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{DType, Error, IntDType, Layout, Result, Shape, WithDType};
 use half::{bf16, f16};
+use rayon::prelude::*;
+
+const USE_IM2COL_CONV1D: bool = true;
+const USE_IM2COL_CONV2D: bool = true;
 
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
 // intercept the oom errors to avoid panicking and provide a proper error.
@@ -445,7 +449,7 @@ pub fn unary_map_vec<T: Copy, U: Copy, F: FnMut(T) -> U, FV: FnMut(&[T], &mut [U
 }
 
 // This function maps over two strided index sequences.
-fn binary_map<T: Copy, U: Copy, F: FnMut(T, T) -> U>(
+pub fn binary_map<T: Copy, U: Copy, F: FnMut(T, T) -> U>(
     lhs_l: &Layout,
     rhs_l: &Layout,
     lhs: &[T],
@@ -525,7 +529,7 @@ fn binary_map<T: Copy, U: Copy, F: FnMut(T, T) -> U>(
 }
 
 // Similar to binary_map but with vectorized variants.
-fn binary_map_vec<T: Copy, F: FnMut(T, T) -> T, FV: FnMut(&[T], &[T], &mut [T])>(
+pub fn binary_map_vec<T: Copy, F: FnMut(T, T) -> T, FV: FnMut(&[T], &[T], &mut [T])>(
     lhs_l: &Layout,
     rhs_l: &Layout,
     lhs: &[T],
@@ -723,6 +727,36 @@ impl Map1 for MaxPool2D {
     }
 }
 
+struct UpsampleNearest1D(usize);
+
+impl Map1 for UpsampleNearest1D {
+    fn f<T: WithDType>(&self, src: &[T], layout: &Layout) -> Result<Vec<T>> {
+        // TODO: Specialized implementation for the case 2*sz?
+        let dst_sz = self.0;
+        let (b_sz, c, src_sz) = layout.shape().dims3()?;
+        let stride = layout.stride();
+        let stride_sz = stride[2];
+        let src_index = layout.start_offset();
+        let scale_sz = src_sz as f64 / dst_sz as f64;
+        let mut dst = vec![T::zero(); b_sz * c * dst_sz];
+        let src_idxs = (0..dst_sz)
+            .map(|idx| usize::min(src_sz - 1, (idx as f64 * scale_sz) as usize))
+            .collect::<Vec<_>>();
+        for b_idx in 0..b_sz {
+            let dst = &mut dst[b_idx * c * dst_sz..];
+            let src_index = src_index + b_idx * stride[0];
+            for c_idx in 0..c {
+                let dst = &mut dst[c_idx * dst_sz..];
+                let src_index = src_index + c_idx * stride[1];
+                for (idx, src_idx) in src_idxs.iter().enumerate() {
+                    dst[idx] = src[src_index + src_idx * stride_sz]
+                }
+            }
+        }
+        Ok(dst)
+    }
+}
+
 struct UpsampleNearest2D(usize, usize);
 
 impl Map1 for UpsampleNearest2D {
@@ -770,11 +804,11 @@ impl<'a, I: IntDType> Map1 for Gather<'a, I> {
     fn f<T: WithDType>(&self, src: &[T], src_l: &Layout) -> Result<Vec<T>> {
         let ids = match self.ids_l.contiguous_offsets() {
             Some((a, b)) => &self.ids[a..b],
-            None => Err(Error::RequiresContiguous { op: "gather" })?,
+            None => Err(Error::RequiresContiguous { op: "gather" }.bt())?,
         };
         let src = match src_l.contiguous_offsets() {
             Some((a, b)) => &src[a..b],
-            None => Err(Error::RequiresContiguous { op: "gather" })?,
+            None => Err(Error::RequiresContiguous { op: "gather" }.bt())?,
         };
         let dim = self.dim;
         let ids_dims = self.ids_l.dims();
@@ -823,7 +857,7 @@ impl<'a, I: IntDType> Map1 for IndexSelect<'a, I> {
     fn f<T: WithDType>(&self, src: &[T], layout: &Layout) -> Result<Vec<T>> {
         let src = match layout.contiguous_offsets() {
             Some((a, b)) => &src[a..b],
-            None => Err(Error::RequiresContiguous { op: "index-select" })?,
+            None => Err(Error::RequiresContiguous { op: "index-select" }.bt())?,
         };
         let dim = self.dim;
         let n_ids = match self.ids_l.dims() {
@@ -879,7 +913,7 @@ impl<'a, I: IntDType> Map2 for ScatterAdd<'a, I> {
         let mut dst = vec![T::zero(); dst_len];
         copy_strided_src_(v1, &mut dst, 0, l1);
         let src = match src_l.contiguous_offsets() {
-            None => Err(Error::RequiresContiguous { op: "scatter-add" })?,
+            None => Err(Error::RequiresContiguous { op: "scatter-add" }.bt())?,
             Some((o1, o2)) => &src[o1..o2],
         };
 
@@ -895,7 +929,7 @@ impl<'a, I: IntDType> Map2 for ScatterAdd<'a, I> {
 
         let ids = match self.ids_l.contiguous_offsets() {
             Some((a, b)) => &self.ids[a..b],
-            None => Err(Error::RequiresContiguous { op: "gather" })?,
+            None => Err(Error::RequiresContiguous { op: "gather" }.bt())?,
         };
         for left_i in 0..ids_left_len {
             let start_ids_idx = left_i * ids_right_len * ids_dim_len;
@@ -937,7 +971,7 @@ impl<'a, I: IntDType> Map2 for IndexAdd<'a, I> {
         let mut dst = vec![T::zero(); dst_len];
         copy_strided_src_(v1, &mut dst, 0, l1);
         let src = match src_l.contiguous_offsets() {
-            None => Err(Error::RequiresContiguous { op: "index-add" })?,
+            None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
             Some((o1, o2)) => &src[o1..o2],
         };
         let dim = self.dim;
@@ -1052,10 +1086,8 @@ impl<'a> Map2 for Conv1D<'a> {
             }
         }
 
-        let num_threads = crate::utils::get_num_threads();
-
         for offset in 0..p.k_size {
-            crate::cpu::kernels::par_range(0, p.c_out, num_threads, |dst_c_idx| {
+            (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
                 let dst_idx = dst_c_idx * l_out;
                 let k_cont = (0..p.c_in)
                     .map(|c_in_idx| k[dst_c_idx * k_s0 + c_in_idx * k_s1 + offset * k_s2])
@@ -1064,7 +1096,7 @@ impl<'a> Map2 for Conv1D<'a> {
                     let dst_idx = dst_idx + b_idx * p.c_out * l_out;
                     for dst_l in 0..l_out {
                         let dst_idx = dst_idx + dst_l;
-                        let src_l = p.stride * dst_l + offset;
+                        let src_l = p.stride * dst_l + offset * p.dilation;
                         if src_l < p.padding || src_l >= p.padding + p.l_in {
                             continue;
                         }
@@ -1081,6 +1113,208 @@ impl<'a> Map2 for Conv1D<'a> {
                         unsafe {
                             let ptr = dst_p.add(dst_idx) as *mut T;
                             *ptr += d
+                        }
+                    }
+                }
+            })
+        }
+        Ok(dst)
+    }
+}
+
+struct Im2Col1D {
+    l_k: usize,
+    stride: usize,
+    dilation: usize,
+    padding: usize,
+}
+
+impl Im2Col1D {
+    fn l_out(&self, l: usize) -> usize {
+        (l + 2 * self.padding - self.dilation * (self.l_k - 1) - 1) / self.stride + 1
+    }
+}
+
+impl Map1 for Im2Col1D {
+    fn f<T: WithDType>(&self, vs: &[T], layout: &Layout) -> Result<Vec<T>> {
+        let &Self {
+            l_k,
+            stride,
+            dilation,
+            padding,
+        } = self;
+        let (b, c, l) = layout.shape().dims3()?;
+        let l_out = self.l_out(l);
+        let src = &vs[layout.start_offset()..];
+        let mut dst = vec![T::zero(); b * l_out * c * l_k];
+        let (src_s0, src_s1, src_s2) = {
+            let s = layout.stride();
+            (s[0], s[1], s[2])
+        };
+        // TODO: provide specialized kernels for the common use cases.
+        // - l_k = 1
+        // - padding = 0
+        // - stride = 1
+        // - dilation = 1
+        for b_idx in 0..b {
+            let src_idx = b_idx * src_s0;
+            let dst_idx = b_idx * l_out * c * l_k;
+            for l_idx in 0..l_out {
+                let dst_idx = dst_idx + l_idx * c * l_k;
+                for c_idx in 0..c {
+                    let dst_idx = dst_idx + c_idx * l_k;
+                    let src_idx = c_idx * src_s1 + src_idx;
+                    for l_k_idx in 0..l_k {
+                        let src_l = l_idx * stride + l_k_idx * dilation;
+                        if padding != 0 && (src_l < padding || src_l >= l + padding) {
+                            continue;
+                        }
+                        let src_l = src_l - padding;
+                        let src_idx = src_idx + src_l * src_s2;
+                        let dst_idx = dst_idx + l_k_idx;
+                        dst[dst_idx] = src[src_idx]
+                    }
+                }
+            }
+        }
+        Ok(dst)
+    }
+}
+
+struct Im2Col {
+    h_k: usize,
+    w_k: usize,
+    stride: usize,
+    dilation: usize,
+    padding: usize,
+}
+
+impl Im2Col {
+    fn hw_out(&self, h: usize, w: usize) -> (usize, usize) {
+        let h_out = (h + 2 * self.padding - self.dilation * (self.h_k - 1) - 1) / self.stride + 1;
+        let w_out = (w + 2 * self.padding - self.dilation * (self.w_k - 1) - 1) / self.stride + 1;
+        (h_out, w_out)
+    }
+}
+
+impl Map1 for Im2Col {
+    fn f<T: WithDType>(&self, vs: &[T], layout: &Layout) -> Result<Vec<T>> {
+        let &Self {
+            h_k,
+            w_k,
+            stride,
+            dilation,
+            padding,
+        } = self;
+        let (b, c, h, w) = layout.shape().dims4()?;
+        let (h_out, w_out) = self.hw_out(h, w);
+        let src = &vs[layout.start_offset()..];
+        let mut dst = vec![T::zero(); b * h_out * w_out * c * h_k * w_k];
+        let (src_s0, src_s1, src_s2, src_s3) = {
+            let s = layout.stride();
+            (s[0], s[1], s[2], s[3])
+        };
+        // TODO: provide specialized kernels for the common use cases.
+        // - h_k = w_k = 1
+        // - padding = 0
+        // - stride = 1
+        // - dilation = 1
+        for b_idx in 0..b {
+            let src_idx = b_idx * src_s0;
+            let dst_idx = b_idx * h_out * w_out * c * h_k * w_k;
+            for h_idx in 0..h_out {
+                let dst_idx = dst_idx + h_idx * w_out * c * h_k * w_k;
+                for w_idx in 0..w_out {
+                    let dst_idx = dst_idx + w_idx * c * h_k * w_k;
+                    for c_idx in 0..c {
+                        let dst_idx = dst_idx + c_idx * h_k * w_k;
+                        let src_idx = c_idx * src_s1 + src_idx;
+                        for h_k_idx in 0..h_k {
+                            let src_h = h_idx * stride + h_k_idx * dilation;
+                            if padding != 0 && (src_h < padding || src_h >= h + padding) {
+                                continue;
+                            }
+                            let src_h = src_h - padding;
+                            let src_idx = src_idx + src_h * src_s2;
+                            let dst_idx = dst_idx + h_k_idx * w_k;
+                            for w_k_idx in 0..w_k {
+                                let src_w = w_idx * stride + w_k_idx * dilation;
+                                if padding != 0 && (src_w < padding || src_w >= w + padding) {
+                                    continue;
+                                }
+                                let src_w = src_w - padding;
+                                let src_idx = src_idx + src_w * src_s3;
+                                let dst_idx = dst_idx + w_k_idx;
+                                dst[dst_idx] = src[src_idx]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(dst)
+    }
+}
+
+struct ConvTranspose1D<'a>(&'a crate::conv::ParamsConvTranspose1D);
+
+impl<'a> Map2 for ConvTranspose1D<'a> {
+    const OP: &'static str = "conv_transpose1d";
+    fn f<T: WithDType>(&self, inp: &[T], inp_l: &Layout, k: &[T], k_l: &Layout) -> Result<Vec<T>> {
+        let p = self.0;
+        let inp = &inp[inp_l.start_offset()..];
+        let (inp_s0, inp_s1, inp_s2) = crate::shape::dims3(inp_l.stride())?;
+        let (k_s0, k_s1, k_s2) = crate::shape::dims3(k_l.stride())?;
+        let l_out = p.l_out();
+
+        // Output shape: [b_size, c_out, l_out].
+        let dst_elems = p.c_out * l_out * p.b_size;
+        let dst = vec![T::zero(); dst_elems];
+        let dst_s0 = p.c_out * l_out;
+        let dst_s1 = l_out;
+        let dst_s2 = 1;
+
+        // TODO: Avoid making this copy if `inp` already has the appropriate layout.
+        let mut inp_cont = vec![T::zero(); p.b_size * p.c_in * p.l_in];
+        let cont_s0 = p.l_in * p.c_in;
+        let cont_s1 = p.c_in;
+        for b_idx in 0..p.b_size {
+            for l_idx in 0..p.l_in {
+                for c_idx in 0..p.c_in {
+                    let src_idx = b_idx * inp_s0 + c_idx * inp_s1 + l_idx * inp_s2;
+                    let dst_idx = b_idx * cont_s0 + l_idx * cont_s1 + c_idx;
+                    inp_cont[dst_idx] = inp[src_idx]
+                }
+            }
+        }
+
+        for k_idx in 0..p.k_size {
+            (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
+                let k_cont = (0..p.c_in)
+                    .map(|c_in_idx| k[c_in_idx * k_s0 + dst_c_idx * k_s1 + k_idx * k_s2])
+                    .collect::<Vec<_>>();
+                for b_idx in 0..p.b_size {
+                    for l_idx in 0..p.l_in {
+                        let out_idx = l_idx * p.stride + k_idx * p.dilation;
+                        if out_idx < p.padding {
+                            continue;
+                        }
+                        let out_idx = out_idx - p.padding;
+                        if out_idx < l_out {
+                            let inp_cont = &inp_cont[b_idx * cont_s0 + l_idx * cont_s1..];
+                            let dst_idx = b_idx * dst_s0 + out_idx * dst_s2 + dst_c_idx * dst_s1;
+                            let mut d = T::zero();
+                            unsafe {
+                                T::vec_dot(inp_cont.as_ptr(), k_cont.as_ptr(), &mut d, p.c_in)
+                            }
+                            let dst_p = dst.as_ptr();
+                            // Safety: dst_idx are uniques per dst_c_idx which is used to
+                            // parallelise the different tasks so no two threads can try to
+                            // write at the same location.
+                            unsafe {
+                                let ptr = dst_p.add(dst_idx) as *mut T;
+                                *ptr += d
+                            }
                         }
                     }
                 }
@@ -1123,11 +1357,9 @@ impl<'a> Map2 for Conv2D<'a> {
             }
         }
 
-        let num_threads = crate::utils::get_num_threads();
-
         for offset_h in 0..p.k_h {
             for offset_w in 0..p.k_w {
-                crate::cpu::kernels::par_range(0, p.c_out, num_threads, |dst_c_idx| {
+                (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
                     let dst_idx = dst_c_idx * out_w * out_h;
                     let k_cont = (0..p.c_in)
                         .map(|c_in_idx| {
@@ -1141,14 +1373,14 @@ impl<'a> Map2 for Conv2D<'a> {
                         let dst_idx = dst_idx + b_idx * p.c_out * out_h * out_w;
                         for dst_h in 0..out_h {
                             let dst_idx = dst_idx + dst_h * out_w;
-                            let src_h = p.stride * dst_h + offset_h;
+                            let src_h = p.stride * dst_h + offset_h * p.dilation;
                             if src_h < p.padding || src_h >= p.i_h + p.padding {
                                 continue;
                             }
                             let src_h = src_h - p.padding;
                             for dst_w in 0..out_w {
                                 let dst_idx = dst_idx + dst_w;
-                                let src_w = p.stride * dst_w + offset_w;
+                                let src_w = p.stride * dst_w + offset_w * p.dilation;
                                 if src_w < p.padding || src_w >= p.i_w + p.padding {
                                     continue;
                                 }
@@ -1216,11 +1448,10 @@ impl<'a> Map2 for ConvTranspose2D<'a> {
                 }
             }
         }
-        let num_threads = crate::utils::get_num_threads();
 
         for k_y in 0..p.k_h {
             for k_x in 0..p.k_w {
-                crate::cpu::kernels::par_range(0, p.c_out, num_threads, |dst_c_idx| {
+                (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
                     let k_cont = (0..p.c_in)
                         .map(|c_in_idx| {
                             k[c_in_idx * k_s0 + dst_c_idx * k_s1 + k_y * k_s2 + k_x * k_s3]
@@ -1229,8 +1460,8 @@ impl<'a> Map2 for ConvTranspose2D<'a> {
                     for b_idx in 0..p.b_size {
                         for inp_y in 0..p.i_h {
                             for inp_x in 0..p.i_w {
-                                let out_x = inp_x * p.stride + k_x;
-                                let out_y = inp_y * p.stride + k_y;
+                                let out_x = inp_x * p.stride + k_x * p.dilation;
+                                let out_y = inp_y * p.stride + k_y * p.dilation;
                                 if out_x < p.padding || out_y < p.padding {
                                     continue;
                                 }
@@ -1298,8 +1529,9 @@ impl Map2 for MatMul {
     ) -> Result<Vec<T>> {
         use gemm::{gemm, Parallelism};
 
-        if T::DTYPE == DType::BF16 {
-            return Err(Error::UnsupportedDTypeForOp(T::DTYPE, "matmul").bt())?;
+        match T::DTYPE {
+            DType::F16 | DType::F32 | DType::F64 => {}
+            _ => Err(Error::UnsupportedDTypeForOp(T::DTYPE, "matmul").bt())?,
         }
 
         let (b, m, n, k) = self.0;
@@ -1618,6 +1850,90 @@ impl CpuStorage {
     pub fn as_slice<D: WithDType>(&self) -> Result<&[D]> {
         D::cpu_storage_as_slice(self)
     }
+
+    pub fn concat(storages: &[CpuStorage]) -> Result<CpuStorage> {
+        let storage0 = &storages[0];
+        let s = match storage0 {
+            Self::U8(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::U8(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::U8(storages)
+            }
+            Self::U32(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::U32(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::U32(storages)
+            }
+            Self::I64(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::I64(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::I64(storages)
+            }
+            Self::BF16(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::BF16(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::BF16(storages)
+            }
+            Self::F16(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::F16(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::F16(storages)
+            }
+            Self::F32(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::F32(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::F32(storages)
+            }
+            Self::F64(_) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::F64(s) => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::F64(storages)
+            }
+        };
+        Ok(s)
+    }
 }
 
 impl BackendStorage for CpuStorage {
@@ -1919,8 +2235,38 @@ impl BackendStorage for CpuStorage {
         MaxPool2D(kernel_size, stride).map(self, layout)
     }
 
+    fn upsample_nearest1d(&self, layout: &Layout, sz: usize) -> Result<Self> {
+        UpsampleNearest1D(sz).map(self, layout)
+    }
+
     fn upsample_nearest2d(&self, layout: &Layout, h: usize, w: usize) -> Result<Self> {
         UpsampleNearest2D(h, w).map(self, layout)
+    }
+
+    fn powf(&self, layout: &Layout, e: f64) -> Result<Self> {
+        use num_traits::Float;
+        // TODO: Have some generic map for functions that apply on num_traits::Float elements.
+        match self {
+            Self::BF16(storage) => {
+                let data = unary_map(storage, layout, |v| v.powf(bf16::from_f64(e)));
+                Ok(Self::BF16(data))
+            }
+            Self::F16(storage) => {
+                let data = unary_map(storage, layout, |v| v.powf(f16::from_f64(e)));
+                Ok(Self::F16(data))
+            }
+            Self::F32(storage) => {
+                let data = unary_map(storage, layout, |v| v.powf(e as f32));
+                Ok(Self::F32(data))
+            }
+            Self::F64(storage) => {
+                let data = unary_map(storage, layout, |v| v.powf(e));
+                Ok(Self::F64(data))
+            }
+            Self::U8(_) => Err(Error::UnsupportedDTypeForOp(DType::U8, "elu").bt()),
+            Self::U32(_) => Err(Error::UnsupportedDTypeForOp(DType::U32, "elu").bt()),
+            Self::I64(_) => Err(Error::UnsupportedDTypeForOp(DType::I64, "elu").bt()),
+        }
     }
 
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
@@ -2121,7 +2467,50 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
-        Conv1D(params).map(self, l, kernel, kernel_l)
+        if !USE_IM2COL_CONV1D {
+            return Conv1D(params).map(self, l, kernel, kernel_l);
+        }
+        let op = Im2Col1D {
+            l_k: params.k_size,
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+        };
+        let col = op.map(self, l)?;
+        let b = params.b_size;
+        let n = params.c_out;
+        let l_out = params.l_out();
+        let k = op.l_k * params.c_in;
+        let m = l_out;
+        let col_l = Layout::contiguous((b, m, k));
+        let res = if kernel_l.is_contiguous() {
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        } else {
+            // Make the kernel contiguous if not already the case.
+            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        };
+        let res_l = Layout::contiguous((b, l_out, params.c_out)).transpose(1, 2)?;
+        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        res.copy_strided_src(&mut res_t, 0, &res_l)?;
+        Ok(res_t)
+    }
+
+    fn conv_transpose1d(
+        &self,
+        l: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &crate::conv::ParamsConvTranspose1D,
+    ) -> Result<Self> {
+        ConvTranspose1D(params).map(self, l, kernel, kernel_l)
     }
 
     fn conv2d(
@@ -2131,7 +2520,43 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
-        Conv2D(params).map(self, l, kernel, kernel_l)
+        if !USE_IM2COL_CONV2D {
+            return Conv2D(params).map(self, l, kernel, kernel_l);
+        }
+        let op = Im2Col {
+            h_k: params.k_h,
+            w_k: params.k_w,
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+        };
+        let col = op.map(self, l)?;
+        let b = params.b_size;
+        let n = params.c_out;
+        let (h_out, w_out) = (params.out_h(), params.out_w());
+        let k = op.h_k * op.w_k * params.c_in;
+        let m = h_out * w_out;
+        let col_l = Layout::contiguous((b, m, k));
+        let res = if kernel_l.is_contiguous() {
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        } else {
+            // Make the kernel contiguous if not already the case.
+            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        };
+        let res_l = Layout::contiguous((b, h_out, w_out, params.c_out))
+            .transpose(1, 2)?
+            .transpose(1, 3)?;
+        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        res.copy_strided_src(&mut res_t, 0, &res_l)?;
+        Ok(res_t)
     }
 
     fn conv_transpose2d(
@@ -2192,25 +2617,25 @@ impl BackendStorage for CpuStorage {
             Self::U8(ids) => {
                 let ids = match ids_l.contiguous_offsets() {
                     Some((a, b)) => &ids[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" })?,
+                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
                 };
                 IndexAdd { ids, dim }.map(self, l, src, src_l)
             }
             Self::U32(ids) => {
                 let ids = match ids_l.contiguous_offsets() {
                     Some((a, b)) => &ids[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" })?,
+                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
                 };
                 IndexAdd { ids, dim }.map(self, l, src, src_l)
             }
             Self::I64(ids) => {
                 let ids = match ids_l.contiguous_offsets() {
                     Some((a, b)) => &ids[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" })?,
+                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
                 };
                 IndexAdd { ids, dim }.map(self, l, src, src_l)
             }
-            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "index-add")),
+            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "index-add").bt()),
         }
     }
 
@@ -2254,6 +2679,10 @@ impl BackendDevice for CpuDevice {
 
     fn new(_: usize) -> Result<Self> {
         Ok(Self)
+    }
+
+    fn set_seed(&self, _seed: u64) -> Result<()> {
+        crate::bail!("cannot seed the CPU rng with set_seed")
     }
 
     fn rand_uniform(&self, shape: &Shape, dtype: DType, min: f64, max: f64) -> Result<CpuStorage> {

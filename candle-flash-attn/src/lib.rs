@@ -3,36 +3,24 @@ mod ffi;
 use candle::backend::BackendStorage;
 use candle::cuda_backend::cudarc::driver::DevicePtr;
 use candle::cuda_backend::WrapErr;
-use candle::{CpuStorage, Layout, Result, Shape, Tensor};
-use half::f16;
+use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor};
+use half::{bf16, f16};
 
 pub struct FlashAttn {
     pub softmax_scale: f32,
-    pub causal: bool,
+    pub alibi_slopes: Option<Tensor>,
+    pub window_size_left: Option<usize>,
+    pub window_size_right: Option<usize>,
 }
 
 fn round_multiple(x: usize, m: usize) -> usize {
     (x + m - 1) / m * m
 }
 
-impl candle::CustomOp3 for FlashAttn {
-    fn name(&self) -> &'static str {
-        "flash-attn"
-    }
-
-    fn cpu_fwd(
-        &self,
-        _: &CpuStorage,
-        _: &Layout,
-        _: &CpuStorage,
-        _: &Layout,
-        _: &CpuStorage,
-        _: &Layout,
-    ) -> Result<(CpuStorage, Shape)> {
-        candle::bail!("no cpu support for flash-attn")
-    }
-
-    fn cuda_fwd(
+impl FlashAttn {
+    fn cuda_fwd_t<
+        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+    >(
         &self,
         q: &candle::CudaStorage,
         q_l: &Layout,
@@ -40,15 +28,16 @@ impl candle::CustomOp3 for FlashAttn {
         k_l: &Layout,
         v: &candle::CudaStorage,
         v_l: &Layout,
+        is_bf16: bool,
     ) -> Result<(candle::CudaStorage, Shape)> {
         // https://github.com/Dao-AILab/flash-attention/blob/b252072409e69c25f2b9d473cc534e49b24decd2/csrc/flash_attn/flash_api.cpp#L187
         let dev = q.device();
         let out_shape = q_l.shape().clone();
         let out_l = Layout::contiguous(&out_shape);
 
-        let q = q.as_cuda_slice::<f16>()?;
-        let k = k.as_cuda_slice::<f16>()?;
-        let v = v.as_cuda_slice::<f16>()?;
+        let q = q.as_cuda_slice::<T>()?;
+        let k = k.as_cuda_slice::<T>()?;
+        let v = v.as_cuda_slice::<T>()?;
         let q = q.slice(q_l.start_offset()..);
         let k = k.slice(k_l.start_offset()..);
         let v = v.slice(v_l.start_offset()..);
@@ -98,16 +87,75 @@ impl candle::CustomOp3 for FlashAttn {
             candle::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
         }
 
+        let alibi_slopes_ptr = if let Some(alibi_slopes) = &self.alibi_slopes {
+            if alibi_slopes.dtype() != DType::F32 {
+                candle::bail!(
+                    "DType mismatch alibi_slopes {:?}, expected {:?}",
+                    alibi_slopes.dtype(),
+                    DType::F32
+                );
+            }
+
+            let (alibi_slopes, alibi_slopes_layout) = alibi_slopes.storage_and_layout();
+
+            if num_heads != alibi_slopes_layout.shape().dims1()? {
+                candle::bail!(
+                    "shape mismatch alibi_slopes {:?}, expected {:?}",
+                    alibi_slopes_layout.shape(),
+                    (num_heads)
+                );
+            }
+
+            let alibi_slopes = match &*alibi_slopes {
+                candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+                _ => candle::bail!("alibi_slopes must be a cuda tensor"),
+            };
+
+            let alibi_slopes = alibi_slopes.slice(alibi_slopes_layout.start_offset()..);
+
+            *alibi_slopes.device_ptr() as *const core::ffi::c_void
+        } else {
+            std::ptr::null()
+        };
+
+        // if window_size_left > self.max_seqlen_k or None => -1
+        let mut window_size_left = self
+            .window_size_left
+            .filter(|v| v <= &seqlen_k)
+            .map(|v| v as i32)
+            .unwrap_or(-1);
+
+        // if window_size_right > self.max_seqlen_k or None => -1
+        let mut window_size_right = self
+            .window_size_right
+            .filter(|v| v <= &seqlen_k)
+            .map(|v| v as i32)
+            .unwrap_or(-1);
+
         let head_size = round_multiple(head_size_og, 8);
         let head_size_rounded = round_multiple(head_size, 32);
         let seqlen_q_rounded = round_multiple(seqlen_q, 128);
         let seqlen_k_rounded = round_multiple(seqlen_k, 128);
 
         let elem_count = out_shape.elem_count();
-        let dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
+        let dst = unsafe { dev.alloc::<T>(elem_count) }.w()?;
         let softmax_lse = dev.alloc_zeros::<f32>(b_sz * num_heads * seqlen_q).w()?;
 
-        let causal = if self.causal { 1 } else { 0 };
+        let is_bf16 = if is_bf16 { 1 } else { 0 };
+
+        // Causal is the special case where window_size_right == 0 and window_size_left < 0.
+        // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
+        let is_causal = if window_size_left < 0 && window_size_right == 0 {
+            1
+        } else {
+            0
+        };
+        if window_size_left < 0 && window_size_right >= 0 {
+            window_size_left = seqlen_k as i32;
+        }
+        if window_size_left >= 0 && window_size_right < 0 {
+            window_size_right = seqlen_k as i32;
+        }
 
         unsafe {
             let q_ptr = *q.device_ptr() as *const core::ffi::c_void;
@@ -121,12 +169,14 @@ impl candle::CustomOp3 for FlashAttn {
                 v_ptr,
                 dst_ptr,
                 softmax_lse_ptr,
+                /* alibi_slopes_ptr */ alibi_slopes_ptr,
                 /* cu_seqlens_q_ptr */ std::ptr::null(),
                 /* cu_seqlens_k_ptr */ std::ptr::null(),
                 /* q_batch_stride */ q_stride[0] as u32,
                 /* k_batch_stride */ k_stride[0] as u32,
                 /* v_batch_stride */ v_stride[0] as u32,
                 /* o_batch_stride */ o_stride[0] as u32,
+                /* alibi_slopes_batch_stride */ 0,
                 /* q_row_stride   */ q_stride[q_rank - 3] as u32,
                 /* k_row_stride   */ k_stride[k_rank - 3] as u32,
                 /* v_row_stride   */ v_stride[v_rank - 3] as u32,
@@ -145,7 +195,10 @@ impl candle::CustomOp3 for FlashAttn {
                 /* seqlen_k */ seqlen_k as u32,
                 /* seqlen_q_rounded */ seqlen_q_rounded as u32,
                 /* seqlen_k_rounded */ seqlen_k_rounded as u32,
-                /* is_causal */ causal,
+                /* is_bf16 */ is_bf16,
+                /* is_causal */ is_causal,
+                /* window_size_left */ window_size_left,
+                /* window_size_right */ window_size_right,
             )
         }
 
@@ -154,45 +207,9 @@ impl candle::CustomOp3 for FlashAttn {
     }
 }
 
-/// Flash-attention v2 layer.
-///
-/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
-/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
-/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
-///
-/// # Arguments
-///
-/// * `q` - Query tensor with shape `(batch, seq_len_q, num_heads_q, head_size)`.
-/// * `k` - Key tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
-/// * `v` - Value tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
-///
-/// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
-pub fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    let op = FlashAttn {
-        softmax_scale,
-        causal,
-    };
-    q.apply_op3(k, v, op)
-}
-
-struct FlashAttnVarLen {
-    softmax_scale: f32,
-    causal: bool,
-    max_seqlen_q: usize,
-    max_seqlen_k: usize,
-    seqlens_q: Tensor,
-    seqlens_k: Tensor,
-}
-
-impl candle::CustomOp3 for FlashAttnVarLen {
+impl candle::CustomOp3 for FlashAttn {
     fn name(&self) -> &'static str {
-        "flash-attn-varlen"
+        "flash-attn"
     }
 
     fn cpu_fwd(
@@ -216,6 +233,180 @@ impl candle::CustomOp3 for FlashAttnVarLen {
         v: &candle::CudaStorage,
         v_l: &Layout,
     ) -> Result<(candle::CudaStorage, Shape)> {
+        match q.dtype() {
+            candle::DType::F16 => self.cuda_fwd_t::<f16>(q, q_l, k, k_l, v, v_l, false),
+            candle::DType::BF16 => self.cuda_fwd_t::<bf16>(q, q_l, k, k_l, v, v_l, true),
+            dt => candle::bail!("flash-attn is only supported for f16/bf16 ({dt:?})"),
+        }
+    }
+}
+
+/// Flash-attention v2 layer.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(batch, seq_len_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+///
+/// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
+pub fn flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+/// Flash-attention v2 layer.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(batch, seq_len_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `window_size_left` - Limit left attention to value tokens.
+/// * `window_size_right` - Limit right attention to value tokens.
+///
+/// # Causal mask
+///
+/// `window_size_left=None` with `window_size_right=Some(0)` applies a causal mask to the result
+/// of  `Q @ K^T`
+///
+/// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
+pub fn flash_attn_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+/// Flash-attention v2 layer.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(batch, seq_len_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `alibi_slopes` - Alibi slopes tensor with shape `(num_heads_q)`.
+///
+/// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
+pub fn flash_attn_alibi(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    alibi_slopes: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: Some(alibi_slopes.clone()),
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+/// Flash-attention v2 layer.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(batch, seq_len_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(batch, seq_len_kv, num_heads_kv, head_size)`.
+/// * `alibi_slopes` - Alibi slopes tensor with shape `(num_heads_q)`.
+/// * `window_size_left` - Limit left attention to value tokens.
+/// * `window_size_right` - Limit right attention to value tokens.
+///
+/// # Causal mask
+///
+/// `window_size_left=None` with `window_size_right=Some(0)` applies a causal mask to the result
+/// of  `Q @ K^T`
+///
+/// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
+pub fn flash_attn_alibi_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    alibi_slopes: &Tensor,
+    softmax_scale: f32,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: Some(alibi_slopes.clone()),
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+struct FlashAttnVarLen {
+    pub softmax_scale: f32,
+    pub max_seqlen_q: usize,
+    pub max_seqlen_k: usize,
+    pub seqlens_q: Tensor,
+    pub seqlens_k: Tensor,
+    pub alibi_slopes: Option<Tensor>,
+    pub window_size_left: Option<usize>,
+    pub window_size_right: Option<usize>,
+}
+
+impl FlashAttnVarLen {
+    fn cuda_fwd_t<
+        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+    >(
+        &self,
+        q: &candle::CudaStorage,
+        q_l: &Layout,
+        k: &candle::CudaStorage,
+        k_l: &Layout,
+        v: &candle::CudaStorage,
+        v_l: &Layout,
+        is_bf16: bool,
+    ) -> Result<(candle::CudaStorage, Shape)> {
         // https://github.com/Dao-AILab/flash-attention/blob/184b992dcb2a0890adaa19eb9b541c3e4f9d2a08/csrc/flash_attn/flash_api.cpp#L327
         let dev = q.device();
         let out_shape = q_l.shape().clone();
@@ -223,8 +414,8 @@ impl candle::CustomOp3 for FlashAttnVarLen {
 
         let (seqlens_q, seqlens_q_layout) = self.seqlens_q.storage_and_layout();
         let seqlens_q = match &*seqlens_q {
-            candle::Storage::Cpu(_) => candle::bail!("seqlens_q must be a cuda tensor"),
             candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?, // Should be i32!
+            _ => candle::bail!("seqlens_q must be a cuda tensor"),
         };
         let seqlens_q = match seqlens_q_layout.contiguous_offsets() {
             Some((o1, o2)) => seqlens_q.slice(o1..o2),
@@ -233,8 +424,8 @@ impl candle::CustomOp3 for FlashAttnVarLen {
 
         let (seqlens_k, seqlens_k_layout) = self.seqlens_k.storage_and_layout();
         let seqlens_k = match &*seqlens_k {
-            candle::Storage::Cpu(_) => candle::bail!("seqlens_k must be a cuda tensor"),
             candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?, // Should be i32!
+            _ => candle::bail!("seqlens_k must be a cuda tensor"),
         };
         let seqlens_k = match seqlens_k_layout.contiguous_offsets() {
             Some((o1, o2)) => seqlens_k.slice(o1..o2),
@@ -301,7 +492,54 @@ impl candle::CustomOp3 for FlashAttnVarLen {
         if nseqlens_k != nseqlens_q {
             candle::bail!("seqlens_q and seqlens_k should have the same number of elements {nseqlens_q} <> {nseqlens_k}")
         }
+
         let batch_size = nseqlens_q - 1;
+
+        let alibi_slopes_ptr = if let Some(alibi_slopes) = &self.alibi_slopes {
+            if alibi_slopes.dtype() != DType::F32 {
+                candle::bail!(
+                    "DType mismatch alibi_slopes {:?}, expected {:?}",
+                    alibi_slopes.dtype(),
+                    DType::F32
+                );
+            }
+
+            let (alibi_slopes, alibi_slopes_layout) = alibi_slopes.storage_and_layout();
+
+            if num_heads != alibi_slopes_layout.shape().dims1()? {
+                candle::bail!(
+                    "shape mismatch alibi_slopes {:?}, expected {:?}",
+                    alibi_slopes_layout.shape(),
+                    (num_heads)
+                );
+            }
+
+            let alibi_slopes = match &*alibi_slopes {
+                candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+                _ => candle::bail!("alibi_slopes must be a cuda tensor"),
+            };
+
+            let alibi_slopes = alibi_slopes.slice(alibi_slopes_layout.start_offset()..);
+
+            *alibi_slopes.device_ptr() as *const core::ffi::c_void
+        } else {
+            std::ptr::null()
+        };
+
+        // if window_size_left > self.max_seqlen_k or None => -1
+        let mut window_size_left = self
+            .window_size_left
+            .filter(|v| v <= &self.max_seqlen_k)
+            .map(|v| v as i32)
+            .unwrap_or(-1);
+
+        // if window_size_right > self.max_seqlen_k or None => -1
+        let mut window_size_right = self
+            .window_size_right
+            .filter(|v| v <= &self.max_seqlen_k)
+            .map(|v| v as i32)
+            .unwrap_or(-1);
+
         let head_size = round_multiple(head_size_og, 8);
         let head_size_rounded = round_multiple(head_size, 32);
         let seqlen_q_rounded = round_multiple(self.max_seqlen_q, 128);
@@ -313,7 +551,21 @@ impl candle::CustomOp3 for FlashAttnVarLen {
             .alloc_zeros::<f32>(batch_size * num_heads * self.max_seqlen_q)
             .w()?;
 
-        let causal = if self.causal { 1 } else { 0 };
+        let is_bf16 = if is_bf16 { 1 } else { 0 };
+
+        // Causal is the special case where window_size_right == 0 and window_size_left < 0.
+        // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
+        let is_causal = if window_size_left < 0 && window_size_right == 0 {
+            1
+        } else {
+            0
+        };
+        if window_size_left < 0 && window_size_right >= 0 {
+            window_size_left = self.max_seqlen_k as i32;
+        }
+        if window_size_left >= 0 && window_size_right < 0 {
+            window_size_right = self.max_seqlen_k as i32;
+        }
 
         unsafe {
             let q_ptr = *q.device_ptr() as *const core::ffi::c_void;
@@ -329,12 +581,14 @@ impl candle::CustomOp3 for FlashAttnVarLen {
                 v_ptr,
                 dst_ptr,
                 softmax_lse_ptr,
+                /* alibi_slopes_ptr */ alibi_slopes_ptr,
                 /* cu_seqlens_q_ptr */ seqlens_q_ptr,
                 /* cu_seqlens_k_ptr */ seqlens_k_ptr,
                 /* q_batch_stride */ 0,
                 /* k_batch_stride */ 0,
                 /* v_batch_stride */ 0,
                 /* o_batch_stride */ 0,
+                /* alibi_slopes_batch_stride */ 0,
                 /* q_row_stride   */ q_stride[q_rank - 3] as u32,
                 /* k_row_stride   */ k_stride[k_rank - 3] as u32,
                 /* v_row_stride   */ v_stride[v_rank - 3] as u32,
@@ -353,12 +607,49 @@ impl candle::CustomOp3 for FlashAttnVarLen {
                 /* seqlen_k */ self.max_seqlen_k as u32,
                 /* seqlen_q_rounded */ seqlen_q_rounded as u32,
                 /* seqlen_k_rounded */ seqlen_k_rounded as u32,
-                /* is_causal */ causal,
+                /* is_bf16 */ is_bf16,
+                /* is_causal */ is_causal,
+                /* window_size_left */ window_size_left,
+                /* window_size_right */ window_size_right,
             )
         }
 
         let dst = candle::CudaStorage::wrap_cuda_slice(dst, dev.clone());
         Ok((dst, out_shape))
+    }
+}
+
+impl candle::CustomOp3 for FlashAttnVarLen {
+    fn name(&self) -> &'static str {
+        "flash-attn-varlen"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle::bail!("no cpu support for flash-attn")
+    }
+
+    fn cuda_fwd(
+        &self,
+        q: &candle::CudaStorage,
+        q_l: &Layout,
+        k: &candle::CudaStorage,
+        k_l: &Layout,
+        v: &candle::CudaStorage,
+        v_l: &Layout,
+    ) -> Result<(candle::CudaStorage, Shape)> {
+        match q.dtype() {
+            candle::DType::F16 => self.cuda_fwd_t::<f16>(q, q_l, k, k_l, v, v_l, false),
+            candle::DType::BF16 => self.cuda_fwd_t::<bf16>(q, q_l, k, k_l, v, v_l, true),
+            dt => candle::bail!("flash-attn is only supported for f16/bf16 ({dt:?})"),
+        }
     }
 }
 
@@ -394,13 +685,176 @@ pub fn flash_attn_varlen(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
     let op = FlashAttnVarLen {
         softmax_scale,
-        causal,
         max_seqlen_q,
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Flash-attention v2 layer with variable-length batching.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(total_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `seqlens_q` - The cumulative lengths of the sequences in the batch, used to index in q.
+/// * `seqlens_k` - The cumulative lengths of the sequences in the batch, used to index in k and v.
+/// * `max_seqlen_q` - The maximum query sequence length for q in the batch.
+/// * `max_seqlen_k` - The maximum query sequence length for k and v in the batch.
+/// * `window_size_left` - Limit left attention to value tokens.
+/// * `window_size_right` - Limit right attention to value tokens.
+///
+/// `seqlens_q` and `seqlens_k` contain `batch_size + 1` elements, typically `0`, `seqlen_1`,
+/// `seqlen_1 + seqlen_2`, etc.
+///
+/// The resulting tensor has dimensions `(total_q, num_heads_q, head_size)`.
+///
+/// # Causal mask
+///
+/// `window_size_left=None` with `window_size_right=Some(0)` applies a causal mask to the result
+/// of  `Q @ K^T`
+pub fn flash_attn_varlen_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    seqlens_q: &Tensor,
+    seqlens_k: &Tensor,
+    max_seqlen_q: usize,
+    max_seqlen_k: usize,
+    softmax_scale: f32,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttnVarLen {
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_k,
+        seqlens_q: seqlens_q.clone(),
+        seqlens_k: seqlens_k.clone(),
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Flash-attention v2 layer with variable-length batching.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(total_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `alibi_slopes` - Alibi slopes tensor with shape `(num_heads_q)`.
+/// * `seqlens_q` - The cumulative lengths of the sequences in the batch, used to index in q.
+/// * `seqlens_k` - The cumulative lengths of the sequences in the batch, used to index in k and v.
+/// * `max_seqlen_q` - The maximum query sequence length for q in the batch.
+/// * `max_seqlen_k` - The maximum query sequence length for k and v in the batch.
+///
+/// `seqlens_q` and `seqlens_k` contain `batch_size + 1` elements, typically `0`, `seqlen_1`,
+/// `seqlen_1 + seqlen_2`, etc.
+///
+/// The resulting tensor has dimensions `(total_q, num_heads_q, head_size)`.
+pub fn flash_attn_varlen_alibi(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    alibi_slopes: &Tensor,
+    seqlens_q: &Tensor,
+    seqlens_k: &Tensor,
+    max_seqlen_q: usize,
+    max_seqlen_k: usize,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
+    let op = FlashAttnVarLen {
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_k,
+        seqlens_q: seqlens_q.clone(),
+        seqlens_k: seqlens_k.clone(),
+        alibi_slopes: Some(alibi_slopes.clone()),
+        window_size_left,
+        window_size_right,
+    };
+    q.apply_op3(k, v, op)
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Flash-attention v2 layer with variable-length batching.
+///
+/// This implements scaled dot-product attention, `softmax(Q @ K^T . softmax_scale) @ V`.
+/// Multi-query and grouped-query attention are supported by using tensors k and v with fewer heads
+/// than q, the number of heads in k and v has to be divisible by the number of heads in q.
+///
+/// # Arguments
+///
+/// * `q` - Query tensor with shape `(total_q, num_heads_q, head_size)`.
+/// * `k` - Key tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `v` - Value tensor with shape `(total_kv, num_heads_kv, head_size)`.
+/// * `alibi_slopes` - Alibi slopes tensor with shape `(num_heads_q)`.
+/// * `seqlens_q` - The cumulative lengths of the sequences in the batch, used to index in q.
+/// * `seqlens_k` - The cumulative lengths of the sequences in the batch, used to index in k and v.
+/// * `max_seqlen_q` - The maximum query sequence length for q in the batch.
+/// * `max_seqlen_k` - The maximum query sequence length for k and v in the batch.
+/// * `window_size_left` - Limit left attention to value tokens.
+/// * `window_size_right` - Limit right attention to value tokens.
+///
+/// `seqlens_q` and `seqlens_k` contain `batch_size + 1` elements, typically `0`, `seqlen_1`,
+/// `seqlen_1 + seqlen_2`, etc.
+///
+/// The resulting tensor has dimensions `(total_q, num_heads_q, head_size)`.
+///
+/// # Causal mask
+///
+/// `window_size_left=None` with `window_size_right=Some(0)` applies a causal mask to the result
+/// of  `Q @ K^T`
+pub fn flash_attn_varlen_alibi_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    alibi_slopes: &Tensor,
+    seqlens_q: &Tensor,
+    seqlens_k: &Tensor,
+    max_seqlen_q: usize,
+    max_seqlen_k: usize,
+    softmax_scale: f32,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttnVarLen {
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_k,
+        seqlens_q: seqlens_q.clone(),
+        seqlens_k: seqlens_k.clone(),
+        alibi_slopes: Some(alibi_slopes.clone()),
+        window_size_left,
+        window_size_right,
     };
     q.apply_op3(k, v, op)
 }

@@ -89,6 +89,10 @@ struct Args {
     #[arg(long)]
     temperature: Option<f64>,
 
+    /// Nucleus sampling probability cutoff.
+    #[arg(long)]
+    top_p: Option<f64>,
+
     /// The seed to use when generating random samples.
     #[arg(long, default_value_t = 299792458)]
     seed: u64,
@@ -139,14 +143,7 @@ fn main() -> Result<()> {
     let config_filename = api.get("config.json")?;
     let config: Config = serde_json::from_slice(&std::fs::read(config_filename)?)?;
     let tokenizer_filename = api.get("tokenizer.json")?;
-    let mut filenames = vec![];
-    for rfilename in [
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-    ] {
-        let filename = api.get(rfilename)?;
-        filenames.push(filename);
-    }
+    let filenames = candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?;
 
     if args.rank.is_none() {
         let children: Vec<_> = (0..args.num_shards)
@@ -201,16 +198,9 @@ fn main() -> Result<()> {
     let cache = model::Cache::new(dtype, &config, &device)?;
 
     println!("building the model");
-    let handles = filenames
-        .iter()
-        .map(|f| Ok(unsafe { candle::safetensors::MmapedFile::new(f.as_path())? }))
-        .collect::<Result<Vec<_>>>()?;
-    let tensors: Vec<_> = handles
-        .iter()
-        .map(|h| Ok(h.deserialize()?))
-        .collect::<Result<Vec<_>>>()?;
-
-    let vb = candle_nn::var_builder::ShardedSafeTensors::var_builder(tensors, dtype, &device);
+    let vb = unsafe {
+        candle_nn::var_builder::ShardedSafeTensors::var_builder(&filenames, dtype, &device)?
+    };
     let llama = Llama::load(vb, &cache, &config, comm)?;
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
@@ -222,7 +212,7 @@ fn main() -> Result<()> {
         .to_vec();
 
     println!("starting the inference loop");
-    let mut logits_processor = LogitsProcessor::new(args.seed, args.temperature);
+    let mut logits_processor = LogitsProcessor::new(args.seed, args.temperature, args.top_p);
     let mut new_tokens = vec![];
     let start_gen = std::time::Instant::now();
     let mut index_pos = 0;

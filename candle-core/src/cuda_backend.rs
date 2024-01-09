@@ -1,7 +1,7 @@
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType};
-use candle_kernels as kernels;
+pub use candle_kernels as kernels;
 pub use cudarc;
 use cudarc::cublas::{Gemm, GemmConfig, StridedBatchedConfig};
 use cudarc::driver::{
@@ -223,6 +223,14 @@ impl BackendDevice for CudaDevice {
         })
     }
 
+    fn set_seed(&self, seed: u64) -> Result<()> {
+        // We do not call set_seed but instead create a new curand object. This ensures that the
+        // state will be identical and the same random numbers will be generated.
+        let mut curand = self.curand.lock().unwrap();
+        curand.0 = cudarc::curand::CudaRng::new(seed, self.device.clone()).w()?;
+        Ok(())
+    }
+
     fn location(&self) -> crate::DeviceLocation {
         crate::DeviceLocation::Cuda {
             gpu_id: self.device.ordinal(),
@@ -312,6 +320,13 @@ impl BackendDevice for CudaDevice {
         // cudarc changes.
         let elem_count = shape.elem_count();
         let curand = self.curand.lock().unwrap();
+        // curand can only generate an odd number of values.
+        // https://github.com/huggingface/candle/issues/734
+        let elem_count_round = if elem_count % 2 == 1 {
+            elem_count + 1
+        } else {
+            elem_count
+        };
         let slice = match dtype {
             DType::U8 | DType::U32 | DType::I64 | DType::F16 | DType::BF16 => {
                 Err(CudaError::UnsupportedDtype {
@@ -321,7 +336,7 @@ impl BackendDevice for CudaDevice {
                 .w()?
             }
             DType::F32 => {
-                let mut data = unsafe { self.alloc::<f32>(elem_count) }.w()?;
+                let mut data = unsafe { self.alloc::<f32>(elem_count_round) }.w()?;
                 curand
                     .0
                     .fill_with_normal(&mut data, mean as f32, std as f32)
@@ -329,7 +344,7 @@ impl BackendDevice for CudaDevice {
                 CudaStorageSlice::F32(data)
             }
             DType::F64 => {
-                let mut data = unsafe { self.alloc::<f64>(elem_count) }.w()?;
+                let mut data = unsafe { self.alloc::<f64>(elem_count_round) }.w()?;
                 curand.0.fill_with_normal(&mut data, mean, std).w()?;
                 CudaStorageSlice::F64(data)
             }
@@ -383,7 +398,7 @@ impl BackendDevice for CudaDevice {
 }
 
 #[derive(Debug)]
-enum CudaStorageSlice {
+pub enum CudaStorageSlice {
     U8(CudaSlice<u8>),
     U32(CudaSlice<u32>),
     I64(CudaSlice<i64>),
@@ -394,7 +409,7 @@ enum CudaStorageSlice {
 }
 type S = CudaStorageSlice;
 
-trait Map1 {
+pub trait Map1 {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src: &CudaSlice<T>,
@@ -416,7 +431,7 @@ trait Map1 {
     }
 }
 
-trait Map2 {
+pub trait Map2 {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src1: &CudaSlice<T>,
@@ -441,7 +456,7 @@ trait Map2 {
     }
 }
 
-trait Map2InPlace {
+pub trait Map2InPlace {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         dst: &mut CudaSlice<T>,
@@ -472,7 +487,7 @@ trait Map2InPlace {
     }
 }
 
-trait Map1Any {
+pub trait Map1Any {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits, W: Fn(CudaSlice<T>) -> S>(
         &self,
         src: &CudaSlice<T>,
@@ -495,7 +510,7 @@ trait Map1Any {
     }
 }
 
-trait Map2Any {
+pub trait Map2Any {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src1: &CudaSlice<T>,
@@ -532,7 +547,7 @@ impl Map1 for Clone {
     }
 }
 
-fn kernel_name<T: WithDType>(root: &str) -> String {
+pub fn kernel_name<T: WithDType>(root: &str) -> String {
     let dtype = T::DTYPE.as_str();
     format!("{root}_{dtype}")
 }
@@ -584,6 +599,129 @@ impl Map1 for Elu {
         let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("uelu"), kernels::UNARY)?;
+        // SAFETY: Set later by running the kernel.
+        let out = unsafe { dev.alloc::<T>(el) }.w()?;
+        let params = (el, dims.len(), &ds, T::from_f64(self.0), src, &out);
+        // SAFETY: ffi.
+        unsafe { func.launch(cfg, params) }.w()?;
+        Ok(out)
+    }
+}
+
+struct Im2Col1D {
+    l_k: usize,
+    stride: usize,
+    dilation: usize,
+    padding: usize,
+}
+
+impl Im2Col1D {
+    fn l_out(&self, l: usize) -> usize {
+        (l + 2 * self.padding - self.dilation * (self.l_k - 1) - 1) / self.stride + 1
+    }
+}
+
+impl Map1 for Im2Col1D {
+    fn f<T: DeviceRepr + WithDType>(
+        &self,
+        src: &CudaSlice<T>,
+        dev: &CudaDevice,
+        layout: &Layout,
+    ) -> Result<CudaSlice<T>> {
+        let shape = layout.shape();
+        let dims = shape.dims();
+        let l_out = self.l_out(dims[2]);
+        let dst_el = dims[0] * l_out * dims[1] * self.l_k;
+        let cfg = LaunchConfig::for_num_elems(dst_el as u32);
+        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let src = &src.slice(layout.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("im2col1d"), kernels::CONV)?;
+        // SAFETY: Set later by running the kernel.
+        let dst = unsafe { dev.alloc::<T>(dst_el) }.w()?;
+        let params = (
+            dst_el,
+            l_out,
+            self.l_k,
+            self.stride,
+            self.padding,
+            self.dilation,
+            &ds,
+            src,
+            &dst,
+        );
+        // SAFETY: ffi.
+        unsafe { func.launch(cfg, params) }.w()?;
+        Ok(dst)
+    }
+}
+
+struct Im2Col {
+    h_k: usize,
+    w_k: usize,
+    stride: usize,
+    dilation: usize,
+    padding: usize,
+}
+
+impl Im2Col {
+    fn hw_out(&self, h: usize, w: usize) -> (usize, usize) {
+        let h_out = (h + 2 * self.padding - self.dilation * (self.h_k - 1) - 1) / self.stride + 1;
+        let w_out = (w + 2 * self.padding - self.dilation * (self.w_k - 1) - 1) / self.stride + 1;
+        (h_out, w_out)
+    }
+}
+
+impl Map1 for Im2Col {
+    fn f<T: DeviceRepr + WithDType>(
+        &self,
+        src: &CudaSlice<T>,
+        dev: &CudaDevice,
+        layout: &Layout,
+    ) -> Result<CudaSlice<T>> {
+        let shape = layout.shape();
+        let dims = shape.dims();
+        let (h_out, w_out) = self.hw_out(dims[2], dims[3]);
+        let dst_el = dims[0] * h_out * w_out * dims[1] * self.h_k * self.w_k;
+        let cfg = LaunchConfig::for_num_elems(dst_el as u32);
+        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let src = &src.slice(layout.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("im2col"), kernels::CONV)?;
+        // SAFETY: Set later by running the kernel.
+        let dst = unsafe { dev.alloc::<T>(dst_el) }.w()?;
+        let params = (
+            dst_el,
+            h_out,
+            w_out,
+            self.h_k,
+            self.w_k,
+            self.stride,
+            self.padding,
+            self.dilation,
+            &ds,
+            src,
+            &dst,
+        );
+        // SAFETY: ffi.
+        unsafe { func.launch(cfg, params) }.w()?;
+        Ok(dst)
+    }
+}
+
+struct Powf(f64);
+impl Map1 for Powf {
+    fn f<T: DeviceRepr + WithDType>(
+        &self,
+        src: &CudaSlice<T>,
+        dev: &CudaDevice,
+        layout: &Layout,
+    ) -> Result<CudaSlice<T>> {
+        let shape = layout.shape();
+        let dims = shape.dims();
+        let el = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let src = &src.slice(layout.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
         let out = unsafe { dev.alloc::<T>(el) }.w()?;
         let params = (el, dims.len(), &ds, T::from_f64(self.0), src, &out);
@@ -754,8 +892,6 @@ impl<'a> Map1 for IndexSelect<'a> {
         };
         let ids_shape = ids_l.shape();
         let ids_dims = ids_shape.dims();
-        let ids_el = ids_shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(ids_el as u32);
         let ds = dev.htod_copy([ids_dims, ids_l.stride()].concat()).w()?;
         let src = match src_l.contiguous_offsets() {
             Some((o1, o2)) => src.slice(o1..o2),
@@ -763,19 +899,23 @@ impl<'a> Map1 for IndexSelect<'a> {
         };
         let left_size: usize = src_l.dims()[..self.2].iter().product();
         let right_size: usize = src_l.dims()[self.2 + 1..].iter().product();
-        let dim_size = src_l.dims()[self.2];
+        let src_dim_size = src_l.dims()[self.2];
+        let ids_dim_size = ids_shape.elem_count();
+        let dst_el = ids_shape.elem_count() * left_size * right_size;
+        let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>(name), kernels::INDEXING)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(ids_el * left_size * right_size) }.w()?;
+        let out = unsafe { dev.alloc::<T>(dst_el) }.w()?;
         let params = (
-            ids_el,
+            dst_el,
             ids_dims.len(),
             &ds,
             ids,
             &src,
             &out,
             left_size,
-            dim_size,
+            src_dim_size,
+            ids_dim_size,
             right_size,
         );
         // SAFETY: ffi.
@@ -960,7 +1100,9 @@ impl<'a> Map2 for Conv1D<'a> {
             crate::bail!("unexpected input shape for conv1d {dims:?}")
         };
         let ds = dev.htod_copy(ds).w()?;
-        let params = (el, l_out, p.stride, p.padding, &ds, inp, k, &out);
+        let params = (
+            el, l_out, p.stride, p.padding, p.dilation, &ds, inp, k, &out,
+        );
         // SAFETY: ffi.
         unsafe { func.launch(cfg, params) }.w()?;
         Ok(out)
@@ -998,7 +1140,9 @@ impl<'a> Map2 for Conv2D<'a> {
             crate::bail!("unexpected input shape for conv2d {dims:?}")
         };
         let ds = dev.htod_copy(ds).w()?;
-        let params = (el, out_w, out_h, p.stride, p.padding, &ds, inp, k, &out);
+        let params = (
+            el, out_w, out_h, p.stride, p.padding, p.dilation, &ds, inp, k, &out,
+        );
         // SAFETY: ffi.
         unsafe { func.launch(cfg, params) }.w()?;
         Ok(out)
@@ -1043,6 +1187,7 @@ impl<'a> Map2 for ConvTranspose2D<'a> {
             p.stride,
             p.padding,
             p.output_padding,
+            p.dilation,
             &ds,
             inp,
             k,
@@ -1281,8 +1426,8 @@ fn slice_src_and_dst<'a, T>(
 
 #[derive(Debug)]
 pub struct CudaStorage {
-    slice: CudaStorageSlice,
-    device: CudaDevice,
+    pub slice: CudaStorageSlice,
+    pub device: CudaDevice,
 }
 
 pub trait CudaDType: Sized {
@@ -1520,6 +1665,12 @@ impl BackendStorage for CudaStorage {
         Ok(Self { slice, device })
     }
 
+    fn powf(&self, layout: &Layout, e: f64) -> Result<Self> {
+        let device = self.device().clone();
+        let slice = Powf(e).map(&self.slice, &device, layout)?;
+        Ok(Self { slice, device })
+    }
+
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
         let device = self.device().clone();
         let slice = Elu(alpha).map(&self.slice, &device, layout)?;
@@ -1615,9 +1766,56 @@ impl BackendStorage for CudaStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
+        const USE_IM2COL_CONV1D: bool = true;
+
         let device = self.device().clone();
-        let slice = Conv1D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
-        Ok(Self { slice, device })
+        if !USE_IM2COL_CONV1D {
+            let slice = Conv1D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
+            return Ok(Self { slice, device });
+        }
+
+        let col = Im2Col1D {
+            l_k: params.k_size,
+            stride: params.stride,
+            dilation: params.dilation,
+            padding: params.padding,
+        }
+        .map(&self.slice, &device, l)?;
+        let col = Self { slice: col, device };
+        let l_out = params.l_out();
+        let b = params.b_size;
+        let n = params.c_out;
+        let k = params.k_size * params.c_in;
+        let m = l_out;
+        let col_l = Layout::contiguous((b, m, k));
+        let res = if kernel_l.is_contiguous() {
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        } else {
+            // Make the kernel contiguous if not already the case.
+            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        };
+        let res_l = Layout::contiguous((b, l_out, n)).transpose(1, 2)?;
+        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        res.copy_strided_src(&mut res_t, 0, &res_l)?;
+        Ok(res_t)
+    }
+
+    fn conv_transpose1d(
+        &self,
+        _: &Layout,
+        _: &Self,
+        _: &Layout,
+        _: &crate::conv::ParamsConvTranspose1D,
+    ) -> Result<Self> {
+        todo!()
     }
 
     #[cfg(not(feature = "cudnn"))]
@@ -1628,9 +1826,50 @@ impl BackendStorage for CudaStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
+        const USE_IM2COL_CONV2D: bool = true;
+
         let device = self.device().clone();
-        let slice = Conv2D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
-        Ok(Self { slice, device })
+        if !USE_IM2COL_CONV2D {
+            let slice = Conv2D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
+            return Ok(Self { slice, device });
+        }
+
+        let col = Im2Col {
+            h_k: params.k_h,
+            w_k: params.k_w,
+            stride: params.stride,
+            dilation: params.dilation,
+            padding: params.padding,
+        }
+        .map(&self.slice, &device, l)?;
+        let col = Self { slice: col, device };
+        let h_out = params.out_h();
+        let w_out = params.out_w();
+        let b = params.b_size;
+        let n = params.c_out;
+        let k = params.k_h * params.k_w * params.c_in;
+        let m = h_out * w_out;
+        let col_l = Layout::contiguous((b, m, k));
+        let res = if kernel_l.is_contiguous() {
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        } else {
+            // Make the kernel contiguous if not already the case.
+            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+                .transpose(1, 2)?
+                .broadcast_as((b, k, n))?;
+            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        };
+        let res_l = Layout::contiguous((b, h_out, w_out, n))
+            .transpose(1, 2)?
+            .transpose(1, 3)?;
+        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        res.copy_strided_src(&mut res_t, 0, &res_l)?;
+        Ok(res_t)
     }
 
     #[cfg(feature = "cudnn")]
@@ -1733,6 +1972,10 @@ impl BackendStorage for CudaStorage {
         }
         .map(&self.slice, &device, l)?;
         Ok(Self { slice, device })
+    }
+
+    fn upsample_nearest1d(&self, _: &Layout, _out_sz: usize) -> Result<Self> {
+        crate::bail!("upsample-nearest1d is not supported on cuda")
     }
 
     fn upsample_nearest2d(&self, l: &Layout, out_w: usize, out_h: usize) -> Result<Self> {
@@ -1854,6 +2097,9 @@ impl BackendStorage for CudaStorage {
         let src_shape = src_l.shape();
         let dims = src_shape.dims();
         let el_count = src_shape.elem_count();
+        if el_count == 0 {
+            return Ok(());
+        }
         let cfg = LaunchConfig::for_num_elems(el_count as u32);
         let dev = &self.device;
         let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
@@ -1935,7 +2181,7 @@ impl BackendStorage for CudaStorage {
                 if src_l.is_contiguous() {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
-                    let func = dev.get_or_load_func("ucopy_64", kernels::UNARY)?;
+                    let func = dev.get_or_load_func("ucopy_f64", kernels::UNARY)?;
                     // SAFETY: Set later by running the kernel.
                     let params = (el_count, dims.len(), &ds, &src, &mut dst);
                     // SAFETY: ffi.

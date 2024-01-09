@@ -46,19 +46,31 @@ impl Tensor {
                     current_dim += 1;
                     out
                 }
+                TensorIndexer::IndexSelect(indexes) => {
+                    if indexes.rank() != 1 {
+                        crate::bail!("multi-dimensional tensor indexing is not supported")
+                    }
+                    let out = x.index_select(&indexes.to_device(x.device())?, current_dim)?;
+                    current_dim += 1;
+                    out
+                }
+                TensorIndexer::Err(e) => crate::bail!("indexing error {e:?}"),
             };
         }
         Ok(x)
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 /// Generic structure used to index a slice of the tensor
 pub enum TensorIndexer {
-    /// This selects the elemnts for which an index has some specific value.
+    /// This selects the elements for which an index has some specific value.
     Select(usize),
     /// This is a regular slice, purely indexing a chunk of the tensor
     Narrow(Bound<usize>, Bound<usize>),
+    /// Indexing via a 1d tensor
+    IndexSelect(Tensor),
+    Err(Error),
 }
 
 impl From<usize> for TensorIndexer {
@@ -67,36 +79,55 @@ impl From<usize> for TensorIndexer {
     }
 }
 
-macro_rules! impl_from_range {
-    ($range_type:ty) => {
-        impl From<$range_type> for TensorIndexer {
-            fn from(range: $range_type) -> Self {
-                use std::ops::Bound::*;
-
-                let start = match range.start_bound() {
-                    Included(idx) => Included(*idx),
-                    Excluded(idx) => Excluded(*idx),
-                    Unbounded => Unbounded,
-                };
-
-                let end = match range.end_bound() {
-                    Included(idx) => Included(*idx),
-                    Excluded(idx) => Excluded(*idx),
-                    Unbounded => Unbounded,
-                };
-
-                TensorIndexer::Narrow(start, end)
-            }
+impl From<&[u32]> for TensorIndexer {
+    fn from(index: &[u32]) -> Self {
+        match Tensor::new(index, &crate::Device::Cpu) {
+            Ok(tensor) => TensorIndexer::IndexSelect(tensor),
+            Err(e) => TensorIndexer::Err(e),
         }
-    };
+    }
 }
 
-impl_from_range!(Range<usize>);
-impl_from_range!(RangeFrom<usize>);
-impl_from_range!(RangeFull);
-impl_from_range!(RangeInclusive<usize>);
-impl_from_range!(RangeTo<usize>);
-impl_from_range!(RangeToInclusive<usize>);
+impl From<Vec<u32>> for TensorIndexer {
+    fn from(index: Vec<u32>) -> Self {
+        let len = index.len();
+        match Tensor::from_vec(index, len, &crate::Device::Cpu) {
+            Ok(tensor) => TensorIndexer::IndexSelect(tensor),
+            Err(e) => TensorIndexer::Err(e),
+        }
+    }
+}
+
+impl From<&Tensor> for TensorIndexer {
+    fn from(tensor: &Tensor) -> Self {
+        TensorIndexer::IndexSelect(tensor.clone())
+    }
+}
+
+trait RB: RangeBounds<usize> {}
+impl RB for Range<usize> {}
+impl RB for RangeFrom<usize> {}
+impl RB for RangeFull {}
+impl RB for RangeInclusive<usize> {}
+impl RB for RangeTo<usize> {}
+impl RB for RangeToInclusive<usize> {}
+
+impl<T: RB> From<T> for TensorIndexer {
+    fn from(range: T) -> Self {
+        use std::ops::Bound::*;
+        let start = match range.start_bound() {
+            Included(idx) => Included(*idx),
+            Excluded(idx) => Excluded(*idx),
+            Unbounded => Unbounded,
+        };
+        let end = match range.end_bound() {
+            Included(idx) => Included(*idx),
+            Excluded(idx) => Excluded(*idx),
+            Unbounded => Unbounded,
+        };
+        TensorIndexer::Narrow(start, end)
+    }
+}
 
 /// Trait used to implement multiple signatures for ease of use of the slicing
 /// of a tensor

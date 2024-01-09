@@ -6,9 +6,10 @@ extern crate accelerate_src;
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;
 
-mod model;
+use candle_transformers::models::llama2_c as model;
+use candle_transformers::models::llama2_c_weights as weights;
+use candle_transformers::models::quantized_llama2_c as qmodel;
 mod training;
-mod weights;
 use clap::{Parser, Subcommand};
 
 use anyhow::{Error as E, Result};
@@ -19,6 +20,7 @@ use std::io::Write;
 use tokenizers::Tokenizer;
 
 use model::{Config, Llama};
+use qmodel::QLlama;
 use weights::TransformerWeights;
 
 #[derive(Parser, Debug, Clone)]
@@ -26,6 +28,10 @@ struct InferenceCmd {
     /// The temperature used to generate samples.
     #[arg(long)]
     temperature: Option<f64>,
+
+    /// Nucleus sampling probability cutoff.
+    #[arg(long)]
+    top_p: Option<f64>,
 
     #[arg(long, default_value = "")]
     prompt: String,
@@ -103,6 +109,14 @@ pub struct Args {
     /// Tokenizer config file.
     #[arg(long)]
     tokenizer: Option<String>,
+
+    /// Penalty to be applied for repeating tokens, 1. means no penalty.
+    #[arg(long, default_value_t = 1.1)]
+    repeat_penalty: f32,
+
+    /// The context size to consider for the repeat penalty.
+    #[arg(long, default_value_t = 64)]
+    repeat_last_n: usize,
 }
 
 impl Args {
@@ -125,6 +139,7 @@ fn main() -> anyhow::Result<()> {
         None => {
             let cmd = InferenceCmd {
                 temperature: None,
+                top_p: None,
                 prompt: "".to_string(),
                 config: None,
                 model_id: "karpathy/tinyllamas".to_string(),
@@ -137,6 +152,20 @@ fn main() -> anyhow::Result<()> {
         Some(Task::Train(cmd)) => training::run(cmd, &args)?,
     }
     Ok(())
+}
+
+enum Model {
+    Llama(Llama),
+    QLlama(QLlama),
+}
+
+impl Model {
+    fn forward(&self, xs: &Tensor, pos: usize) -> anyhow::Result<Tensor> {
+        match self {
+            Self::Llama(l) => Ok(l.forward(xs, pos)?),
+            Self::QLlama(l) => Ok(l.forward(xs, pos)?),
+        }
+    }
 }
 
 fn run_eval(args: &EvaluationCmd, common_args: &Args) -> Result<()> {
@@ -228,27 +257,69 @@ fn run_inference(args: &InferenceCmd, common_args: &Args) -> Result<()> {
 
     let device = candle_examples::device(common_args.cpu)?;
 
+    let is_gguf = config_path.extension().map_or(false, |v| v == "gguf");
     let is_safetensors = config_path
         .extension()
         .map_or(false, |v| v == "safetensors");
-    let (vb, config) = if is_safetensors {
-        let config = Config::tiny();
+    let (model, config) = if is_gguf {
+        let vb = qmodel::VarBuilder::from_gguf(config_path)?;
+        let (_vocab_size, dim) = vb
+            .get_no_shape("model.embed_tokens.weight")?
+            .shape()
+            .dims2()?;
+        let config = match dim {
+            64 => Config::tiny_260k(),
+            288 => Config::tiny_15m(),
+            512 => Config::tiny_42m(),
+            768 => Config::tiny_110m(),
+            _ => anyhow::bail!("no config for dim {dim}"),
+        };
+        let freq_cis_real = vb
+            .get(
+                (config.seq_len, config.head_size() / 2),
+                "rot.freq_cis_real",
+            )?
+            .dequantize(&candle::Device::Cpu)?;
+        let freq_cis_imag = vb
+            .get(
+                (config.seq_len, config.head_size() / 2),
+                "rot.freq_cis_imag",
+            )?
+            .dequantize(&candle::Device::Cpu)?;
+
+        let fake_vb = candle_nn::VarBuilder::from_tensors(
+            [
+                ("freq_cis_real".to_string(), freq_cis_real),
+                ("freq_cis_imag".to_string(), freq_cis_imag),
+            ]
+            .into_iter()
+            .collect(),
+            candle::DType::F32,
+            &candle::Device::Cpu,
+        );
+        let cache = model::Cache::new(true, &config, fake_vb)?;
+        let model = Model::QLlama(QLlama::load(vb, &cache, config.clone())?);
+        (model, config)
+    } else if is_safetensors {
+        let config = Config::tiny_15m();
         let tensors = candle::safetensors::load(config_path, &device)?;
         let vb = candle_nn::VarBuilder::from_tensors(tensors, candle::DType::F32, &device);
-        (vb, config)
+        let cache = model::Cache::new(true, &config, vb.pp("rot"))?;
+        let model = Model::Llama(Llama::load(vb, &cache, config.clone())?);
+        (model, config)
     } else {
         let mut file = std::fs::File::open(config_path)?;
         let config = Config::from_reader(&mut file)?;
         println!("{config:?}");
         let weights = TransformerWeights::from_reader(&mut file, &config, &device)?;
         let vb = weights.var_builder(&config, &device)?;
-        (vb, config)
+        let cache = model::Cache::new(true, &config, vb.pp("rot"))?;
+        let model = Model::Llama(Llama::load(vb, &cache, config.clone())?);
+        (model, config)
     };
-    let cache = model::Cache::new(true, &config, vb.pp("rot"))?;
-    let model = Llama::load(vb, &cache, config)?;
 
     println!("starting the inference loop");
-    let mut logits_processor = LogitsProcessor::new(299792458, args.temperature);
+    let mut logits_processor = LogitsProcessor::new(299792458, args.temperature, args.top_p);
     let mut index_pos = 0;
 
     print!("{}", args.prompt);
@@ -260,7 +331,7 @@ fn run_inference(args: &InferenceCmd, common_args: &Args) -> Result<()> {
 
     let start_gen = std::time::Instant::now();
     for index in 0.. {
-        if tokens.len() >= model.config.seq_len {
+        if tokens.len() >= config.seq_len {
             break;
         }
         let context_size = if index > 0 { 1 } else { tokens.len() };
@@ -268,6 +339,16 @@ fn run_inference(args: &InferenceCmd, common_args: &Args) -> Result<()> {
         let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
         let logits = model.forward(&input, index_pos)?;
         let logits = logits.i((0, logits.dim(1)? - 1))?;
+        let logits = if common_args.repeat_penalty == 1. || tokens.is_empty() {
+            logits
+        } else {
+            let start_at = tokens.len().saturating_sub(common_args.repeat_last_n);
+            candle_transformers::utils::apply_repeat_penalty(
+                &logits,
+                common_args.repeat_penalty,
+                &tokens[start_at..],
+            )?
+        };
         index_pos += ctxt.len();
 
         let next_token = logits_processor.sample(&logits)?;

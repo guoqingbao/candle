@@ -108,7 +108,7 @@ pub fn parse_config<T: AsRef<Path>>(path: T) -> Result<Darknet> {
 }
 
 enum Bl {
-    Layer(Box<dyn candle_nn::Module + Send>),
+    Layer(Box<dyn candle_nn::Module + Send + Sync>),
     Route(Vec<usize>),
     Shortcut(usize),
     Yolo(usize, Vec<(usize, usize)>),
@@ -132,6 +132,7 @@ fn conv(vb: VarBuilder, index: usize, p: usize, b: &Block) -> Result<(usize, Bl)
         stride,
         padding,
         groups: 1,
+        dilation: 1,
     };
     let conv = if bias {
         conv2d(p, filters, size, conv_cfg, vb.pp(&format!("conv_{index}")))?
@@ -146,7 +147,7 @@ fn conv(vb: VarBuilder, index: usize, p: usize, b: &Block) -> Result<(usize, Bl)
     let func = candle_nn::func(move |xs| {
         let xs = conv.forward(xs)?;
         let xs = match &bn {
-            Some(bn) => bn.forward(&xs)?,
+            Some(bn) => xs.apply_t(bn, false)?,
             None => xs,
         };
         let xs = if leaky {

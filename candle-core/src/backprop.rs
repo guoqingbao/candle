@@ -15,6 +15,17 @@ fn broadcast_back(arg: &Tensor, node: &Tensor, reduced_dims: &[usize]) -> Result
     }
 }
 
+thread_local! {
+    static CANDLE_GRAD_DO_NOT_DETACH: bool = {
+        match std::env::var("CANDLE_GRAD_DO_NOT_DETACH") {
+            Ok(s) => {
+                !s.is_empty() && s != "0"
+            },
+            Err(_) => false,
+        }
+    }
+}
+
 impl Tensor {
     /// Return all the nodes that lead to this value in a topologically sorted vec, the first
     /// elements having dependencies on the latter ones, e.g. the first element if any is the
@@ -36,6 +47,8 @@ impl Tensor {
                 // Do not call recursively on the "leaf" nodes.
                 track_grad = true;
                 nodes
+            } else if node.dtype().is_int() {
+                nodes
             } else if let Some(op) = node.op() {
                 match op {
                     Op::IndexAdd(t1, t2, t3, _)
@@ -55,6 +68,11 @@ impl Tensor {
                         kernel: rhs,
                         ..
                     }
+                    | Op::ConvTranspose1D {
+                        arg: lhs,
+                        kernel: rhs,
+                        ..
+                    }
                     | Op::Conv2D {
                         arg: lhs,
                         kernel: rhs,
@@ -69,7 +87,8 @@ impl Tensor {
                     | Op::Binary(lhs, rhs, _)
                     | Op::Gather(lhs, rhs, _)
                     | Op::IndexSelect(lhs, rhs, _)
-                    | Op::Matmul(lhs, rhs) => {
+                    | Op::Matmul(lhs, rhs)
+                    | Op::SliceScatter0(lhs, rhs, _) => {
                         let (tg, nodes) = walk(lhs, nodes, already_seen);
                         track_grad |= tg;
                         let (tg, nodes) = walk(rhs, nodes, already_seen);
@@ -90,26 +109,40 @@ impl Tensor {
                             nodes
                         }
                     }
+                    Op::Unary(_node, UnaryOp::Ceil)
+                    | Op::Unary(_node, UnaryOp::Floor)
+                    | Op::Unary(_node, UnaryOp::Round) => nodes,
                     Op::Reshape(node)
-                    | Op::UpsampleNearest2D(node)
+                    | Op::UpsampleNearest1D(node)
+                    | Op::UpsampleNearest2D { arg: node, .. }
                     | Op::AvgPool2D { arg: node, .. }
                     | Op::MaxPool2D { arg: node, .. }
                     | Op::Copy(node)
                     | Op::Broadcast(node)
                     | Op::Cmp(node, _)
-                    | Op::Reduce(node, _, _)
-                    | Op::ToDType(node)
+                    | Op::Reduce(node, ReduceOp::Min | ReduceOp::Sum | ReduceOp::Max, _)
                     | Op::ToDevice(node)
                     | Op::Transpose(node, _, _)
                     | Op::Permute(node, _)
                     | Op::Narrow(node, _, _, _)
                     | Op::Unary(node, _)
                     | Op::Elu(node, _)
+                    | Op::Powf(node, _)
                     | Op::CustomOp1(node, _) => {
                         let (tg, nodes) = walk(node, nodes, already_seen);
                         track_grad |= tg;
                         nodes
                     }
+                    Op::ToDType(node) => {
+                        if node.dtype().is_float() {
+                            let (tg, nodes) = walk(node, nodes, already_seen);
+                            track_grad |= tg;
+                            nodes
+                        } else {
+                            nodes
+                        }
+                    }
+                    Op::Reduce(_, ReduceOp::ArgMin | ReduceOp::ArgMax, _) => nodes,
                 }
             } else {
                 nodes
@@ -133,10 +166,16 @@ impl Tensor {
             if node.is_variable() {
                 continue;
             }
-            let grad = grads.remove(node).unwrap();
-            // TODO: We should perform all these operations in place (or at least not track the
-            // whole graph). The only drawback would be if we wanted to support grad of grad but
-            // this is out of scope.
+            let grad = grads
+                .remove(node)
+                .expect("candle internal error - grad not populated");
+            // https://github.com/huggingface/candle/issues/1241
+            // Ideally, we would make these operations in place where possible to ensure that we
+            // do not have to allocate too often. Here we just call `.detach` to avoid computing
+            // the backprop graph of the backprop itself. This would be an issue for second order
+            // derivatives but these are out of scope at the moment.
+            let do_not_detach = CANDLE_GRAD_DO_NOT_DETACH.with(|b| *b);
+            let grad = if do_not_detach { grad } else { grad.detach()? };
             if let Some(op) = node.op() {
                 match op {
                     Op::Binary(lhs, rhs, BinaryOp::Add) => {
@@ -191,39 +230,156 @@ impl Tensor {
                         let f_grad = pred.where_cond(&zeros, &grad)?;
                         *f_sum_grad = f_sum_grad.add(&f_grad)?;
                     }
-                    Op::Conv1D { .. } => Err(Error::BackwardNotSupported { op: "conv1d" })?,
-                    Op::Conv2D {
+                    Op::Conv1D {
                         arg,
                         kernel,
                         padding,
                         stride,
+                        dilation,
                     } => {
-                        // The output height for conv_transpose2d is:
-                        // (i_h - 1) * stride - 2 * padding + dilation * (k_h - 1) + out_padding + 1
-                        let grad_h = grad.dim(2)?;
-                        let k_h = kernel.dim(2)?;
-                        let out_size = (grad_h - 1) * stride + (k_h - 1) + 1 - 2 * padding;
+                        // The output height for conv_transpose1d is:
+                        // (l_in - 1) * stride - 2 * padding + dilation * (k_size - 1) + out_padding + 1
+                        let grad_l_in = grad.dim(2)?;
+                        let k_size = kernel.dim(2)?;
+                        let out_size =
+                            (grad_l_in - 1) * stride + dilation * (k_size - 1) + 1 - 2 * padding;
                         let out_padding = arg.dim(2)? - out_size;
-                        let grad_arg =
-                            grad.conv_transpose2d(kernel, *padding, out_padding, *stride)?;
+                        let grad_arg = grad.conv_transpose1d(
+                            kernel,
+                            *padding,
+                            out_padding,
+                            *stride,
+                            *dilation,
+                        )?;
                         let sum_grad = grads.or_insert(arg)?;
                         *sum_grad = sum_grad.add(&grad_arg)?;
 
                         let grad_kernel = arg
                             .transpose(0, 1)?
-                            .conv2d(&grad.transpose(0, 1)?, *padding, *stride, 1)?
+                            .conv1d(&grad.transpose(0, 1)?, *padding, *dilation, *stride, 1)?
                             .transpose(0, 1)?;
                         let sum_grad = grads.or_insert(kernel)?;
+                        let (_, _, k0) = kernel.dims3()?;
+                        let (_, _, g_k0) = grad_kernel.dims3()?;
+                        let grad_kernel = if g_k0 != k0 {
+                            grad_kernel.narrow(2, 0, k0)?
+                        } else {
+                            grad_kernel
+                        };
                         *sum_grad = sum_grad.add(&grad_kernel)?;
                     }
+                    Op::Conv2D {
+                        arg,
+                        kernel,
+                        padding,
+                        stride,
+                        dilation,
+                    } => {
+                        // The output height for conv_transpose2d is:
+                        // (i_h - 1) * stride - 2 * padding + dilation * (k_h - 1) + out_padding + 1
+                        let grad_h = grad.dim(2)?;
+                        let k_h = kernel.dim(2)?;
+                        let out_size =
+                            (grad_h - 1) * stride + dilation * (k_h - 1) + 1 - 2 * padding;
+                        let out_padding = arg.dim(2)? - out_size;
+                        let grad_arg = grad.conv_transpose2d(
+                            kernel,
+                            *padding,
+                            out_padding,
+                            *stride,
+                            *dilation,
+                        )?;
+                        let sum_grad = grads.or_insert(arg)?;
+                        *sum_grad = sum_grad.add(&grad_arg)?;
+
+                        let grad_kernel = arg
+                            .transpose(0, 1)?
+                            .conv2d(&grad.transpose(0, 1)?, *padding, *dilation, *stride, 1)?
+                            .transpose(0, 1)?;
+                        let sum_grad = grads.or_insert(kernel)?;
+                        let (_, _, k0, k1) = kernel.dims4()?;
+                        let (_, _, g_k0, g_k1) = grad_kernel.dims4()?;
+                        let grad_kernel = if g_k0 != k0 || g_k1 != k1 {
+                            grad_kernel.narrow(2, 0, k0)?.narrow(3, 0, k1)?
+                        } else {
+                            grad_kernel
+                        };
+                        *sum_grad = sum_grad.add(&grad_kernel)?;
+                    }
+                    Op::ConvTranspose1D { .. } => Err(Error::BackwardNotSupported {
+                        op: "conv-transpose1d",
+                    })?,
                     Op::ConvTranspose2D { .. } => Err(Error::BackwardNotSupported {
                         op: "conv-transpose2d",
                     })?,
-                    Op::AvgPool2D { .. } => Err(Error::BackwardNotSupported { op: "avg-pool2d" })?,
-                    Op::MaxPool2D { .. } => Err(Error::BackwardNotSupported { op: "max-pool2d" })?,
-                    Op::UpsampleNearest2D { .. } => Err(Error::BackwardNotSupported {
-                        op: "upsample-nearest2d",
+                    Op::AvgPool2D {
+                        arg,
+                        kernel_size,
+                        stride,
+                    } => {
+                        if kernel_size != stride {
+                            crate::bail!("backward not supported for avgpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                        }
+                        let (_n, _c, h, w) = arg.dims4()?;
+                        let grad_arg = grad.upsample_nearest2d(h, w)?;
+                        let grad_arg =
+                            (grad_arg * (1f64 / (kernel_size.0 * kernel_size.1) as f64))?;
+                        let sum_grad = grads.or_insert(arg)?;
+                        *sum_grad = sum_grad.add(&grad_arg)?;
+                    }
+                    Op::MaxPool2D {
+                        arg,
+                        kernel_size,
+                        stride,
+                    } => {
+                        if kernel_size != stride {
+                            crate::bail!("backward not supported for maxpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                        }
+                        let (_n, _c, h, w) = arg.dims4()?;
+                        // For computing the max-pool gradient, we compute a mask where a 1 means
+                        // that the element is the maximum, then we apply this mask to the
+                        // upsampled gradient (taking into account that multiple max may exist so
+                        // we scale the gradient for this case).
+                        let node_upsampled = node.upsample_nearest2d(h, w)?;
+                        let mask = arg.eq(&node_upsampled)?.to_dtype(arg.dtype())?;
+                        let avg = mask.avg_pool2d_with_stride(*kernel_size, *stride)?;
+                        let grad_arg = ((grad * avg)?.upsample_nearest2d(h, w)? * mask)?;
+                        let sum_grad = grads.or_insert(arg)?;
+                        *sum_grad = sum_grad.add(&grad_arg)?;
+                    }
+                    Op::UpsampleNearest1D { .. } => Err(Error::BackwardNotSupported {
+                        op: "upsample-nearest1d",
                     })?,
+                    Op::UpsampleNearest2D {
+                        arg,
+                        target_h,
+                        target_w,
+                    } => {
+                        let (_n, c, h, w) = arg.dims4()?;
+                        if target_h % h != 0 || target_w % w != 0 {
+                            crate::bail!("backward not supported for non integer upscaling factors")
+                        }
+                        let scale_h = target_h / h;
+                        let scale_w = target_w / w;
+
+                        if scale_h != scale_w {
+                            crate::bail!("backward not supported for non uniform upscaling factors")
+                        };
+                        let kernel =
+                            Tensor::ones((c, 1, scale_h, scale_w), arg.dtype(), arg.device())?;
+                        let conv_sum = grad.conv2d(&kernel, 0, scale_h, 1, c)?;
+                        let sum_grad = grads.or_insert(arg)?;
+                        *sum_grad = conv_sum;
+                    }
+                    Op::SliceScatter0(lhs, rhs, start_rhs) => {
+                        let rhs_sum_grad = grads.or_insert(rhs)?;
+                        let rhs_grad = grad.narrow(0, *start_rhs, rhs.dim(0)?)?;
+                        *rhs_sum_grad = rhs_sum_grad.add(&rhs_grad)?;
+
+                        let lhs_sum_grad = grads.or_insert(lhs)?;
+                        let lhs_grad = grad.slice_scatter0(&rhs.zeros_like()?, *start_rhs)?;
+                        *lhs_sum_grad = lhs_sum_grad.add(&lhs_grad)?
+                    }
                     Op::Gather(arg, indexes, dim) => {
                         let sum_grad = grads.or_insert(arg)?;
                         *sum_grad = sum_grad.scatter_add(indexes, &grad, *dim)?;
@@ -315,7 +471,7 @@ impl Tensor {
                     }
                     Op::ToDType(arg) => {
                         let sum_grad = grads.or_insert(arg)?;
-                        *sum_grad = sum_grad.add(&grad.to_dtype(node.dtype())?)?
+                        *sum_grad = sum_grad.add(&grad.to_dtype(arg.dtype())?)?
                     }
                     Op::Copy(arg) => {
                         let sum_grad = grads.or_insert(arg)?;
@@ -337,6 +493,11 @@ impl Tensor {
                     Op::Unary(arg, UnaryOp::Cos) => {
                         let sum_grad = grads.or_insert(arg)?;
                         *sum_grad = sum_grad.sub(&(&grad * arg.sin())?)?
+                    }
+                    Op::Unary(arg, UnaryOp::Tanh) => {
+                        let sum_grad = grads.or_insert(arg)?;
+                        let minus_dtanh = (node.sqr()? - 1.)?;
+                        *sum_grad = sum_grad.sub(&(&grad * &minus_dtanh)?)?
                     }
                     Op::Unary(arg, UnaryOp::Abs) => {
                         let sum_grad = grads.or_insert(arg)?;
@@ -390,13 +551,59 @@ impl Tensor {
                         let sum_grad = grads.or_insert(arg)?;
                         *sum_grad = sum_grad.add(&arg_grad)?
                     }
-                    Op::Unary(_, UnaryOp::Gelu) => Err(Error::BackwardNotSupported { op: "gelu" })?,
+                    Op::Unary(_, UnaryOp::Ceil) => Err(Error::BackwardNotSupported { op: "ceil" })?,
+                    Op::Unary(_, UnaryOp::Floor) => {
+                        Err(Error::BackwardNotSupported { op: "floor" })?
+                    }
+                    Op::Unary(_, UnaryOp::Round) => {
+                        Err(Error::BackwardNotSupported { op: "round" })?
+                    }
+                    Op::Unary(arg, UnaryOp::Gelu) => {
+                        let sum_grad = grads.or_insert(arg)?;
+                        let cube = arg.powf(3.)?;
+                        let tanh = (0.0356774 * &cube + (0.797885 * arg)?)?.tanh()?;
+                        let gelu_grad = (((0.5 * &tanh)?
+                            + (0.0535161 * cube + (0.398942 * arg)?)? * (1. - tanh.powf(2.)?))?
+                            + 0.5)?;
+                        *sum_grad = sum_grad.add(&(&grad * gelu_grad)?)?
+                    }
+                    Op::Unary(arg, UnaryOp::Erf) => {
+                        let sum_grad = grads.or_insert(arg)?;
+                        // d/dx erf(x) = 2/sqrt(pi) * e^(-x^2)
+                        let erf_grad =
+                            (2. / std::f64::consts::PI.sqrt()) * (arg.sqr()?.neg()?).exp()?;
+                        *sum_grad = sum_grad.add(&(&grad * erf_grad)?)?
+                    }
+                    Op::Unary(arg, UnaryOp::GeluErf) => {
+                        let sum_grad = grads.or_insert(arg)?;
+                        // d/dx gelu_erf(x) = 0.5 + 0.398942 e^(-x^2/2) x + 0.5 erf(x/sqrt(2))
+                        let neg_half_square = (arg.sqr()?.neg()? / 2.)?;
+                        let scaled_exp_arg = (0.398942 * neg_half_square.exp()? * arg)?;
+                        let arg_scaled_sqrt = (arg / 2f64.sqrt())?;
+                        let erf_scaled_sqrt = (0.5 * arg_scaled_sqrt.erf()?)?;
+                        let gelu_erf_grad = (0.5 + scaled_exp_arg + erf_scaled_sqrt)?;
+                        *sum_grad = sum_grad.add(&(&grad * gelu_erf_grad)?)?;
+                    }
                     Op::Unary(arg, UnaryOp::Relu) => {
                         let sum_grad = grads.or_insert(arg)?;
                         let relu_grad = arg.ge(&arg.zeros_like()?)?.to_dtype(arg.dtype())?;
                         *sum_grad = sum_grad.add(&(&grad * relu_grad)?)?
                     }
-                    Op::Elu(..) => Err(Error::BackwardNotSupported { op: "elu" })?,
+                    Op::Elu(arg, alpha) => {
+                        // d/dx elu(x) = 1 for x > 0, alpha * e^x for x <= 0
+                        let sum_grad = grads.or_insert(arg)?;
+                        let zeros = arg.zeros_like()?;
+                        let positive_mask = arg.gt(&zeros)?.to_dtype(arg.dtype())?;
+                        let negative_mask = arg.le(&zeros)?.to_dtype(arg.dtype())?;
+                        let negative_exp_mask = ((negative_mask * arg.exp())? * *alpha)?;
+                        let combined_mask = (positive_mask + negative_exp_mask)?;
+                        *sum_grad = sum_grad.add(&(grad * combined_mask)?)?
+                    }
+                    Op::Powf(arg, e) => {
+                        let arg_grad = (&(grad * arg.powf(e - 1.)?)? * *e)?;
+                        let sum_grad = grads.or_insert(arg)?;
+                        *sum_grad = sum_grad.add(&arg_grad)?
+                    }
                     Op::CustomOp1(arg, c) => {
                         if let Some(arg_grad) = c.bwd(arg, node, &grad)? {
                             let sum_grad = grads.or_insert(arg)?;
@@ -466,6 +673,7 @@ impl Tensor {
     }
 }
 
+#[derive(Debug)]
 pub struct GradStore(HashMap<TensorId, Tensor>);
 
 impl GradStore {

@@ -2484,7 +2484,7 @@ impl BackendStorage for CpuStorage {
         let m = l_out;
         let col_l = Layout::contiguous((b, m, k));
         let res = if kernel_l.is_contiguous() {
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
                 .transpose(1, 2)?
                 .broadcast_as((b, k, n))?;
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
@@ -2492,7 +2492,7 @@ impl BackendStorage for CpuStorage {
             // Make the kernel contiguous if not already the case.
             let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
                 .transpose(1, 2)?
                 .broadcast_as((b, k, n))?;
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
@@ -2538,7 +2538,7 @@ impl BackendStorage for CpuStorage {
         let m = h_out * w_out;
         let col_l = Layout::contiguous((b, m, k));
         let res = if kernel_l.is_contiguous() {
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
                 .transpose(1, 2)?
                 .broadcast_as((b, k, n))?;
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
@@ -2546,7 +2546,7 @@ impl BackendStorage for CpuStorage {
             // Make the kernel contiguous if not already the case.
             let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
+            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
                 .transpose(1, 2)?
                 .broadcast_as((b, k, n))?;
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?

@@ -106,6 +106,10 @@ impl Storage {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Gcu(storage) => {
+                let storage = storage.powf(layout, alpha)?;
+                Ok(Self::Gcu(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Metal(storage))
@@ -550,6 +554,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Gcu(storage) => {
+                let storage = storage.upsample_nearest1d(layout, sz)?;
+                Ok(Self::Gcu(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.upsample_nearest1d(layout, sz)?;

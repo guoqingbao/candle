@@ -221,7 +221,7 @@ impl Device {
             }
             Device::Gcu(device) => {
                 let storage = device.rand_uniform(shape, dtype, lo, up)?;
-                Ok(Storage::Cuda(storage))
+                Ok(Storage::Gcu(storage))
             }
         }
     }
@@ -263,7 +263,7 @@ impl Device {
             }
             Device::Gcu(device) => {
                 let storage = device.rand_normal(shape, dtype, mean, std)?;
-                Ok(Storage::Cuda(storage))
+                Ok(Storage::Gcu(storage))
             }
         }
     }

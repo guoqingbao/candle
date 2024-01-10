@@ -47,28 +47,39 @@ fn test_cache(config: &Config, dtype: DType, gcu_device: &Device) -> Result<(Ten
     Ok((cpu_sin, cpu_cos))
 }
 
+use model::kvconcat;
 //pased!
 fn test_concat(gcu_device: &Device) -> Result<()> {
-    let shape: Shape = (1, 13, 4096).into();
-    let cpu_input1 = Tensor::rand(0.0f32, 1.0, shape.clone(), &Device::Cpu)?;
-    let cpu_input2 = Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?;
+    let shape1: Shape = (1, 32, 13, 128).into();
+    let shape2: Shape = (1, 32, 1, 128).into();
+
+    let cpu_input1 = Tensor::rand(0.0f32, 1.0, shape1, &Device::Cpu)?;
+    let cpu_input2 = Tensor::rand(0.0f32, 1.0, shape2, &Device::Cpu)?;
 
     let gcu_input1 = cpu_input1.to_device(&gcu_device)?;
     let gcu_input2 = cpu_input2.to_device(&gcu_device)?;
      
-    let cpu_output = Tensor::cat(&[&cpu_input1, &cpu_input2], 0)?;
+    let cpu_output = Tensor::cat(&[&cpu_input1, &cpu_input2], 2)?;
 
-    let gcu_output = Tensor::cat(&[&gcu_input1, &gcu_input2], 0)?;
-
+    let gcu_output = Tensor::cat(&[&gcu_input1, &gcu_input2], 2)?;
+    let gcu_output1 = kvconcat(&gcu_input1, &gcu_input2, 2)?;
     // println!("Cpu output: {}", cpu_output);
 
     // println!("Gcu output: {}", gcu_output.to_device(&Device::Cpu)?);
+    let out_shape: Shape = (32 * 14 * 128).into();
+    let cpu_output = cpu_output.reshape(&out_shape)?;
+    let gcu_output = gcu_output.reshape(&out_shape)?;
+    let gcu_output1 = gcu_output1.reshape(&out_shape)?;
 
     assert_float_eq!(
-        cpu_output.to_vec3::<f32>()?[0][1],
-        gcu_output.to_vec3::<f32>()?[0][1],
+        cpu_output.to_vec1::<f32>()?,
+        gcu_output.to_vec1::<f32>()?,
         abs_all <= 0.000001);
 
+    assert_float_eq!(
+            cpu_output.to_vec1::<f32>()?,
+            gcu_output1.to_vec1::<f32>()?,
+            abs_all <= 0.000001);
     println!("Test concat passed!");
 
     Ok(())
@@ -635,7 +646,7 @@ fn main() -> Result<()> {
     test_softmax(dtype, &device)?; 
     test_rmsnorm(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?;
     test_maskfill(&cache, dtype, &device)?;
-
+    test_concat(&device)?;
     // test_mlp(&config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?;
     // test_linear(&config, &vb, &vbcpu, dtype, &device)?;
     test_matmul(dtype, &device)?;

@@ -2064,3 +2064,89 @@ impl crate::CustomOp3 for Rope {
 
     }
 }
+
+pub struct KVConcat {
+    pub concat_dim: i32,
+}
+impl crate::CustomOp2 for KVConcat {
+    // Box<dyn> does not support const yet, so use a function to get the name.
+    fn name(&self) -> &'static str {
+        "kvconcat"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        crate::bail!("no cpu support for kvconcat")
+    }
+
+
+    /// The forward pass, as run on a gcu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn gcu_fwd(
+        &self,
+        ltensor: &GcuStorage,
+        ltensor_l: &Layout,
+        rtensor: &GcuStorage,
+        rtensor_l: &Layout,
+    ) -> Result<(GcuStorage, Shape)> {
+        assert!(self.concat_dim == 2); //must be in the dim of sequence len 
+        let dev = &ltensor.device;
+        let cfg = &dev.launch_cfg;
+        let elem_count = ltensor_l.shape().elem_count() + rtensor_l.shape().elem_count();
+
+        let ds = dev.htod_copy([ltensor_l.shape().dims(), rtensor_l.shape().dims()].concat()).w()?;
+        let slice = match (&ltensor.slice, &rtensor.slice) { 
+            (GcuStorageSlice::BF16(left_), GcuStorageSlice::BF16(right_)) => { 
+                let out = dev.alloc::<bf16>(elem_count).w()?;
+                let func = dev.get_or_load_func("kvconcat_bf16", ubridge::KCCONCAT)?;
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::BF16(out)
+            }
+            (GcuStorageSlice::F32(left_), GcuStorageSlice::F32(right_)) => { 
+                let out = dev.alloc::<f32>(elem_count).w()?;
+                let func = dev.get_or_load_func("kvconcat_f32", ubridge::KCCONCAT)?;
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::F32(out)
+            }
+            (GcuStorageSlice::F16(left_), GcuStorageSlice::F16(right_)) => {
+                let out = dev.alloc::<f16>(elem_count).w()?;
+                let func = dev.get_or_load_func("kvconcat_f16", ubridge::KCCONCAT)?;
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::F16(out)
+            }
+            (GcuStorageSlice::F64(left_), GcuStorageSlice::F64(right_)) => {
+                let out = dev.alloc::<f64>(elem_count).w()?;
+                let func = dev.get_or_load_func("kvconcat_f64", ubridge::KCCONCAT)?;
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::F64(out)
+            }
+            (GcuStorageSlice::U8(left_), GcuStorageSlice::U8(right_)) => {
+                let out = dev.alloc::<u8>(elem_count).w()?;
+                let func = dev.get_or_load_func("kvconcat_u8", ubridge::KCCONCAT)?;
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::U8(out)
+            }
+            _=> Err(GcuError::InternalError(
+                "dtype mismatch in copy_strided op",
+            ))?,
+        };
+
+        let mut lshape: Vec<usize> = ltensor_l.shape().dims().to_vec();
+        lshape[2] += rtensor_l.shape().dims()[2];
+
+        let device = dev.clone();
+        Ok((GcuStorage { slice: slice, device }, lshape.into()))
+
+
+    }
+}

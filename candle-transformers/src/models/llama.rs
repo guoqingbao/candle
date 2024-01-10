@@ -220,6 +220,18 @@ pub fn fused_rope(
     x.apply_op3(cos, sin, op)
 }
 
+use candle::gcu_backend::KVConcat;
+pub fn kvconcat(
+    ltensor: &Tensor,
+    rtensor: &Tensor,
+    concat_dim: i32,
+) -> Result<Tensor> {
+    let op = KVConcat {
+        concat_dim
+    };
+    ltensor.apply_op2(rtensor, op)
+}
+
 impl CausalSelfAttention {
     fn apply_rotary_emb_qkv(
         &self,
@@ -278,23 +290,25 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (q, mut k) = if q.device().is_cpu() { 
-            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
+        let (q, mut k) = if q.device().is_gcu() { 
+            self.apply_rotary_emb_fused(&q, &k, index_pos)?
         } 
         else {
-            self.apply_rotary_emb_fused(&q, &k, index_pos)?
+            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
         };
 
-        let qdevice = q.device();
-        // let q = q.to_device(&Device::Cpu)?;
-        let mut k = k.to_device(&Device::Cpu)?;
-        let mut v = v.to_device(&Device::Cpu)?;
-
-        if self.cache.use_kv_cache { //kv cache TODO on GCU
+        if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+                if k.device().is_gcu() {
+                    //inputs for kvconcat must be contiguous tensors
+                    k = kvconcat(&cache_k.contiguous()?, &k.contiguous()?, 2)?;
+                    v = kvconcat(&cache_v.contiguous()?, &v.contiguous()?, 2)?;
+                } else {
+                    k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
+                    v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+                }
+
                 let k_seq_len = k.dims()[1];
                 if k_seq_len > MAX_SEQ_LEN {
                     k = k
@@ -310,10 +324,6 @@ impl CausalSelfAttention {
             }
             cache[block_idx] = Some((k.clone(), v.clone()))
         }
-
-        // let q = q.to_device(&qdevice)?;
-        let k = k.to_device(&qdevice)?;
-        let v = v.to_device(&qdevice)?;
 
         let k = self.repeat_kv(k)?;
         let v = self.repeat_kv(v)?;

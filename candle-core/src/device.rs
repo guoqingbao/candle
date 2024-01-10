@@ -181,6 +181,10 @@ impl Device {
         matches!(self, Self::Cuda(_))
     }
 
+    pub fn is_gcu(&self) -> bool {
+        matches!(self, Self::Gcu(_))
+    }
+
     pub fn is_metal(&self) -> bool {
         matches!(self, Self::Metal(_))
     }

@@ -54,9 +54,9 @@ bindgen_cuda = { version = "0.1.1", optional = true }
 
 [features]
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
-gcu = ["candle/gcu", "dep:half", "candle-transformers/gcu"]
-dorado = ["candle/gcu", "candle/dorado", "dep:half", "candle-transformers/gcu"]
-scorpio = ["candle/gcu", "candle/scorpio", "dep:half", "candle-transformers/gcu"]
+gcu = ["candle/gcu", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
+dorado = ["candle/gcu", "candle/dorado", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
+scorpio = ["candle/gcu", "candle/scorpio", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
 cudnn = ["candle/cudnn"]
 flash-attn = ["cuda", "candle-transformers/flash-attn", "dep:candle-flash-attn"]

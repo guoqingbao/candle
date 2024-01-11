@@ -1,6 +1,6 @@
 use super::with_tracing::{linear_no_bias as linear, Linear};
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module, VarBuilder};
+use candle_nn::{Embedding, Module, VarBuilder, apply_rotary_emb_qkv, kvconcat};
 use serde::Deserialize;
 use std::arch::x86_64;
 use std::collections::HashMap;
@@ -194,74 +194,8 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
     unimplemented!("compile with '--features flash-attn'")
 }
 
-fn rotate_half(xs: &Tensor) -> Result<Tensor> {
-    let last_dim = xs.dim(D::Minus1)?;
-    let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
-    let xs2 = xs.narrow(D::Minus1, last_dim / 2, last_dim - last_dim / 2)?;
-    Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
-}
-
-#[cfg(feature = "gcu")]
-pub fn fused_rope(
-    x: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    num_tokens: i32,
-    num_heads: i32,
-    head_size: i32,
-    gpt_neox: i32,
-) -> Result<Tensor> {
-    use candle::gcu_backend::Rope;
-    let op = Rope {
-        num_tokens,
-        num_heads,
-        head_size,
-        gpt_neox
-    };
-    x.apply_op3(cos, sin, op)
-}
-
-#[cfg(feature = "gcu")]
-pub fn kvconcat(
-    ltensor: &Tensor,
-    rtensor: &Tensor,
-    concat_dim: i32,
-) -> Result<Tensor> {
-    use candle::gcu_backend::KVConcat;
-    let op = KVConcat {
-        concat_dim
-    };
-    ltensor.apply_op2(rtensor, op)
-}
-
-#[cfg(not(feature = "gcu"))]
-pub fn kvconcat(
-    ltensor: &Tensor,
-    rtensor: &Tensor,
-    concat_dim: i32,
-) -> Result<Tensor> {
-    Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
-}
 
 impl CausalSelfAttention {
-    #[cfg(not(feature = "gcu"))]
-    fn apply_rotary_emb_qkv(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        index_pos: usize,
-    ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
-        let cos = self.cache.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.cache.sin.narrow(0, index_pos, seq_len)?;
-        let cos = cos.broadcast_as(q.shape())?;
-        let sin = sin.broadcast_as(q.shape())?;
-
-        let q_embed = (q.mul(&cos)? + rotate_half(q)?.mul(&sin))?;
-        let k_embed = (k.mul(&cos)? + rotate_half(k)?.mul(&sin))?;
-        Ok((q_embed, k_embed))
-    }
-
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
         let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
@@ -274,16 +208,6 @@ impl CausalSelfAttention {
         let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
         let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)
-    }
-
-    #[cfg(feature = "gcu")]
-    pub fn apply_rotary_emb_qkv(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
-        let _enter = self.span_rot.enter();
-        let (_, head_size, seq_len, hidden_size) = query.dims4()?;
-        let cos_sin = self.cache.cos_sin.narrow(0, index_pos, seq_len)?;
-        //cost_sin must be type of float32
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, head_size as i32, hidden_size as i32, 1)?;
-        Ok((query.contiguous()?, key.contiguous()?))
     }
 
     fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
@@ -304,15 +228,15 @@ impl CausalSelfAttention {
             .transpose(1, 2)?;
 
 
-        let (q, mut k) = self.apply_rotary_emb_qkv(&q, &k, index_pos)?;
+        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&self.cache.cos_sin} else {&self.cache.cos}, &self.cache.sin, index_pos)?;
 
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
                 if k.device().is_gcu() {
-                    //inputs for kvconcat must be contiguous tensors
-                    k = kvconcat(&cache_k.contiguous()?, &k.contiguous()?, 2)?;
-                    v = kvconcat(&cache_v.contiguous()?, &v.contiguous()?, 2)?;
+                    //inputs for kvconcat must be contiguous tensors (on gcu)
+                    k = kvconcat(&cache_k, &k, 2)?;
+                    v = kvconcat(&cache_v, &v, 2)?;
                 } else {
                     k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
                     v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;

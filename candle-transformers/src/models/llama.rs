@@ -201,7 +201,7 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
     Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
 }
 
-use candle::gcu_backend::Rope;
+#[cfg(feature = "gcu")]
 pub fn fused_rope(
     x: &Tensor,
     cos: &Tensor,
@@ -211,6 +211,7 @@ pub fn fused_rope(
     head_size: i32,
     gpt_neox: i32,
 ) -> Result<Tensor> {
+    use candle::gcu_backend::Rope;
     let op = Rope {
         num_tokens,
         num_heads,
@@ -220,19 +221,30 @@ pub fn fused_rope(
     x.apply_op3(cos, sin, op)
 }
 
-use candle::gcu_backend::KVConcat;
+#[cfg(feature = "gcu")]
 pub fn kvconcat(
     ltensor: &Tensor,
     rtensor: &Tensor,
     concat_dim: i32,
 ) -> Result<Tensor> {
+    use candle::gcu_backend::KVConcat;
     let op = KVConcat {
         concat_dim
     };
     ltensor.apply_op2(rtensor, op)
 }
 
+#[cfg(not(feature = "gcu"))]
+pub fn kvconcat(
+    ltensor: &Tensor,
+    rtensor: &Tensor,
+    concat_dim: i32,
+) -> Result<Tensor> {
+    Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
+}
+
 impl CausalSelfAttention {
+    #[cfg(not(feature = "gcu"))]
     fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
@@ -264,7 +276,8 @@ impl CausalSelfAttention {
         Ok(rope)
     }
 
-    pub fn apply_rotary_emb_fused(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "gcu")]
+    pub fn apply_rotary_emb_qkv(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
         let _enter = self.span_rot.enter();
         let (_, head_size, seq_len, hidden_size) = query.dims4()?;
         let cos_sin = self.cache.cos_sin.narrow(0, index_pos, seq_len)?;
@@ -290,12 +303,8 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (q, mut k) = if q.device().is_gcu() { 
-            self.apply_rotary_emb_fused(&q, &k, index_pos)?
-        } 
-        else {
-            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
-        };
+
+        let (q, mut k) = self.apply_rotary_emb_qkv(&q, &k, index_pos)?;
 
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();

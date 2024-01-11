@@ -41,17 +41,19 @@ mod conv;
 mod convert;
 pub mod cpu;
 pub mod cpu_backend;
-#[cfg(feature = "ubridge")]
-pub mod gcu_backend;
-
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 #[cfg(feature = "cudnn")]
 pub mod cudnn;
+
+#[cfg(feature = "gcu")]
+pub mod gcu_backend;
+
 mod device;
 pub mod display;
 mod dtype;
 mod dummy_cuda_backend;
+mod dummy_gcu_backend;
 mod dummy_metal_backend;
 pub mod error;
 mod indexer;
@@ -90,11 +92,14 @@ pub use variable::Var;
 #[cfg(feature = "cuda")]
 pub use cuda_backend::{CudaDevice, CudaStorage};
 
-#[cfg(feature = "ubridge")]
-pub use gcu_backend::{GcuDevice, GcuStorage};
-
 #[cfg(not(feature = "cuda"))]
 pub use dummy_cuda_backend::{CudaDevice, CudaStorage};
+
+#[cfg(not(feature = "gcu"))]
+pub use dummy_gcu_backend::{GcuDevice, GcuStorage};
+
+#[cfg(feature = "gcu")]
+pub use gcu_backend::{GcuDevice, GcuStorage};
 
 #[cfg(feature = "metal")]
 pub use metal_backend::{MetalDevice, MetalError, MetalStorage};

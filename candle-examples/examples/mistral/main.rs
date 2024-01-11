@@ -254,7 +254,7 @@ fn main() -> Result<()> {
         let dtype = if device.is_cuda() {
             DType::BF16
         } else {
-            DType::F32
+            if device.is_gcu() {DType::F16} else {DType::F32}
         };
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
         let model = Mistral::new(&config, vb)?;

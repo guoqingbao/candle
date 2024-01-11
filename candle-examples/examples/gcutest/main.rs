@@ -573,6 +573,43 @@ fn rope_test() -> Result<()> {
 
 }
 
+use candle::test_utils;
+fn conv1d_test(dev: &Device) -> Result<()> {
+    let t = Tensor::new(
+        &[
+            0.4056f32, -0.8689, -0.0773, -1.5630, 1.2279, -0.9287, -1.7030, 0.1370, 0.1866, 0.4145,
+            1.8025, -0.1536, 2.2013, -0.6836, 0.2477, 1.3127, -0.6957, 0.3278, -1.0124, 0.5599,
+        ],
+        dev,
+    )?
+    .reshape((1, 4, 5))?;
+    let w = Tensor::new(
+        &[
+            -0.8404f32, -0.3490, 0.0130, 1.3123, 0.1763, -1.9249, 1.4270, 0.9421, 0.8670, -0.7181,
+            -1.1111, 0.8869, -1.2429, 1.8357, 1.6052, -1.3844, 0.3951, -1.2036, 0.6686, 1.6261,
+            -0.6451, -0.0840, -1.4247, 0.5512,
+        ],
+        dev,
+    )?
+    .reshape((2, 4, 3))?;
+    let res = t.conv1d(&w, 0, 1, 1, 1)?;
+    // println!("{:}", res.flatten_all()?);
+    assert_eq!(res.dims(), [1, 2, 3]);
+    assert_eq!(
+        test_utils::to_vec1_round(&res.flatten_all()?, 4)?,
+        [2.6357, -1.3336, 4.1393, -1.1784, 3.5675, 0.5069]
+    );
+    let res = t.conv1d(&w, /*padding*/ 1, 1, 1, 1)?;
+    assert_eq!(res.dims(), [1, 2, 5]);
+    // Same as pytorch default padding: use zeros.
+    assert_eq!(
+        test_utils::to_vec1_round(&res.flatten_all()?, 4)?,
+        [2.4509, 2.6357, -1.3336, 4.1393, 0.5657, 1.8091, -1.1784, 3.5675, 0.5069, 3.3352]
+    );
+    println!("Test conv1d passed!");
+    Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -654,7 +691,7 @@ fn main() -> Result<()> {
     test_attention(&cache, &cache_cpu, &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
     test_narrow(dtype, &device)?;
     test_rotary_embedding(&cache, &cache_cpu,  &config, &vb.pp(&format!("model.layers.0")), &vbcpu.pp(&format!("model.layers.0")), dtype, &device)?; 
-
+    conv1d_test(&device);
     // test_llama(&config, &cache, &cache_cpu, vb, vbcpu, &device)?; //out of memory for f32
     // rope_test()?;
     Ok(())

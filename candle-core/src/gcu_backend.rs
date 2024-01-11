@@ -961,7 +961,9 @@ impl<'a> Map2 for Conv1D<'a> {
         // Kernel shape: (c_out, c_in_k, k_size)
         // Input shape: (b_size, c_in, l_in) or (c_in, l_in)
         let p = &self.0;
-        let inp = &inp.slice(inp_l.start_offset()..);
+        // let inp = &inp.slice(inp_l.start_offset()..);
+        let src = &inp.slice(inp_l.start_offset()..);
+
         let k = &k.slice(k_l.start_offset()..);
         let shape = inp_l.shape();
         let dims = shape.dims();
@@ -969,7 +971,6 @@ impl<'a> Map2 for Conv1D<'a> {
         let l_out = p.l_out();
         let dst_el = p.c_out * l_out * p.b_size;
         let func = dev.get_or_load_func(&kernel_name::<T>("conv1d"), ubridge::CONV)?;
-        // SAFETY: Set later by running the kernel.
         let out = dev.alloc::<T>(dst_el).w()?;
         let ds = if dims.len() == 3 {
             [dims, inp_l.stride(), k_l.dims(), k_l.stride()].concat()
@@ -979,8 +980,7 @@ impl<'a> Map2 for Conv1D<'a> {
             crate::bail!("unexpected input shape for conv1d {dims:?}")
         };
         let ds = dev.htod_copy(ds).w()?;
-        let params = (el, l_out, p.stride, p.padding, ds.device_ptr(), inp.device_ptr(), k, out.device_ptr());
-        // SAFETY: ffi.
+        let params = (el, l_out, p.stride, p.padding, p.dilation, ds.device_ptr(), src.device_ptr(), k.device_ptr(), out.device_ptr());
         unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
         Ok(out)
     }

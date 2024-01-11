@@ -44,7 +44,6 @@ criterion = { workspace = true }
 
 
 [features]
-default = ["ubridge", "uhal", "cust_core"]
 gcu = ["ubridge", "uhal", "cust_core"]
 dorado = ["ubridge", "uhal", "cust_core", "ubridge/dorado"]
 scorpio = ["ubridge", "uhal", "cust_core", "ubridge/scorpio"]
@@ -53,6 +52,7 @@ cudnn = ["cuda", "cudarc/cudnn"]
 mkl = ["dep:libc", "dep:intel-mkl-src"]
 accelerate = ["dep:libc", "dep:accelerate-src"]
 metal = ["dep:metal", "dep:candle-metal-kernels"]
+default = ["gcu"]
 
 [[bench]]
 name = "matmul"

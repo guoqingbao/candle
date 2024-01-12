@@ -245,7 +245,12 @@ impl candle::CustomOp1 for SoftmaxLastDim {
 }
 
 pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
-    xs.apply_op1_no_bwd(&SoftmaxLastDim)
+    use candle::D;
+    if xs.device().is_gcu() {
+        softmax(&xs, D::Minus1)
+    } else {
+        xs.apply_op1_no_bwd(&SoftmaxLastDim)
+    }
 }
 
 // https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html
@@ -294,23 +299,26 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         key: &Tensor,
         cos_sin: &Tensor,
         num_tokens: i32,
-        num_heads: i32,
-        head_size: i32,
+        q_head_size: i32,
+        k_head_size: i32,
+        hidden_size: i32,
         gpt_neox: i32,
     ) -> Result<Tensor> {
         use candle::gcu_backend::Rope;
         let op = Rope {
             num_tokens,
-            num_heads,
-            head_size,
+            q_head_size,
+            k_head_size,
+            hidden_size,
             gpt_neox
         };
         query.apply_op3(key, cos_sin, op)
     }
-    let (_, head_size, seq_len, hidden_size) = query.dims4()?;
+    let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
+    let (_, k_head_size, _, _) = key.dims4()?;
     let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
     //cost_sin must be type of float32
-    let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, head_size as i32, hidden_size as i32, 1)?;
+    let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, 1)?;
     Ok((query.contiguous()?, key.contiguous()?))
 }
 
@@ -322,6 +330,7 @@ pub fn apply_rotary_emb_qkv(
     sin: &Tensor,
     index_pos: usize,
 ) -> Result<(Tensor, Tensor)> {
+    use candle::D;
     fn rotate_half(xs: &Tensor) -> Result<Tensor> {
         let last_dim = xs.dim(D::Minus1)?;
         let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
@@ -331,11 +340,10 @@ pub fn apply_rotary_emb_qkv(
     let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
     let cos = cos.narrow(0, index_pos, seq_len)?;
     let sin = sin.narrow(0, index_pos, seq_len)?;
-    let cos = cos.broadcast_as(q.shape())?;
-    let sin = sin.broadcast_as(q.shape())?;
-
-    let q_embed = (q.mul(&cos)? + rotate_half(q)?.mul(&sin))?;
-    let k_embed = (k.mul(&cos)? + rotate_half(k)?.mul(&sin))?;
+    let cos = cos.unsqueeze(0)?.unsqueeze(0)?; // (1, 1, seq_len, dim)
+    let sin = sin.unsqueeze(0)?.unsqueeze(0)?; // (1, 1, seq_len, dim)
+    let q_embed = (q.broadcast_mul(&cos)? + rotate_half(q)?.broadcast_mul(&sin))?;
+    let k_embed = (k.broadcast_mul(&cos)? + rotate_half(k)?.broadcast_mul(&sin))?;
     Ok((q_embed, k_embed))
 }
 

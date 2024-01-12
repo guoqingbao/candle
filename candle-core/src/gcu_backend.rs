@@ -1994,8 +1994,9 @@ impl BackendStorage for GcuStorage {
 
 pub struct Rope {
     pub num_tokens: i32,
-    pub num_heads: i32,
-    pub head_size: i32,
+    pub q_head_size: i32,
+    pub k_head_size: i32,
+    pub hidden_size: i32,
     pub gpt_neox: i32
 }
 impl crate::CustomOp3 for Rope {
@@ -2038,19 +2039,19 @@ impl crate::CustomOp3 for Rope {
             (GcuStorageSlice::BF16(query_), GcuStorageSlice::BF16(key_), GcuStorageSlice::F32(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_bf16", ubridge::UNARY)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                                self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                                self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.gpt_neox);
                 unsafe { func.launch(&cfg, params) }.w()?;
             }
             (GcuStorageSlice::F32(query_), GcuStorageSlice::F32(key_), GcuStorageSlice::F32(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_f32", ubridge::UNARY)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                            self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                            self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.gpt_neox);
                 unsafe { func.launch(&cfg, params) }.w()?;
             }
             (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F32(cos_sin_)) => {
                 let func = dev.get_or_load_func("rope_f16", ubridge::UNARY)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                            self.num_tokens, self.num_heads, self.head_size, self.gpt_neox);
+                            self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.gpt_neox);
                 unsafe { func.launch(&cfg, params) }.w()?;
             }
             _=> Err(GcuError::InternalError(

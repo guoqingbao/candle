@@ -322,8 +322,8 @@ fn main() -> Result<()> {
         };
         let config = std::fs::read_to_string(config_filename)?;
         let config: PhiConfig = serde_json::from_str(&config)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
-        let phi = Phi::new(&config, vb)?;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
+        let phi = Phi::new(&config, DType::F16, vb)?;
         (Model::Phi(phi), device)
     } else if args.quantized {
         let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&filenames[0])?;

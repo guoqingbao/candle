@@ -44,23 +44,23 @@ struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    fn new(cfg: &Config, dev: &Device) -> Result<Self> {
+    fn new(cfg: &Config, dtype: DType, dev: &Device) -> Result<Self> {
         let dim = (cfg.partial_rotary_factor * cfg.head_dim() as f64) as usize;
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?;
-        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, dev)?
-            .to_dtype(DType::F32)?
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), &dev)?.to_dtype(dtype)?;
+        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, &dev)?
+            .to_dtype(dtype)?
             .reshape((cfg.max_position_embeddings, 1))?;
         let freqs = t.matmul(&inv_freq)?;
         let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             dim,
-            sin: emb.sin()?,
-            cos: emb.cos()?,
+            sin: emb.sin()?.to_device(&Device::Cpu)?,
+            cos: emb.cos()?.to_device(&Device::Cpu)?,
         })
     }
 
@@ -138,7 +138,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 }
 
 impl Attention {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads();
         let head_dim = cfg.head_dim();
@@ -147,7 +147,7 @@ impl Attention {
         let v_proj = linear(cfg.hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"))?;
         let dense = linear(num_heads * head_dim, cfg.hidden_size, vb.pp("dense"))?;
         // Alternative rope scalings are not supported.
-        let rotary_emb = RotaryEmbedding::new(cfg, vb.device())?;
+        let rotary_emb = RotaryEmbedding::new(cfg, dtype, vb.device())?;
         let (q_layernorm, k_layernorm) = if cfg.qk_layernorm {
             let q_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
             let k_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
@@ -216,6 +216,10 @@ impl Attention {
             None => 0,
             Some((prev_k, _)) => prev_k.dim(2)?,
         };
+        let qdevice = query_states.device();
+        let query_states = query_states.to_device(&Device::Cpu)?;
+        let key_states = key_states.to_device(&Device::Cpu)?;
+
         let query_states = self
             .rotary_emb
             .apply_rotary_emb(&query_states, seqlen_offset)?;
@@ -223,12 +227,17 @@ impl Attention {
             .rotary_emb
             .apply_rotary_emb(&key_states, seqlen_offset)?;
 
+        let query_states = query_states.to_device(&qdevice)?;
+        let key_states = key_states.to_device(&qdevice)?;
+            
         // KV cache.
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let v = Tensor::cat(&[prev_v, &value_states], 2)?;
+                // let k = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let v = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let k = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
+                let v = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
                 (k, v)
             }
         };
@@ -274,8 +283,8 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let self_attn = Attention::new(cfg, vb.pp("self_attn"))?;
+    fn new(cfg: &Config, dtype: DType, vb: VarBuilder) -> Result<Self> {
+        let self_attn = Attention::new(cfg, dtype, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm = layer_norm(
             cfg.hidden_size,
@@ -314,7 +323,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &Config, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let vb_m = vb.pp("model");
         let embed_tokens =
             Embedding::new(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
@@ -326,7 +335,7 @@ impl Model {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_m = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
-            let layer = DecoderLayer::new(cfg, vb_m.pp(layer_idx))?;
+            let layer = DecoderLayer::new(cfg, dtype, vb_m.pp(layer_idx))?;
             layers.push(layer)
         }
         let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;

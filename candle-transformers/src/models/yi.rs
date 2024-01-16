@@ -75,6 +75,7 @@ impl Module for RmsNorm {
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -93,15 +94,18 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let freqs = freqs.to_dtype(dtype)?;
         let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            cos_sin
         })
     }
 
@@ -230,15 +234,20 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (query_states, key_states) =
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
+        // let (query_states, key_states) =
+        //     self.rotary_emb
+        //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
 
+        let (query_states, key_states) = 
+            candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset)?;
+    
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let key_states = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
+                let value_states = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };

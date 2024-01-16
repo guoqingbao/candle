@@ -27,7 +27,6 @@ enum Which {
 struct TextGeneration {
     model: Model,
     device: Device,
-    tokenizer: TokenOutputStream,
     logits_processor: LogitsProcessor,
     repeat_penalty: f32,
     repeat_last_n: usize,
@@ -37,7 +36,6 @@ impl TextGeneration {
     #[allow(clippy::too_many_arguments)]
     fn new(
         model: Model,
-        tokenizer: Tokenizer,
         seed: u64,
         temp: Option<f64>,
         top_p: Option<f64>,
@@ -48,7 +46,6 @@ impl TextGeneration {
         let logits_processor = LogitsProcessor::new(seed, temp, top_p);
         Self {
             model,
-            tokenizer: TokenOutputStream::new(tokenizer),
             logits_processor,
             repeat_penalty,
             repeat_last_n,
@@ -56,25 +53,22 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    fn run(&mut self, tokenizer: &Tokenizer, prompt: &str, sample_len: usize) -> Result<()> {
         use std::io::Write;
-        self.tokenizer.clear();
-        let mut tokens = self
-            .tokenizer
-            .tokenizer()
+        let mut tokens = tokenizer
             .encode(prompt, true)
             .map_err(E::msg)?
             .get_ids()
             .to_vec();
         for &t in tokens.iter() {
-            if let Some(t) = self.tokenizer.next_token(t)? {
+            if let Some(t) = tokenizer.id_to_token(t) {
                 print!("{t}")
             }
         }
         std::io::stdout().flush()?;
 
         let mut generated_tokens = 0usize;
-        let eos_token = match self.tokenizer.get_token("<|endoftext|>") {
+        let eos_token = match tokenizer.token_to_id("<|endoftext|>") {
             Some(token) => token,
             None => anyhow::bail!("cannot find the <|endoftext|> token"),
         };
@@ -100,18 +94,18 @@ impl TextGeneration {
             let next_token = self.logits_processor.sample(&logits)?;
             tokens.push(next_token);
             generated_tokens += 1;
-            if next_token == eos_token {
-                break;
-            }
-            if let Some(t) = self.tokenizer.next_token(next_token)? {
+
+            if let Some(t) = tokenizer.id_to_token(next_token) {
+                let t = t.replace('▁', " ").replace("<|im_end|>", "\n");
                 print!("{t}");
                 std::io::stdout().flush()?;
             }
+
+            if next_token == eos_token {
+                break;
+            }
         }
         let dt = start_gen.elapsed();
-        if let Some(rest) = self.tokenizer.decode_rest().map_err(E::msg)? {
-            print!("{rest}");
-        }
         std::io::stdout().flush()?;
         println!(
             "\n{generated_tokens} tokens generated ({:.2} token/s)",
@@ -232,7 +226,7 @@ fn main() -> Result<()> {
     let dtype = if device.is_cuda() {
         DType::BF16
     } else {
-        DType::F32
+        if device.is_gcu() {DType::F16} else {DType::F32}
     };
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
     let model = Model::new(&config, vb)?;
@@ -241,7 +235,6 @@ fn main() -> Result<()> {
 
     let mut pipeline = TextGeneration::new(
         model,
-        tokenizer,
         args.seed,
         args.temperature,
         args.top_p,
@@ -249,6 +242,6 @@ fn main() -> Result<()> {
         args.repeat_last_n,
         &device,
     );
-    pipeline.run(&args.prompt, args.sample_len)?;
+    pipeline.run(&tokenizer, &args.prompt, args.sample_len)?;
     Ok(())
 }

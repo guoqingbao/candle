@@ -16,9 +16,10 @@ use ubridge::gcu_device::{GcuFunction};
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::gcu_launch::{GcuLaunchConfig, GcuLaunchAsync};
 use ubridge::{*};
+pub use ubridge;
 
 #[derive(Debug, Clone)]
-enum GcuStorageSlice {
+pub enum GcuStorageSlice {
     U8(GcuSlice<u8>),
     U32(GcuSlice<u32>),
     I64(GcuSlice<i64>),
@@ -32,7 +33,7 @@ type S = GcuStorageSlice;
 
 #[derive(Debug, Clone)]
 pub struct GcuStorage {
-    slice: GcuStorageSlice,
+    pub slice: GcuStorageSlice,
     pub device: GcuDevice,
 }
 
@@ -408,7 +409,7 @@ impl BackendDevice for GcuDevice {
 
 
 
-trait Map1 {
+pub trait Map1 {
     fn f<T: DeviceCopy + WithDType>( //+ValidAsZeroBits
         
         &self,
@@ -547,7 +548,7 @@ impl Map1 for Clone {
     }
 }
 
-fn kernel_name<T: WithDType>(root: &str) -> String {
+pub fn kernel_name<T: WithDType>(root: &str) -> String {
     let dtype = T::DTYPE.as_str();
     format!("{root}_{dtype}")
 }

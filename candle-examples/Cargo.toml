@@ -64,7 +64,7 @@ mkl = ["dep:intel-mkl-src", "candle/mkl", "candle-nn/mkl", "candle-transformers/
 nccl = ["cuda", "cudarc/nccl", "dep:half"]
 onnx = ["candle-onnx"]
 metal = ["candle/metal", "candle-nn/metal"]
-#default = ["gcu", "scorpio"] #for gcu development
+default = ["gcu", "scorpio"] #for gcu development
 
 [[example]]
 name = "llama_multiprocess"

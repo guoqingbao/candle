@@ -47,7 +47,6 @@ fn test_cache(config: &Config, dtype: DType, gcu_device: &Device) -> Result<(Ten
     Ok((cpu_sin, cpu_cos))
 }
 
-use model::kvconcat;
 //pased!
 fn test_concat(gcu_device: &Device) -> Result<()> {
     let shape1: Shape = (1, 32, 13, 128).into();
@@ -62,7 +61,7 @@ fn test_concat(gcu_device: &Device) -> Result<()> {
     let cpu_output = Tensor::cat(&[&cpu_input1, &cpu_input2], 2)?;
 
     let gcu_output = Tensor::cat(&[&gcu_input1, &gcu_input2], 2)?;
-    let gcu_output1 = kvconcat(&gcu_input1, &gcu_input2, 2)?;
+    let gcu_output1 = candle_nn::kvconcat(&gcu_input1, &gcu_input2, 2)?;
     // println!("Cpu output: {}", cpu_output);
 
     // println!("Gcu output: {}", gcu_output.to_device(&Device::Cpu)?);
@@ -112,7 +111,7 @@ fn test_embedding(tokens: &Vec<u32>, cfg: &Config, vb: &VarBuilder, vbcpu: &VarB
 
 //passed!
 fn test_softmax(dtype: DType, gcu_device: &Device) -> Result<()> {
-    let shape: Shape = (1, 13, 4096).into();
+    let shape: Shape = (1, 32, 13).into();
     let cpu_input = match dtype {
         DType::F16 => {Tensor::rand(f16::from_f32(0.0f32), f16::from_f32(1.0f32), shape, &Device::Cpu)?},
         DType::F32 => {Tensor::rand(0.0f32, 1.0, shape, &Device::Cpu)?},
@@ -121,12 +120,15 @@ fn test_softmax(dtype: DType, gcu_device: &Device) -> Result<()> {
     };
     let gcu_input = cpu_input.to_device(&gcu_device)?;
     
-    let cpu_output = candle_nn::ops::softmax(&cpu_input, 1)?;
-    let gcu_output = candle_nn::ops::softmax(&gcu_input, 1)?;
+    // let cpu_output = candle_nn::ops::softmax(&cpu_input, 1)?;
+    // let gcu_output = candle_nn::ops::softmax(&gcu_input, 1)?;
+    let shape: Shape = (1, 32 * 13).into();
+    let cpu_output = candle_nn::ops::softmax_last_dim(&cpu_input)?.reshape(&shape)?;
+    let gcu_output = candle_nn::ops::softmax_last_dim(&gcu_input)?.reshape(&shape)?;
 
     assert_float_eq!(
-        cpu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][0],
-        gcu_output.to_dtype(DType::F32)?.to_vec3::<f32>()?[0][0],
+        cpu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
+        gcu_output.to_dtype(DType::F32)?.to_vec2::<f32>()?[0],
         abs_all <= 0.000001);
 
     println!("Test softmax passed!");

@@ -1,4 +1,4 @@
-use candle::{CpuStorage, Layout, Result, Shape, Tensor};
+use candle::{CpuStorage, GcuStorage, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
@@ -242,15 +242,62 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         let newstorage = candle::MetalStorage::new(output, device.clone(), storage.dtype());
         Ok((newstorage, layout.shape().clone()))
     }
+
+    #[cfg(feature = "gcu")]
+    fn gcu_fwd(
+        &self,
+        storage: &GcuStorage,
+        layout: &Layout,
+    ) -> Result<(candle::GcuStorage, Shape)> {
+        use candle::gcu_backend::ubridge;
+        use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
+        use candle::gcu_backend::ubridge::gcu_slice::GcuSlice;
+        use candle::gcu_backend::ubridge::gcu_launch::GcuLaunchAsync;
+        use candle::gcu_backend::{kernel_name, Map1, WrapErr};
+        use candle::{GcuDevice, WithDType};
+        use candle::{backend::BackendStorage, gcu_backend::DeviceCopy};
+
+        struct S;
+        impl Map1 for S {
+            fn f<T: DeviceCopy + WithDType>(
+                &self,
+                src: &GcuSlice<T>,
+                dev: &GcuDevice,
+                layout: &Layout,
+            ) -> Result<GcuSlice<T>> {
+                let src = match layout.contiguous_offsets() {
+                    None => candle::bail!("input has to be contiguous"),
+                    Some((o1, o2)) => src.slice(o1..o2),
+                };
+                let el = layout.shape().elem_count();
+                let dims = layout.shape().dims();
+                // println!("dims: {:?}", dims);
+
+                let dim_m1 = dims[dims.len() - 1];
+                let (n_rows, n_cols) = (el / dim_m1, dim_m1);
+                // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
+                let cfg = dev.launch_cfg;
+                let src = &src.slice(layout.start_offset()..);
+                let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
+                let dst = dev.alloc::<T>(el).w()?;
+                let params = (src.device_ptr(), dst.device_ptr(), n_rows, n_cols);
+                unsafe { func.launch(&cfg, params) }.w()?;
+                Ok(dst)
+            }
+        }
+
+        let dev = storage.device();
+        let slice = S.map(&storage.slice, dev, layout)?;
+        let dst = candle::gcu_backend::GcuStorage {
+            slice,
+            device: dev.clone(),
+        };
+        Ok((dst, layout.shape().clone()))
+    }
 }
 
 pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
-    use candle::D;
-    if xs.device().is_gcu() {
-        softmax(&xs, D::Minus1)
-    } else {
         xs.apply_op1_no_bwd(&SoftmaxLastDim)
-    }
 }
 
 // https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html

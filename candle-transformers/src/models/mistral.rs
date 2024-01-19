@@ -330,8 +330,8 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
+    input_layernorm: candle_nn::ops::LayerRmsNorm,
+    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
 }
 
 impl DecoderLayer {
@@ -339,8 +339,8 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-            RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = RmsNorm::new(
+            candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm = candle_nn::ops::rms_norm_fused(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -377,7 +377,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
-    norm: RmsNorm,
+    norm: candle_nn::ops::LayerRmsNorm,
     lm_head: Linear,
     sliding_window: usize,
     device: Device,
@@ -396,7 +396,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,

@@ -1,5 +1,6 @@
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
+use crate::shape::ShapeWithOneHole;
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType, Tensor};
 use half::{bf16, f16};
 use rayon::range;
@@ -2056,7 +2057,7 @@ impl crate::CustomOp3 for Rope {
                 unsafe { func.launch(&cfg, params) }.w()?;
             }
             _=> Err(GcuError::InternalError(
-                "dtype mismatch in copy_strided op",
+                "dtype mismatch in rope op",
             ))?,
         };
 
@@ -2139,7 +2140,7 @@ impl crate::CustomOp2 for KVConcat {
                 GcuStorageSlice::U8(out)
             }
             _=> Err(GcuError::InternalError(
-                "dtype mismatch in copy_strided op",
+                "dtype mismatch in kvconcat op",
             ))?,
         };
 
@@ -2150,5 +2151,81 @@ impl crate::CustomOp2 for KVConcat {
         Ok((GcuStorage { slice: slice, device }, lshape.into()))
 
 
+    }
+}
+
+pub struct LayerNorm {
+    pub eps: f32,
+    /// Whether to remove the mean or not, the default is true and when set to false, this turns
+    /// this layer into RmsNorm.
+    pub remove_mean: bool,
+    pub affine: bool,
+}
+impl crate::CustomOp3 for LayerNorm {
+    // Box<dyn> does not support const yet, so use a function to get the name.
+    fn name(&self) -> &'static str {
+        "layernorm"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+        s3: &CpuStorage,
+        l3: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        crate::bail!("no cpu support for rope")
+    }
+
+
+    /// The forward pass, as run on a gcu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn gcu_fwd(
+        &self,
+        x: &GcuStorage,
+        x_l: &Layout,
+        weight: &GcuStorage,
+        weight_l: &Layout,
+        bias: &GcuStorage,
+        bias_l: &Layout,
+    ) -> Result<(GcuStorage, Shape)> {
+        let dev = &x.device;
+        let cfg = &dev.launch_cfg;
+        let elem_count = x_l.shape().elem_count();
+        let dims = x_l.shape().dims();
+        let dim_m1 = dims[dims.len() - 1];
+        let (n_rows, n_cols) = (elem_count / dim_m1, dim_m1);
+
+        let slice = match (&x.slice, &weight.slice, &bias.slice) { 
+            (GcuStorageSlice::BF16(x_), GcuStorageSlice::BF16(w_), GcuStorageSlice::BF16(b_)) => { 
+                let out = dev.alloc::<bf16>(elem_count).w()?;
+                let func = dev.get_or_load_func("layernorm_bf16", ubridge::REDUCE)?;
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::BF16(out)
+            }
+            (GcuStorageSlice::F32(x_), GcuStorageSlice::F32(w_), GcuStorageSlice::F32(b_)) => { 
+                let out = dev.alloc::<f32>(elem_count).w()?;
+                let func = dev.get_or_load_func("layernorm_f32", ubridge::REDUCE)?;
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::F32(out)
+            }
+            (GcuStorageSlice::F16(x_), GcuStorageSlice::F16(w_), GcuStorageSlice::F16(b_)) => {
+                let out = dev.alloc::<f16>(elem_count).w()?;
+                let func = dev.get_or_load_func("layernorm_f16", ubridge::REDUCE)?;
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::F16(out)
+            }
+            _=> Err(GcuError::InternalError(
+                "dtype mismatch in layernorm op",
+            ))?,
+        };
+
+        let device = dev.clone();
+        Ok((GcuStorage { slice: slice, device }, x_l.shape().into()))
     }
 }

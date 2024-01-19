@@ -359,9 +359,9 @@ impl Mlp {
 }
 
 struct Block {
-    rms_1: RmsNorm,
+    rms_1: candle_nn::ops::LayerRmsNorm,
     attn: CausalSelfAttention,
-    rms_2: RmsNorm,
+    rms_2: candle_nn::ops::LayerRmsNorm,
     mlp: Mlp,
     span: tracing::Span,
 }
@@ -381,8 +381,8 @@ impl Block {
         let span = tracing::span!(tracing::Level::TRACE, "block");
         let attn = CausalSelfAttention::load(vb.pp("self_attn"), cache, cfg)?;
         let mlp = Mlp::load(vb.pp("mlp"), cfg)?;
-        let rms_1 = RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = RmsNorm::load(
+        let rms_1 = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let rms_2 = candle_nn::ops::rms_norm_fused(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -400,7 +400,7 @@ impl Block {
 pub struct Llama {
     wte: Embedding,
     blocks: Vec<Block>,
-    ln_f: RmsNorm,
+    ln_f: candle_nn::ops::LayerRmsNorm,
     lm_head: Linear,
 }
 
@@ -420,7 +420,7 @@ impl Llama {
     pub fn load(vb: VarBuilder, cache: &Cache, cfg: &Config) -> Result<Self> {
         let wte = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
         let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
-        let ln_f = RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
+        let ln_f = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
         let blocks: Vec<_> = (0..cfg.num_hidden_layers)
             .map(|i| Block::load(vb.pp(&format!("model.layers.{i}")), cache, cfg).unwrap())
             .collect();

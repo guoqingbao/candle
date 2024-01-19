@@ -113,8 +113,8 @@ struct Attention {
     v_proj: Linear,
     dense: Linear,
     kv_cache: Option<(Tensor, Tensor)>,
-    q_layernorm: Option<LayerNorm>,
-    k_layernorm: Option<LayerNorm>,
+    q_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
+    k_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
     rotary_emb: RotaryEmbedding,
     softmax_scale: f64,
     num_heads: usize,
@@ -149,8 +149,8 @@ impl Attention {
         // Alternative rope scalings are not supported.
         let rotary_emb = RotaryEmbedding::new(cfg, dtype, vb.device())?;
         let (q_layernorm, k_layernorm) = if cfg.qk_layernorm {
-            let q_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
-            let k_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
+            let q_layernorm = candle_nn::ops::layer_norm_fused(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
+            let k_layernorm = candle_nn::ops::layer_norm_fused(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
             (Some(q_layernorm), Some(k_layernorm))
         } else {
             (None, None)
@@ -278,7 +278,7 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: LayerNorm,
+    input_layernorm: candle_nn::ops::LayerRmsNorm,
     span: tracing::Span,
 }
 
@@ -286,7 +286,7 @@ impl DecoderLayer {
     fn new(cfg: &Config, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(cfg, dtype, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let input_layernorm = layer_norm(
+        let input_layernorm = candle_nn::ops::layer_norm_fused(
             cfg.hidden_size,
             cfg.layer_norm_eps,
             vb.pp("input_layernorm"),
@@ -317,7 +317,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
-    final_layernorm: LayerNorm,
+    final_layernorm: candle_nn::ops::LayerRmsNorm,
     lm_head: Linear,
     span: tracing::Span,
 }
@@ -327,7 +327,7 @@ impl Model {
         let vb_m = vb.pp("model");
         let embed_tokens =
             Embedding::new(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
-        let final_layernorm = layer_norm(
+        let final_layernorm = candle_nn::ops::layer_norm_fused(
             cfg.hidden_size,
             cfg.layer_norm_eps,
             vb_m.pp("final_layernorm"),

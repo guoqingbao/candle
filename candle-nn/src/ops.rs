@@ -1,6 +1,8 @@
 use candle::{CpuStorage, GcuStorage, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
+use crate::{layer_norm, LayerNorm, LayerNormConfig, VarBuilder};
+
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
 /// a slice of fixed index on dimension `dim` are between 0 and 1 and sum to 1.
 ///
@@ -418,4 +420,59 @@ pub fn kvconcat(
     concat_dim: i32,
 ) -> Result<Tensor> {
     Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
+}
+
+/// RmsNorm is a specialized version of the LayerNorm module.
+#[derive(Clone, Debug)]
+pub struct LayerRmsNorm(LayerNorm);
+
+impl LayerRmsNorm {
+    pub fn new(rms: bool, weight: Tensor, eps: f64) -> Self {
+        if rms {
+            Self(LayerNorm::rms_norm(weight, eps))
+        } else {
+            Self(LayerNorm::new_no_bias(weight, eps))
+        }
+    }
+
+    pub fn into_inner(self) -> LayerNorm {
+        self.0
+    }
+}
+
+impl crate::Module for LayerRmsNorm {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        if xs.device().is_gcu() {
+            use candle::gcu_backend::LayerNorm;
+            let op = LayerNorm {
+                eps: self.0.eps as f32,
+                remove_mean: self.0.remove_mean,
+                affine: self.0.bias.is_some(),
+            };
+            let x = xs.contiguous()?;
+            match &self.0.bias {
+                Some(bias) => x.apply_op3(&self.0.weight, &bias, op),
+                None => x.apply_op3(&self.0.weight, &self.0.weight, op),
+            }
+        } else {
+            self.0.forward(xs)
+        }
+    }
+}
+
+pub fn rms_norm_fused(size: usize, eps: f64, vb: crate::VarBuilder) -> Result<LayerRmsNorm> {
+    let config = LayerNormConfig {
+        eps,
+        remove_mean: false,
+        affine: false,
+    };
+    Ok(LayerRmsNorm(layer_norm(size, config, vb)?))
+}
+
+pub fn layer_norm_fused<C: Into<LayerNormConfig>>(
+    size: usize,
+    c: C,
+    vb: VarBuilder,
+) -> Result<LayerRmsNorm> {
+    Ok(LayerRmsNorm(layer_norm(size, c, vb)?))
 }

@@ -280,7 +280,7 @@ impl Attention {
             .transpose(1, 2)?;
 
         let (query_states, key_states) = 
-            candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset)?;
+            candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, true)?;
         
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),

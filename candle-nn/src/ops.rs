@@ -342,7 +342,7 @@ pub fn replication_pad2d(xs: &Tensor, pad: usize) -> Result<Tensor> {
 }
 
 #[cfg(feature = "gcu")]
-pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
+pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize, query_key_transposed: bool) -> Result<(Tensor, Tensor)> {
     pub fn fused_rope(
         query: &Tensor,
         key: &Tensor,
@@ -363,12 +363,25 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         };
         query.apply_op3(key, cos_sin, op)
     }
-    let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
-    let (_, k_head_size, _, _) = key.dims4()?;
-    let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
-    //cost_sin must be type of float32
-    let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, 1)?;
-    Ok((query.contiguous()?, key.contiguous()?))
+
+    if query_key_transposed {
+        //(b_sz, q_len, num_kv_heads, head_dim)
+        let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
+        let (_, k_head_size, _, _) = key.dims4()?;
+        //cost_sin must be type of float32
+        let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
+        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, 1)?;
+        Ok((query.contiguous()?, key.contiguous()?))
+    } else {
+        //(b_sz, q_len, num_kv_heads, head_dim)
+        let (_, seq_len, q_head_size, hidden_size) = query.dims4()?;
+        let (_, _, k_head_size, _) = key.dims4()?;
+        //cost_sin must be type of float32
+        let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
+        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, 1)?;
+        Ok((query.transpose(1, 2)?.contiguous()?, key.transpose(1, 2)?.contiguous()?))
+    }
+
 }
 
 #[cfg(not(feature = "gcu"))]

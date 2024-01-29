@@ -379,7 +379,8 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         //cost_sin must be type of float32
         let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
         let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, 1)?;
-        Ok((query.transpose(1, 2)?.contiguous()?, key.transpose(1, 2)?.contiguous()?))
+        // Ok((query.transpose(1, 2)?.contiguous()?, key.transpose(1, 2)?.contiguous()?))
+        Ok((query.to_owned(), key.to_owned()))
     }
 
 }
@@ -409,6 +410,37 @@ pub fn apply_rotary_emb_qkv(
     Ok((q_embed, k_embed))
 }
 
+#[cfg(feature = "gcu")]
+pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize, split_dim: usize) -> Result<(Tensor, Tensor)> {
+    let (_b_size, _num_heads, _seq_len, _headdim) = query.dims4()?; //must be this type of inputs
+    use candle::D;
+    let query_rot = query.narrow(D::Minus1, 0, split_dim)?.contiguous()?;
+    let key_rot = key.narrow(D::Minus1, 0, split_dim)?.contiguous()?;
+    let (query_rot, key_rot) = apply_rotary_emb_qkv(&query_rot, &key_rot, &cos_sin, &cos_sin, index_pos, false)?;
+    let query_pass = query.narrow(D::Minus1, split_dim, _headdim - split_dim)?;
+    let key_pass = key.narrow(D::Minus1, split_dim, _headdim - split_dim)?;
+    let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?;
+    let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?;
+    Ok((query_states.transpose(1,2)?.contiguous()?, key_states.transpose(1,2)?.contiguous()?))
+}
+
+#[cfg(not(feature = "gcu"))]
+pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize, split_dim: usize) -> Result<(Tensor, Tensor)> {
+    let (_b_size, _num_heads, _seq_len, _headdim) = query.dims4()?; //must be this type of inputs
+    use candle::D;
+    let query = query.transpose(1,2)?;
+    let key = key.transpose(1,2)?;
+    let (rot_ndims, pass_ndims) = (split_dim, _headdim - split_dim);
+    let query_rot = query.narrow(D::Minus1, 0, rot_ndims)?;
+    let query_pass = query.narrow(D::Minus1, rot_ndims, pass_ndims)?;
+    let key_rot = key.narrow(D::Minus1, 0, rot_ndims)?;
+    let key_pass = key.narrow(D::Minus1, rot_ndims, pass_ndims)?;
+    let (query_rot, key_rot) =
+        apply_rotary_emb_qkv(&query_rot, &key_rot, index_pos)?;
+    let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
+    let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
+    Ok((query_states, key_states))
+}
 
 #[cfg(feature = "gcu")]
 pub fn kvconcat(

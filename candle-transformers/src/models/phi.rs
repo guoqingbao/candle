@@ -41,6 +41,7 @@ struct RotaryEmbedding {
     dim: usize,
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 impl RotaryEmbedding {
@@ -51,16 +52,18 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), &dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), &dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, &dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((cfg.max_position_embeddings, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
         Ok(Self {
             dim,
             sin: emb.sin()?.to_device(&Device::Cpu)?,
             cos: emb.cos()?.to_device(&Device::Cpu)?,
+            cos_sin
         })
     }
 
@@ -202,11 +205,11 @@ impl Attention {
         };
 
         let query_states = query_states
-            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
+            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?;
+            // .transpose(1, 2)?;
         let key_states = key_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
+            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?;
+            // .transpose(1, 2)?;
         let value_states = value_states
             .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
@@ -217,8 +220,8 @@ impl Attention {
             Some((prev_k, _)) => prev_k.dim(2)?,
         };
         let qdevice = query_states.device();
-        let query_states = query_states.to_device(&Device::Cpu)?;
-        let key_states = key_states.to_device(&Device::Cpu)?;
+        let query_states = query_states.to_device(&Device::Cpu)?.transpose(1,2)?;
+        let key_states = key_states.to_device(&Device::Cpu)?.transpose(1,2)?;
 
         let query_states = self
             .rotary_emb
@@ -229,7 +232,8 @@ impl Attention {
 
         let query_states = query_states.to_device(&qdevice)?;
         let key_states = key_states.to_device(&qdevice)?;
-            
+        // let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim)?;
+
         // KV cache.
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),

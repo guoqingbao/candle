@@ -240,24 +240,19 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (rot_ndims, pass_ndims) = (self.rotary_ndims, self.head_dim - self.rotary_ndims);
-
-        let query_pass = query_states.transpose(1, 2)?.narrow(D::Minus1, rot_ndims, pass_ndims)?;
-        let key_pass = key_states.transpose(1, 2)?.narrow(D::Minus1, rot_ndims, pass_ndims)?;
-
-        let (query_rot, key_rot) = if query_states.device().is_gcu() {
-            let query_rot = query_states.narrow(D::Minus1, 0, rot_ndims)?.contiguous()?;
-            let key_rot = key_states.narrow(D::Minus1, 0, rot_ndims)?.contiguous()?;
-            candle_nn::apply_rotary_emb_qkv(&query_rot, &key_rot, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, false)?
-        } else {
-            let query_rot = query_states.transpose(1, 2)?.narrow(D::Minus1, 0, rot_ndims)?;
-            let key_rot = key_states.transpose(1, 2)?.narrow(D::Minus1, 0, rot_ndims)?;
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_rot, &key_rot, seqlen_offset)?
-        };
-
-        let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
-        let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
+        // let (rot_ndims, pass_ndims) = (self.rotary_ndims, self.head_dim - self.rotary_ndims);
+        // let query_states = query_states.transpose(1,2)?;
+        // let key_states = key_states.transpose(1,2)?;
+        // let query_rot = query_states.narrow(D::Minus1, 0, rot_ndims)?;
+        // let query_pass = query_states.narrow(D::Minus1, rot_ndims, pass_ndims)?;
+        // let key_rot = key_states.narrow(D::Minus1, 0, rot_ndims)?;
+        // let key_pass = key_states.narrow(D::Minus1, rot_ndims, pass_ndims)?;
+        // let (query_rot, key_rot) =
+        //     self.rotary_emb
+        //         .apply_rotary_emb_qkv(&query_rot, &key_rot, seqlen_offset)?;
+        // let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
+        // let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
+        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims)?;
 
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),

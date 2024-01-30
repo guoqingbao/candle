@@ -61,8 +61,8 @@ impl RotaryEmbedding {
         let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
         Ok(Self {
             dim,
-            sin: emb.sin()?.to_device(&Device::Cpu)?,
-            cos: emb.cos()?.to_device(&Device::Cpu)?,
+            sin: emb.sin()?,
+            cos: emb.cos()?,
             cos_sin
         })
     }

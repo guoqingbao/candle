@@ -394,6 +394,7 @@ pub fn apply_rotary_emb_qkv(
     cos: &Tensor,
     sin: &Tensor,
     index_pos: usize,
+    split_dim: usize, query_key_transposed: bool
 ) -> Result<(Tensor, Tensor)> {
     use candle::D;
     fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -413,7 +414,7 @@ pub fn apply_rotary_emb_qkv(
 }
 
 #[cfg(not(feature = "gcu"))]
-pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize, split_dim: usize) -> Result<(Tensor, Tensor)> {
+pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, sin: &Tensor, index_pos: usize, split_dim: usize, query_key_transposed: bool) -> Result<(Tensor, Tensor)> {
     let (_b_size, _num_heads, _seq_len, _headdim) = query.dims4()?; //must be this type of inputs
     use candle::D;
     let (rot_ndims, pass_ndims) = (split_dim, _headdim - split_dim);
@@ -422,7 +423,7 @@ pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _:
     let key_rot = key.narrow(D::Minus1, 0, rot_ndims)?;
     let key_pass = key.narrow(D::Minus1, rot_ndims, pass_ndims)?;
     let (query_rot, key_rot) =
-        apply_rotary_emb_qkv(&query_rot, &key_rot, index_pos)?;
+        apply_rotary_emb_qkv(&query_rot, &key_rot, &cos_sin, &sin, index_pos, 0, query_key_transposed)?;
     let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
     let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
     Ok((query_states, key_states))

@@ -205,11 +205,11 @@ impl Attention {
         };
 
         let query_states = query_states
-            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?;
-            // .transpose(1, 2)?;
+            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
         let key_states = key_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?;
-            // .transpose(1, 2)?;
+            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
         let value_states = value_states
             .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
@@ -219,20 +219,12 @@ impl Attention {
             None => 0,
             Some((prev_k, _)) => prev_k.dim(2)?,
         };
-        let qdevice = query_states.device();
-        let query_states = query_states.to_device(&Device::Cpu)?.transpose(1,2)?;
-        let key_states = key_states.to_device(&Device::Cpu)?.transpose(1,2)?;
 
-        let query_states = self
-            .rotary_emb
-            .apply_rotary_emb(&query_states, seqlen_offset)?;
-        let key_states = self
-            .rotary_emb
-            .apply_rotary_emb(&key_states, seqlen_offset)?;
+        #[cfg(not(feature = "gcu"))]
+        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim)?;
 
-        let query_states = query_states.to_device(&qdevice)?;
-        let key_states = key_states.to_device(&qdevice)?;
-        // let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim)?;
+        #[cfg(feature = "gcu")]
+        let (query_states, key_states) = candle_nn::ops::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true)?;
 
         // KV cache.
         let (key_states, value_states) = match &self.kv_cache {

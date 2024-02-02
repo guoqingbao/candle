@@ -114,6 +114,9 @@ struct Args {
     revision: String,
 
     #[arg(long)]
+    tokenizer_file: Option<String>,
+
+    #[arg(long)]
     weight_file: Option<String>,
 }
 
@@ -127,7 +130,12 @@ fn main() -> Result<()> {
         RepoType::Model,
         args.revision,
     ));
-    let tokenizer_filename = repo.get("tokenizer.json")?;
+    // let tokenizer_filename = repo.get("tokenizer.json")?;
+    let tokenizer_filename = match args.tokenizer_file {
+        Some(file) => std::path::PathBuf::from(file),
+        None => repo.get("tokenizer.json")?,
+    };
+
     let filenames = match args.weight_file {
         Some(weight_file) => vec![std::path::PathBuf::from(weight_file)],
         None => ["model.safetensors"]
@@ -140,7 +148,7 @@ fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
     let device = candle_examples::device(args.cpu)?;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
     let config = Config::starcoder_1b();
     let model = GPTBigCode::load(vb, config)?;
     println!("loaded the model in {:?}", start.elapsed());

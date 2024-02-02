@@ -148,11 +148,12 @@ impl Attention {
         value: &Tensor,
         attention_mask: &Tensor,
     ) -> Result<Tensor> {
-        if query.dtype() != DType::F32 {
-            // If we start supporting f16 models, we may need the upcasting scaling bits.
-            // https://github.com/huggingface/transformers/blob/a0042379269bea9182c1f87e6b2eee4ba4c8cce8/src/transformers/models/gpt_bigcode/modeling_gpt_bigcode.py#L133
-            candle::bail!("upcasting is not supported {:?}", query.dtype())
-        }
+        // if query.dtype() != DType::F32 {
+        //     // If we start supporting f16 models, we may need the upcasting scaling bits.
+        //     // https://github.com/huggingface/transformers/blob/a0042379269bea9182c1f87e6b2eee4ba4c8cce8/src/transformers/models/gpt_bigcode/modeling_gpt_bigcode.py#L133
+        //     candle::bail!("upcasting is not supported {:?}", query.dtype())
+        // }
+        let dtype = query.dtype();
         let scale_factor = 1f64 / (self.head_dim as f64).sqrt();
         let initial_query_shape = query.shape();
         let key_len = key.dim(D::Minus1)?;
@@ -171,6 +172,10 @@ impl Attention {
             (query, key, attn_shape, attn_view)
         };
 
+        let query = query.to_dtype(DType::F32)?;
+        let key = key.to_dtype(DType::F32)?;
+        let value = value.to_dtype(DType::F32)?;
+
         let attn_weights =
             (query.matmul(&key.contiguous()?)? * scale_factor)?.reshape(attn_shape)?;
         let attention_mask = attention_mask.broadcast_as(attn_shape)?;
@@ -187,7 +192,7 @@ impl Attention {
         } else {
             attn_weights.matmul(&value)?
         };
-        Ok(attn_output)
+        Ok(attn_output.to_dtype(dtype)?)
     }
 
     fn forward(&mut self, hidden_states: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
@@ -211,7 +216,8 @@ impl Attention {
             if let Some(kv_cache) = &self.kv_cache {
                 // TODO: we could trim the tensors to MAX_SEQ_LEN so that this would work for
                 // arbitrarily large sizes.
-                key_value = Tensor::cat(&[kv_cache, &key_value], D::Minus2)?.contiguous()?;
+                // key_value = Tensor::cat(&[kv_cache, &key_value], D::Minus2)?.contiguous()?;
+                key_value = candle_nn::kvconcat(&kv_cache, &key_value, 2)?;
             }
             self.kv_cache = Some(key_value.clone())
         }
@@ -252,9 +258,9 @@ impl Mlp {
 
 // TODO: Add cross-attention?
 struct Block {
-    ln_1: LayerNorm,
+    ln_1: candle_nn::ops::LayerRmsNorm,
     attn: Attention,
-    ln_2: LayerNorm,
+    ln_2: candle_nn::ops::LayerRmsNorm,
     mlp: Mlp,
 }
 
@@ -262,9 +268,9 @@ impl Block {
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let inner_dim = cfg.n_inner.unwrap_or(4 * hidden_size);
-        let ln_1 = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_1"))?;
+        let ln_1 = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_1"))?;
         let attn = Attention::load(vb.pp("attn"), cfg)?;
-        let ln_2 = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_2"))?;
+        let ln_2 = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_2"))?;
         let mlp = Mlp::load(inner_dim, vb.pp("mlp"), cfg)?;
         Ok(Self {
             ln_1,
@@ -291,7 +297,7 @@ pub struct GPTBigCode {
     wte: Embedding,
     wpe: Embedding,
     blocks: Vec<Block>,
-    ln_f: LayerNorm,
+    ln_f: candle_nn::ops::LayerRmsNorm,
     lm_head: Linear,
     bias: Tensor,
     config: Config,
@@ -310,7 +316,7 @@ impl GPTBigCode {
         let blocks = (0..cfg.num_hidden_layers)
             .map(|i| Block::load(vb_t.pp(&format!("h.{i}")), &cfg))
             .collect::<Result<Vec<_>>>()?;
-        let ln_f = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb_t.pp("ln_f"))?;
+        let ln_f = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb_t.pp("ln_f"))?;
         let lm_head = linear(hidden_size, cfg.vocab_size, false, vb_t.pp("wte"))?;
         let bias = make_causal_mask(cfg.max_position_embeddings, vb.device())?;
         Ok(Self {

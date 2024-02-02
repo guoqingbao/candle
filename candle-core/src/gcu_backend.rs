@@ -2102,41 +2102,41 @@ impl crate::CustomOp2 for KVConcat {
         let dev = &ltensor.device;
         let cfg = &dev.launch_cfg;
         let elem_count = ltensor_l.shape().elem_count() + rtensor_l.shape().elem_count();
-
+        let dims = ltensor_l.shape().dims().len();
         let ds = dev.htod_copy([ltensor_l.shape().dims(), rtensor_l.shape().dims()].concat()).w()?;
         let slice = match (&ltensor.slice, &rtensor.slice) { 
             (GcuStorageSlice::BF16(left_), GcuStorageSlice::BF16(right_)) => { 
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_bf16", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F32(left_), GcuStorageSlice::F32(right_)) => { 
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f32", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F16(left_), GcuStorageSlice::F16(right_)) => {
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f16", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }
             (GcuStorageSlice::F64(left_), GcuStorageSlice::F64(right_)) => {
                 let out = dev.alloc::<f64>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f64", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
             }
             (GcuStorageSlice::U8(left_), GcuStorageSlice::U8(right_)) => {
                 let out = dev.alloc::<u8>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_u8", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr());
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::U8(out)
             }
@@ -2146,7 +2146,11 @@ impl crate::CustomOp2 for KVConcat {
         };
 
         let mut lshape: Vec<usize> = ltensor_l.shape().dims().to_vec();
-        lshape[2] += rtensor_l.shape().dims()[2];
+        if dims > 3 {
+            lshape[2] += rtensor_l.shape().dims()[2];
+        } else {
+            lshape[1] += rtensor_l.shape().dims()[1];            
+        }
 
         let device = dev.clone();
         Ok((GcuStorage { slice: slice, device }, lshape.into()))

@@ -15,6 +15,7 @@ use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::Api, Repo, RepoType};
+use safetensors::Dtype;
 use tokenizers::Tokenizer;
 
 enum Model {
@@ -128,9 +129,8 @@ enum WhichModel {
     V1_5,
     #[value(name = "2")]
     V2,
-    // TODO: Make this the default once it has been battle tested.
-    #[value(name = "2-new")]
-    V2New,
+    #[value(name = "2-old")]
+    V2Old,
     PuffinPhiV2,
     PhiHermes,
 }
@@ -188,11 +188,10 @@ struct Args {
     tokenizer: Option<String>,
 
     #[arg(long)]
-    config: Option<String>,
-
-    #[arg(long)]
     quantized: bool,
 
+    #[arg(long)]
+    config: Option<String>,
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
     repeat_penalty: f32,
@@ -239,7 +238,7 @@ fn main() -> Result<()> {
                 match args.model {
                     WhichModel::V1 => "microsoft/phi-1".to_string(),
                     WhichModel::V1_5 => "microsoft/phi-1_5".to_string(),
-                    WhichModel::V2 | WhichModel::V2New => "microsoft/phi-2".to_string(),
+                    WhichModel::V2 | WhichModel::V2Old => "microsoft/phi-2".to_string(),
                     WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
                         "lmz/candle-quantized-phi".to_string()
                     }
@@ -254,10 +253,10 @@ fn main() -> Result<()> {
                 "main".to_string()
             } else {
                 match args.model {
-                    WhichModel::V1 => "refs/pr/2".to_string(),
-                    WhichModel::V1_5 => "refs/pr/18".to_string(),
-                    WhichModel::V2 => "834565c23f9b28b96ccbeabe614dd906b6db551a".to_string(),
-                    WhichModel::V2New | WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
+                    WhichModel::V1 => "refs/pr/8".to_string(),
+                    WhichModel::V1_5 => "refs/pr/73".to_string(),
+                    WhichModel::V2Old => "834565c23f9b28b96ccbeabe614dd906b6db551a".to_string(),
+                    WhichModel::V2 | WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
                         "main".to_string()
                     }
                 }
@@ -268,7 +267,7 @@ fn main() -> Result<()> {
     let tokenizer_filename = match args.tokenizer {
         Some(file) => std::path::PathBuf::from(file),
         None => match args.model {
-            WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 | WhichModel::V2New => {
+            WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 | WhichModel::V2Old => {
                 repo.get("tokenizer.json")?
             }
             WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
@@ -286,14 +285,14 @@ fn main() -> Result<()> {
                 match args.model {
                     WhichModel::V1 => vec![repo.get("model-v1-q4k.gguf")?],
                     WhichModel::V1_5 => vec![repo.get("model-q4k.gguf")?],
-                    WhichModel::V2 | WhichModel::V2New => vec![repo.get("model-v2-q4k.gguf")?],
+                    WhichModel::V2 | WhichModel::V2Old => vec![repo.get("model-v2-q4k.gguf")?],
                     WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2-q4k.gguf")?],
                     WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B-q4k.gguf")?],
                 }
             } else {
                 match args.model {
                     WhichModel::V1 | WhichModel::V1_5 => vec![repo.get("model.safetensors")?],
-                    WhichModel::V2 | WhichModel::V2New => candle_examples::hub_load_safetensors(
+                    WhichModel::V2 | WhichModel::V2Old => candle_examples::hub_load_safetensors(
                         &repo,
                         "model.safetensors.index.json",
                     )?,
@@ -310,38 +309,44 @@ fn main() -> Result<()> {
     let config = || match args.model {
         WhichModel::V1 => Config::v1(),
         WhichModel::V1_5 => Config::v1_5(),
-        WhichModel::V2 | WhichModel::V2New => Config::v2(),
+        WhichModel::V2 | WhichModel::V2Old => Config::v2(),
         WhichModel::PuffinPhiV2 => Config::puffin_phi_v2(),
         WhichModel::PhiHermes => Config::phi_hermes_1_3b(),
     };
-    let (model, device) = if args.model == WhichModel::V2New {
-        let device = candle_examples::device(args.cpu)?;
-        let config_filename = match args.config {
-            Some(file) => std::path::PathBuf::from(file),
-            _ => repo.get("config.json")?
-        };
-        let config = std::fs::read_to_string(config_filename)?;
-        let config: PhiConfig = serde_json::from_str(&config)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
-        let phi = Phi::new(&config, DType::F16, vb)?;
-        (Model::Phi(phi), device)
-    } else if args.quantized {
-        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&filenames[0])?;
+    let device = candle_examples::device(args.cpu)?;
+    let model = if args.quantized {
         let config = config();
+        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
+            &filenames[0],
+            &device,
+        )?;
         let model = match args.model {
-            WhichModel::V2 | WhichModel::V2New => QMixFormer::new_v2(&config, vb)?,
+            WhichModel::V2 | WhichModel::V2Old => QMixFormer::new_v2(&config, vb)?,
             _ => QMixFormer::new(&config, vb)?,
         };
-        (Model::Quantized(model), Device::Cpu)
+        Model::Quantized(model)
     } else {
-        let device = candle_examples::device(args.cpu)?;
-        let config = config();
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
-        let model = match args.model {
-            WhichModel::V2 | WhichModel::V2New => MixFormer::new_v2(&config, vb)?,
-            _ => MixFormer::new(&config, vb)?,
-        };
-        (Model::MixFormer(model), device)
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
+        match args.model {
+            WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 => {
+                let config_filename = match args.config {
+                    Some(file) => std::path::PathBuf::from(file),
+                    _ => repo.get("config.json")?
+                };
+                let config = std::fs::read_to_string(config_filename)?;
+                let config: PhiConfig = serde_json::from_str(&config)?;
+                let phi = Phi::new(&config, DType::F16, vb)?;
+                Model::Phi(phi)
+            }
+            WhichModel::V2Old => {
+                let config = config();
+                Model::MixFormer(MixFormer::new_v2(&config, vb)?)
+            }
+            WhichModel::PhiHermes | WhichModel::PuffinPhiV2 => {
+                let config = config();
+                Model::MixFormer(MixFormer::new(&config, vb)?)
+            }
+        }
     };
     println!("loaded the model in {:?}", start.elapsed());
 

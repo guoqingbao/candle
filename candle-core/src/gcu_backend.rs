@@ -1,3 +1,31 @@
+/*
+ * Copyright 2021-2024 Enflame. All Rights Reserved.
+
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * @file    device_executor.rs
+ * @brief
+ *
+ * @author  Guoqing Bao
+ * @date    2022-09-05 - 2024-02-02
+ * @version V0.1
+ * @par     Copyright (c) Enflame Tech Company.
+ * @par     History: Support BigCode/StarCode model inference
+ * @par     Comments: a gcu backend for huggingface candle ML framework, 
+ *                    aiming at minimal modification of upstream candle project while supporting
+ *                    Enflame GCU device computing seamlessly. This GCU backend requires another two 
+ *                    crates: ubridge and UHHI (written by Enflame), which are not open source yet.
+ */
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::shape::ShapeWithOneHole;

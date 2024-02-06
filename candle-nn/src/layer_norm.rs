@@ -121,7 +121,6 @@ impl crate::Module for LayerNorm {
             x
         };
         let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-        // println!("norm_x: {:}", norm_x);
         let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
         let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(&self.weight)?;
         match &self.bias {

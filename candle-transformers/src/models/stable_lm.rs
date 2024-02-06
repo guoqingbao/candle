@@ -279,6 +279,12 @@ impl Attention {
         let key_states = self.repeat_kv(key_states)?.contiguous()?;
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
 
+        let dtype = query_states.dtype();
+
+        let query_states = query_states.to_dtype(DType::F32)?;
+        let key_states = key_states.to_dtype(DType::F32)?;
+        let value_states = value_states.to_dtype(DType::F32)?;
+
         let attn_output = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
             let q = query_states.transpose(1, 2)?;
@@ -297,7 +303,7 @@ impl Attention {
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
         };
-        attn_output
+        attn_output.to_dtype(dtype)?
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
             .apply(&self.o_proj)
@@ -404,7 +410,8 @@ impl Model {
             mask
         };
         mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
-            .to_dtype(self.dtype)
+            // .to_dtype(self.dtype)
+            .to_dtype(DType::F32)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

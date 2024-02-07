@@ -2262,3 +2262,96 @@ impl crate::CustomOp3 for LayerNorm {
         Ok((GcuStorage { slice: slice, device }, x_l.shape().into()))
     }
 }
+
+pub enum Activation {
+    ReLU,
+    Sigmoid,
+    Tanh,
+    GeLU,
+    Elu(f64),
+    Silu,
+}
+
+impl crate::CustomOp1 for Activation {
+    // Box<dyn> does not support const yet, so use a function to get the name.
+    fn name(&self) -> &'static str {
+        match self {
+            Activation::ReLU => "relu",
+            Activation::Sigmoid => "sigmoid",
+            Activation::Tanh => "tanh",
+            Activation::GeLU => "gelu",
+            Activation::Elu(_) => "elu",
+            Activation::Silu => "silu",
+        }
+    }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        crate::bail!("no cpu support for gcu activation!")
+    }
+
+    fn gcu_fwd(&self, s: &GcuStorage, l: &Layout) -> Result<(GcuStorage, Shape)> {
+        let dev = &s.device;
+        let cfg = &dev.launch_cfg;
+        let elem_count = l.shape().elem_count();
+        let func_name = match self {
+            Activation::ReLU => format!("urelu_{}", s.dtype().as_str()),
+            Activation::Sigmoid => format!("usigmoid_{}", s.dtype().as_str()),
+            Activation::Tanh => format!("utanh_{}", s.dtype().as_str()),
+            Activation::GeLU => format!("ugelu_{}", s.dtype().as_str()),
+            Activation::Silu => format!("usilu_{}", s.dtype().as_str()),
+            Activation::Elu(_) => format!("uelu_{}", s.dtype().as_str()),
+        };
+        let func = dev.get_or_load_func(&func_name, ubridge::UNARY)?;
+
+        let slice = match &s.slice {
+            GcuStorageSlice::BF16(slice) => {
+                let out = dev.alloc::<bf16>(elem_count).w()?;
+                match self {
+                    Activation::Elu(v) => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    } 
+                    _ => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr());
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    }
+                };
+                GcuStorageSlice::BF16(out)
+            }
+            GcuStorageSlice::F16(slice) => {
+                let out = dev.alloc::<f16>(elem_count).w()?;
+                match self {
+                    Activation::Elu(v) => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    } 
+                    _ => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr());
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    }
+                };
+                GcuStorageSlice::F16(out)
+            }
+            GcuStorageSlice::F32(slice) => {
+                let out = dev.alloc::<f32>(elem_count).w()?;
+                match self {
+                    Activation::Elu(v) => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    } 
+                    _ => {
+                        let params = (elem_count, slice.device_ptr(), out.device_ptr());
+                        unsafe { func.launch(&cfg, params) }.w()?;
+                    }
+                };
+                GcuStorageSlice::F32(out)
+            }
+            _=> Err(GcuError::InternalError(
+                "dtype mismatch in activation op",
+            ))?,
+        };
+
+        let device = dev.clone();
+        Ok((GcuStorage { slice: slice, device }, l.shape().into()))
+    }
+}

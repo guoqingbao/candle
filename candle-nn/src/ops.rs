@@ -36,6 +36,7 @@ pub fn log_softmax<D: candle::shape::Dim>(xs: &Tensor, d: D) -> Result<Tensor> {
     Ok(log_sm)
 }
 
+#[cfg(not(feature = "gcu"))]
 pub fn silu(xs: &Tensor) -> Result<Tensor> {
     // TODO: Should we have a specialized op for this?
     xs / (xs.neg()?.exp()? + 1.0)?
@@ -46,6 +47,7 @@ pub fn swiglu(xs: &Tensor) -> Result<Tensor> {
     crate::ops::silu(&xs[0])? * &xs[1]
 }
 
+#[cfg(not(feature = "gcu"))]
 pub fn sigmoid(xs: &Tensor) -> Result<Tensor> {
     // TODO: Should we have a specialized op for this?
     (xs.neg()?.exp()? + 1.0)?.recip()
@@ -507,4 +509,70 @@ pub fn layer_norm_fused<C: Into<LayerNormConfig>>(
     vb: VarBuilder,
 ) -> Result<LayerRmsNorm> {
     Ok(LayerRmsNorm(layer_norm(size, c, vb)?))
+}
+
+#[cfg(feature = "gcu")]
+pub fn silu(xs: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::Silu; 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
+}
+
+#[cfg(feature = "gcu")]
+pub fn relu(xs: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::ReLU; 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
+}
+
+#[cfg(feature = "gcu")]
+pub fn gelu(xs: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::GeLU; 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
+}
+
+#[cfg(feature = "gcu")]
+pub fn tanh(xs: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::Tanh; 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
+}
+
+#[cfg(feature = "gcu")]
+pub fn sigmoid(xs: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::Sigmoid; 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
+}
+
+#[cfg(feature = "gcu")]
+pub fn elu(xs: &Tensor, alpha: f64) -> Result<Tensor> {
+    use candle::gcu_backend::Activation;
+    let op = Activation::Elu(alpha); 
+    if xs.is_contiguous() {
+        xs.apply_op1(op)
+    } else {
+        xs.contiguous()?.apply_op1(op)
+    }
 }

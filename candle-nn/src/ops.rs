@@ -8,11 +8,15 @@ use crate::{layer_norm, LayerNorm, LayerNormConfig, VarBuilder};
 ///
 /// ```rust
 /// use candle::{Tensor, Device, test_utils::to_vec2_round};
+/// use candle::{Tensor, Device, test_utils::to_vec2_round};
 /// let a = Tensor::new(&[[0f32, 1., 0., 1.], [-2., 2., 3., -3.]], &Device::Cpu)?;
 /// let a = candle_nn::ops::softmax(&a, 1)?;
 /// assert_eq!(
 ///     to_vec2_round(&a, 4)?,
+///     to_vec2_round(&a, 4)?,
 ///     &[
+///         [0.1345, 0.3655, 0.1345, 0.3655],
+///         [0.0049, 0.2671, 0.7262, 0.0018]
 ///         [0.1345, 0.3655, 0.1345, 0.3655],
 ///         [0.0049, 0.2671, 0.7262, 0.0018]
 ///     ]);
@@ -38,13 +42,12 @@ pub fn log_softmax<D: candle::shape::Dim>(xs: &Tensor, d: D) -> Result<Tensor> {
 
 #[cfg(not(feature = "gcu"))]
 pub fn silu(xs: &Tensor) -> Result<Tensor> {
-    // TODO: Should we have a specialized op for this?
-    xs / (xs.neg()?.exp()? + 1.0)?
+    xs.silu()
 }
 
 pub fn swiglu(xs: &Tensor) -> Result<Tensor> {
     let xs = xs.chunk(2, candle::D::Minus1)?;
-    crate::ops::silu(&xs[0])? * &xs[1]
+    &xs[0].silu()? * &xs[1]
 }
 
 #[cfg(not(feature = "gcu"))]

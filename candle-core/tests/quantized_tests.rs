@@ -1,10 +1,8 @@
 use candle_core::{
     bail,
-    bail,
     quantized::{self, GgmlDType},
     test_device,
     test_utils::to_vec2_round,
-    Device, Module, Result, Tensor,
     Device, Module, Result, Tensor,
 };
 use quantized::{k_quants, GgmlType};

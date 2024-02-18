@@ -247,7 +247,8 @@ fn main() -> Result<()> {
     let device = candle_examples::device(args.cpu)?;
     let (model, device) = if args.quantized {
         let filename = &filenames[0];
-        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(filename, &device)?;
+        let vb =
+            candle_transformers::quantized_var_builder::VarBuilder::from_gguf(filename, &device)?;
         let model = QMistral::new(&config, vb)?;
         (Model::Quantized(model), device)
     } else {

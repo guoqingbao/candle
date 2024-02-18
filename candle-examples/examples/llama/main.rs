@@ -183,6 +183,7 @@ fn main() -> Result<()> {
         .map_err(E::msg)?
         .get_ids()
         .to_vec();
+    let mut tokenizer = candle_examples::token_output_stream::TokenOutputStream::new(tokenizer);
 
     println!("starting the inference loop");
     print!("{prompt}");
@@ -216,18 +217,16 @@ fn main() -> Result<()> {
         token_generated += 1;
         tokens.push(next_token);
 
-        // Extracting the last token as a string is complicated, here we just apply some simple
-        // heuristics as it seems to work well enough for this example. See the following for more
-        // details:
-        // https://github.com/huggingface/tokenizers/issues/1141#issuecomment-1562644141
-        if let Some(text) = tokenizer.id_to_token(next_token) {
-            let text = text.replace('▁', " ").replace("<0x0A>", "\n");
-            print!("{text}");
-            std::io::stdout().flush()?;
-        }
         if Some(next_token) == eos_token_id {
             break;
         }
+        if let Some(t) = tokenizer.next_token(next_token)? {
+            print!("{t}");
+            std::io::stdout().flush()?;
+        }
+    }
+    if let Some(rest) = tokenizer.decode_rest().map_err(E::msg)? {
+        print!("{rest}");
     }
     let dt = start_gen.elapsed();
     println!(

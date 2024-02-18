@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 pub const MAX_SEQ_LEN: usize = 4096;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct LlamaConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,

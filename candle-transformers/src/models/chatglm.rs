@@ -61,7 +61,8 @@ fn linear(in_dim: usize, out_dim: usize, bias: bool, vb: VarBuilder) -> Result<L
 
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
-    cache: Tensor,
+    pub cache: Tensor,
+    pub cos_sin: Tensor
 }
 
 impl RotaryEmbedding {
@@ -73,13 +74,15 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / 10_000f64.powf(i as f64 / n_elem as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, cfg.seq_length as u32, dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((cfg.seq_length, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let freqs = freqs.to_dtype(dtype)?;
         let cache = Tensor::stack(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?;
-        Ok(Self { cache })
+        Ok(Self { cache, cos_sin })
     }
 
     fn apply(&self, xs: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
@@ -151,14 +154,17 @@ impl CoreAttention {
             query_layer.reshape((output_size.2, output_size.0 * output_size.1, ()))?;
         let key_layer = key_layer.reshape((output_size.3, output_size.0 * output_size.1, ()))?;
         let matmul_result = Tensor::matmul(
-            &query_layer.transpose(0, 1)?,
-            &key_layer.transpose(0, 1)?.transpose(1, 2)?,
+            &query_layer.transpose(0, 1)?.contiguous()?,
+            &key_layer.transpose(0, 1)?.transpose(1, 2)?.contiguous()?, //multi-level transpose to contiguous tensor
         )?;
         let matmul_result = (matmul_result / self.norm_factor)?.reshape(output_size)?;
         let matmul_result = match self.coeff {
             None => matmul_result,
             Some(coeff) => (matmul_result * coeff)?,
         };
+
+        let dtype = query_layer.dtype();
+        let matmul_result = matmul_result.to_dtype(DType::F32)?; //for precision
         let attention_scores = match attention_mask {
             Some(mask) => masked_fill(
                 &matmul_result,
@@ -167,7 +173,7 @@ impl CoreAttention {
             )?,
             None => matmul_result,
         };
-        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?;
+        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(dtype)?;
 
         let output_size = (
             value_layer.dim(1)?,
@@ -179,7 +185,7 @@ impl CoreAttention {
             value_layer.reshape((value_layer.dim(0)?, output_size.0 * output_size.1, ()))?;
         let attention_probs =
             attention_probs.reshape((output_size.0 * output_size.1, output_size.2, ()))?;
-        let context_layer = Tensor::matmul(&attention_probs, &value_layer.transpose(0, 1)?)?;
+        let context_layer = Tensor::matmul(&attention_probs, &value_layer.transpose(0, 1)?.contiguous()?)?; //Transposed weight supported on GCU, but not dim0 <-> dim1
         let context_layer = context_layer.reshape(output_size)?;
         let context_layer = context_layer.permute((2, 0, 1, 3))?.contiguous()?;
         context_layer.flatten_from(D::Minus2)
@@ -287,12 +293,18 @@ impl SelfAttention {
         let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
         let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
 
+        // let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2; //ROPE on GCU -> TODO
+        // #[cfg(feature = "gcu")]
+        // let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(&query_layer, &key_layer, &rotary_emb.cos_sin, &rotary_emb.cache, seqlen_offset, rot_dim, false)?;
+
         // KV cache.
         let (key_layer, value_layer) = match &self.kv_cache {
             None => (key_layer, value_layer),
             Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
-                let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
+                // let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
+                // let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
+                let k = candle_nn::ops::kvconcat(&prev_k, &key_layer, 0)?; //kv concat on dim0
+                let v = candle_nn::ops::kvconcat(&prev_v, &value_layer, 0)?;
                 (k, v)
             }
         };
@@ -372,9 +384,9 @@ impl Module for MLP {
 
 #[derive(Debug, Clone)]
 struct Block {
-    input_layernorm: candle_nn::LayerNorm,
+    input_layernorm: candle_nn::ops::LayerRmsNorm,
     self_attention: SelfAttention,
-    post_attention_layernorm: candle_nn::LayerNorm,
+    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
     mlp: MLP,
     apply_residual_connection_post_layernorm: bool,
 }
@@ -382,28 +394,26 @@ struct Block {
 impl Block {
     fn new(layer_number: usize, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let input_layernorm = if cfg.rmsnorm {
-            candle_nn::rms_norm(
+            candle_nn::ops::rms_norm_fused(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
-            .into_inner()
         } else {
-            candle_nn::layer_norm(
+            candle_nn::ops::layer_norm_fused(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
         };
         let post_attention_layernorm = if cfg.rmsnorm {
-            candle_nn::rms_norm(
+            candle_nn::ops::rms_norm_fused(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
             )?
-            .into_inner()
         } else {
-            candle_nn::layer_norm(
+            candle_nn::ops::layer_norm_fused(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
@@ -454,7 +464,7 @@ impl Block {
 #[derive(Debug, Clone)]
 struct Transformer {
     layers: Vec<Block>,
-    final_layernorm: Option<candle_nn::LayerNorm>,
+    final_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
     rotary_emb: RotaryEmbedding,
 }
 
@@ -468,14 +478,13 @@ impl Transformer {
         }
         let final_layernorm = if cfg.post_layer_norm {
             let ln = if cfg.rmsnorm {
-                candle_nn::rms_norm(
+                candle_nn::ops::rms_norm_fused(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),
                 )?
-                .into_inner()
             } else {
-                candle_nn::layer_norm(
+                candle_nn::ops::layer_norm_fused(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),

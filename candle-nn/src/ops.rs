@@ -445,9 +445,18 @@ pub fn kvconcat(
         concat_dim
     };
     //inputs for kvconcat must be contiguous tensors
-    let ltensor = ltensor.contiguous()?;
-    let rtensor = rtensor.contiguous()?;
-    ltensor.apply_op2(&rtensor, op)
+    if ltensor.is_contiguous() && rtensor.is_contiguous() {
+        ltensor.apply_op2(&rtensor, op)
+    } else if ltensor.is_contiguous() {
+        ltensor.apply_op2(&rtensor.contiguous()?, op)
+    } else if rtensor.is_contiguous() {
+        let ltensor = ltensor.contiguous()?;
+        ltensor.apply_op2(&rtensor, op)
+    } else {
+        let ltensor = ltensor.contiguous()?;
+        let rtensor = rtensor.contiguous()?;
+        ltensor.apply_op2(&rtensor, op)
+    }
 }
 
 #[cfg(not(feature = "gcu"))]

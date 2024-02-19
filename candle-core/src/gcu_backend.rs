@@ -1837,8 +1837,12 @@ impl BackendStorage for GcuStorage {
             }
         }
         
+        let mut broadcasted_weight: i32 = 0;
         for i in 0..rhs_l.transform_ops.len() {
             let op : usize = rhs_l.transform_ops[i].to_owned().into();
+            if op == 2 {
+                broadcasted_weight = 1;
+            }
             if op == 1 {
                 rhs_transpose = 1;
                 break;
@@ -1878,7 +1882,7 @@ impl BackendStorage for GcuStorage {
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
-                    param.sip_m, param.sip_k, param.sip_n
+                    param.sip_m, param.sip_k, param.sip_n, broadcasted_weight
                 );
                 // println!("GEMM F16: [{} {}, {}, {}], SIP [{} {} {}]", b, m, k, n, param.sip_m, param.sip_k, param.sip_n);
 
@@ -1900,7 +1904,7 @@ impl BackendStorage for GcuStorage {
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
-                    param.sip_m, param.sip_k, param.sip_n
+                    param.sip_m, param.sip_k, param.sip_n, broadcasted_weight
                 );
                 // println!("GEMM F32: [{} {}, {}, {}], SIP [{} {} {}]", b, m, k, n, param.sip_m, param.sip_k, param.sip_n);
                 unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
@@ -1920,7 +1924,7 @@ impl BackendStorage for GcuStorage {
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
-                    param.sip_m, param.sip_k, param.sip_n
+                    param.sip_m, param.sip_k, param.sip_n, broadcasted_weight
                 );
                 unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
@@ -2126,7 +2130,7 @@ impl crate::CustomOp2 for KVConcat {
         rtensor: &GcuStorage,
         rtensor_l: &Layout,
     ) -> Result<(GcuStorage, Shape)> {
-        assert!(self.concat_dim == 2); //must be in the dim of sequence len 
+        assert!(self.concat_dim == 2 || self.concat_dim == 0); //must be in the dim of sequence len 
         let dev = &ltensor.device;
         let cfg = &dev.launch_cfg;
         let elem_count = ltensor_l.shape().elem_count() + rtensor_l.shape().elem_count();
@@ -2136,35 +2140,35 @@ impl crate::CustomOp2 for KVConcat {
             (GcuStorageSlice::BF16(left_), GcuStorageSlice::BF16(right_)) => { 
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_bf16", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F32(left_), GcuStorageSlice::F32(right_)) => { 
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f32", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F16(left_), GcuStorageSlice::F16(right_)) => {
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f16", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }
             (GcuStorageSlice::F64(left_), GcuStorageSlice::F64(right_)) => {
                 let out = dev.alloc::<f64>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f64", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
             }
             (GcuStorageSlice::U8(left_), GcuStorageSlice::U8(right_)) => {
                 let out = dev.alloc::<u8>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_u8", ubridge::KCCONCAT)?;
-                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims);
+                let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::U8(out)
             }
@@ -2174,10 +2178,14 @@ impl crate::CustomOp2 for KVConcat {
         };
 
         let mut lshape: Vec<usize> = ltensor_l.shape().dims().to_vec();
-        if dims > 3 {
-            lshape[2] += rtensor_l.shape().dims()[2];
-        } else {
-            lshape[1] += rtensor_l.shape().dims()[1];            
+        if self.concat_dim == 0 {
+            lshape[0] += rtensor_l.shape().dims()[0];      
+        }  else {
+            if dims > 3 {
+                lshape[2] += rtensor_l.shape().dims()[2];
+            } else {
+                lshape[1] += rtensor_l.shape().dims()[1];      
+            }
         }
 
         let device = dev.clone();

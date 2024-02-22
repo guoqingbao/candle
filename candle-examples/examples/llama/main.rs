@@ -57,7 +57,7 @@ struct Args {
     seed: u64,
 
     /// The length of the sample to generate (in tokens).
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10000)]
     sample_len: usize,
 
     /// Disable the key-value cache.
@@ -147,28 +147,12 @@ fn main() -> Result<()> {
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
         let config = config.into_config(args.use_flash_attn);
 
-        let filenames = match &args.local_weights {
-            Some(path) => {
-                let mut filenames = vec![];
-                for rfilename in [
-                    "model-00001-of-00002.safetensors",
-                    "model-00002-of-00002.safetensors",
-                ] {
-                    filenames.push((path.to_owned() + rfilename).into());
-                }
-                filenames
+        let filenames = match args.which {
+            Which::V1 | Which::V2 | Which::Solar10_7B => {
+                candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
             }
-            _ => {
-                let filenames = match args.which {
-                    Which::V1 | Which::V2 | Which::Solar10_7B => {
-                        candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
-                    }
-                    Which::TinyLlama1_1BChat => vec![api.get("model.safetensors")?],
-                };
-                filenames
-            }
+            Which::TinyLlama1_1BChat => vec![api.get("model.safetensors")?],
         };
-       
         println!("building the model");
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
@@ -183,6 +167,7 @@ fn main() -> Result<()> {
         .map_err(E::msg)?
         .get_ids()
         .to_vec();
+    let mut tokenizer = candle_examples::token_output_stream::TokenOutputStream::new(tokenizer);
 
     println!("starting the inference loop");
     print!("{prompt}");
@@ -216,18 +201,16 @@ fn main() -> Result<()> {
         token_generated += 1;
         tokens.push(next_token);
 
-        // Extracting the last token as a string is complicated, here we just apply some simple
-        // heuristics as it seems to work well enough for this example. See the following for more
-        // details:
-        // https://github.com/huggingface/tokenizers/issues/1141#issuecomment-1562644141
-        if let Some(text) = tokenizer.id_to_token(next_token) {
-            let text = text.replace('▁', " ").replace("<0x0A>", "\n");
-            print!("{text}");
-            std::io::stdout().flush()?;
-        }
         if Some(next_token) == eos_token_id {
             break;
         }
+        if let Some(t) = tokenizer.next_token(next_token)? {
+            print!("{t}");
+            std::io::stdout().flush()?;
+        }
+    }
+    if let Some(rest) = tokenizer.decode_rest().map_err(E::msg)? {
+        print!("{rest}");
     }
     let dt = start_gen.elapsed();
     println!(

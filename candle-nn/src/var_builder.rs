@@ -481,6 +481,12 @@ impl<'a> VarBuilder<'a> {
         let npz = candle::npy::NpzTensors::new(p)?;
         Ok(Self::from_backend(Box::new(npz), dtype, dev.clone()))
     }
+
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a pytorch pth file.
+    pub fn from_pth<P: AsRef<std::path::Path>>(p: P, dtype: DType, dev: &Device) -> Result<Self> {
+        let pth = candle::pickle::PthTensors::new(p, None)?;
+        Ok(Self::from_backend(Box::new(pth), dtype, dev.clone()))
+    }
 }
 
 pub struct ShardedSafeTensors(candle::safetensors::MmapedSafetensors);

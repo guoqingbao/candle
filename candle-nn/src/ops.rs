@@ -515,6 +515,17 @@ pub fn rms_norm_fused(size: usize, eps: f64, vb: crate::VarBuilder) -> Result<La
     Ok(LayerRmsNorm(layer_norm(size, config, vb)?))
 }
 
+pub fn rms_norm_fused_shifted(size: usize, eps: f64, vb: crate::VarBuilder, shift: f64) -> Result<LayerRmsNorm> {
+    let config = LayerNormConfig {
+        eps,
+        remove_mean: false,
+        affine: false,
+    };
+    let mut ln = layer_norm(size, config, vb)?;
+    ln.weight = (ln.weight + shift)?;
+    Ok(LayerRmsNorm(ln))
+}
+
 pub fn layer_norm_fused<C: Into<LayerNormConfig>>(
     size: usize,
     c: C,

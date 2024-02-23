@@ -231,6 +231,8 @@ fn main() -> Result<()> {
     let device = candle_examples::device(args.cpu)?;
     let dtype = if device.is_cuda() {
         DType::BF16
+    } else if device.is_gcu() {
+        DType::F16
     } else {
         DType::F32
     };

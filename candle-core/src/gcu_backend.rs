@@ -1863,7 +1863,7 @@ impl BackendStorage for GcuStorage {
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
-                    param.sip_m, param.sip_k, param.sip_n
+                    param.sip_m, param.sip_k, param.sip_n, broadcasted_weight
                 );
                 unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)

@@ -256,10 +256,8 @@ fn main() -> Result<()> {
     let config_file = repo.get("config.json")?;
     let config: Config = serde_json::from_slice(&std::fs::read(config_file)?)?;
     let device = candle_examples::device(args.cpu)?;
-    let dtype = if device.is_cuda() {
+    let dtype = if device.is_cuda() || device.is_gcu(){
         DType::BF16
-    } else if device.is_gcu() {
-        DType::F16
     } else {
         DType::F32
     };

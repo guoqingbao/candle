@@ -486,6 +486,14 @@ impl LayerRmsNorm {
     }
 }
 
+#[cfg(not(feature = "gcu"))]
+impl crate::Module for LayerRmsNorm {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.0.forward(xs)
+    }
+}
+
+#[cfg(feature = "gcu")]
 impl crate::Module for LayerRmsNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         if xs.device().is_gcu() {

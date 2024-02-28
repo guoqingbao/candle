@@ -257,7 +257,7 @@ impl Attention {
 
     
         #[cfg(not(feature = "gcu"))]
-        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim)?;
+        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims, true)?;
 
         #[cfg(feature = "gcu")]
         let (query_states, key_states) = candle_nn::ops::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims, true)?;

@@ -28,20 +28,14 @@
  */
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
-use crate::shape::ShapeWithOneHole;
-use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType, Tensor};
+use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType};
 use half::{bf16, f16};
-use rayon::range;
 use ubridge::prelude::DevicePtr;
 use uhal::memory::DevicePointerTrait;
-use std::cell::RefCell;
-use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 pub use cust_core::_hidden::{DeviceCopy};
 use uhal::error::{DeviceError};
-use std::time::{Duration, Instant};
 use ubridge::gcu_device::GcuDevice as RawDevice;
-use ubridge::gcu_device::{GcuFunction};
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::gcu_launch::{GcuLaunchConfig, GcuLaunchAsync};
 use ubridge::{*};
@@ -1943,9 +1937,18 @@ impl BackendStorage for GcuStorage {
         let origin_shape = origin_l.shape();
         let origin_el_count = origin_shape.elem_count();
         let dev = &self.device;
+        let mut op_type: usize = 0;
+        let mut dst_layout = (0..dims.len()).collect::<Vec<usize>>();
 
-        let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
-        // let cfg = dev.launch_cfg;
+        if src_l.transform_ops.len() == 1 {
+            op_type = src_l.transform_ops[0].into();
+            if let Some(trans_dims) = &src_l.transpose_dims {
+                dst_layout.swap(trans_dims[0], trans_dims[1]);
+            }
+        }
+        //dst shape, dst stride, dst layout, origin shape
+        let ds = dev.htod_copy([dims, src_l.stride(), &dst_layout, origin_shape.dims()].concat()).w()?;
+
         let cfg = GcuLaunchConfig::for_ucopy();
         match (&self.slice, &mut dst.slice) {
             (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
@@ -1954,7 +1957,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_bf16", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -1964,7 +1967,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_f16", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -1974,7 +1977,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_f32", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -1984,7 +1987,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_u8", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -1994,7 +1997,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_u32", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -2004,7 +2007,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_i64", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
@@ -2014,7 +2017,7 @@ impl BackendStorage for GcuStorage {
                     dev.dtod_copy(&src, &mut dst).w()?
                 } else {
                     let func = dev.get_or_load_func("ucopy_64", ubridge::UNARY)?;
-                    let params = (origin_el_count, el_count, dims.len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr());
+                    let params = (origin_el_count, el_count, dims.len(), origin_shape.dims().len(), ds.device_ptr(), src.device_ptr(), dst.device_ptr(), op_type);
                     unsafe { func.launch(&cfg, params) }.w()?;
                 }
             }

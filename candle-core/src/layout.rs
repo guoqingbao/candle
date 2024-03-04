@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{Error, Result, Shape};
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Copy, PartialEq, Eq, Clone)]
 pub enum LayoutTransformOP {
     TransformTranspose = 1,
     TransformBroadcast = 2,
@@ -23,6 +23,7 @@ pub struct Layout {
     stride: Vec<usize>,
     start_offset: usize,
     pub transform_ops: Vec<LayoutTransformOP>,
+    pub transpose_dims: Option<Vec<usize>>,
     pub backup: Vec<Layout>,
 }
 
@@ -33,6 +34,7 @@ impl Layout {
             stride,
             start_offset,
             transform_ops: Vec::<LayoutTransformOP>::new(),
+            transpose_dims: None,
             backup: Vec::<Layout>::new(),
         }
     }
@@ -45,6 +47,7 @@ impl Layout {
             stride,
             start_offset: layout.start_offset,
             transform_ops: layout.transform_ops.clone(),
+            transpose_dims: None,
             backup: layout.backup.clone(),
         }
     }
@@ -58,6 +61,7 @@ impl Layout {
             stride,
             start_offset: 0,
             transform_ops: Vec::<LayoutTransformOP>::new(),
+            transpose_dims: None,
             backup: Vec::<Layout>::new(),
         }
     }
@@ -134,6 +138,7 @@ impl Layout {
             stride: self.stride.clone(),
             start_offset: self.start_offset + self.stride[dim] * start,
             transform_ops: transform_ops,
+            transpose_dims: None,
             backup: backup,
         })
     }
@@ -163,6 +168,7 @@ impl Layout {
             stride,
             start_offset: self.start_offset,
             transform_ops: transform_ops,
+            transpose_dims: Some(vec![dim1, dim2]),
             backup: backup,
         })
     }
@@ -196,6 +202,7 @@ impl Layout {
             stride: perm_stride,
             start_offset: self.start_offset,
             transform_ops: transform_ops,
+            transpose_dims: None,
             backup: backup,
         })
     }
@@ -239,6 +246,7 @@ impl Layout {
             stride,
             start_offset: self.start_offset,
             transform_ops: transform_ops,
+            transpose_dims: None,
             backup: backup,
         })
     }

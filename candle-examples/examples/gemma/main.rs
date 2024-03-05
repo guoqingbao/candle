@@ -229,10 +229,8 @@ fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
     let device = candle_examples::device(args.cpu)?;
-    let dtype = if device.is_cuda() {
+    let dtype = if device.is_cuda() || device.is_gcu(){
         DType::BF16
-    } else if device.is_gcu() {
-        DType::F16
     } else {
         DType::F32
     };

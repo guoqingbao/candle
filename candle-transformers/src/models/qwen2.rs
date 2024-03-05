@@ -225,10 +225,6 @@ impl Attention {
         let key_states = self.repeat_kv(key_states)?.contiguous()?;
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
 
-        let in_dtype = query_states.dtype();
-        let query_states = query_states.to_dtype(DType::F32)?;
-        let key_states = key_states.to_dtype(DType::F32)?;
-        let value_states = value_states.to_dtype(DType::F32)?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
@@ -240,7 +236,7 @@ impl Attention {
             };
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
-        }.to_dtype(in_dtype)?;
+        };
         attn_output
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
@@ -360,7 +356,7 @@ impl Model {
         } else {
             mask
         };
-        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))
+        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?.to_dtype(self.dtype)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

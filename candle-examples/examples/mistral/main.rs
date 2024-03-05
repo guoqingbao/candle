@@ -252,10 +252,10 @@ fn main() -> Result<()> {
         let model = QMistral::new(&config, vb)?;
         (Model::Quantized(model), device)
     } else {
-        let dtype = if device.is_cuda() {
+        let dtype = if device.is_cuda() || device.is_gcu() {
             DType::BF16
         } else {
-            if device.is_gcu() {DType::F16} else {DType::F32}
+            DType::F32
         };
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
         let model = Mistral::new(&config, vb)?;

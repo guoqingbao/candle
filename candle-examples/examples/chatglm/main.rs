@@ -219,7 +219,7 @@ fn main() -> Result<()> {
     let start = std::time::Instant::now();
     let config = Config::glm3_6b();
     let device = candle_examples::device(args.cpu)?;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::BF16, &device)? };
     let model = Model::new(&config, vb)?;
 
     println!("loaded the model in {:?}", start.elapsed());

@@ -326,7 +326,7 @@ fn main() -> Result<()> {
         };
         Model::Quantized(model)
     } else {
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F16, &device)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::BF16, &device)? };
         match args.model {
             WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 => {
                 let config_filename = match args.config {

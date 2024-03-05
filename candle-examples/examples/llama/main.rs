@@ -122,7 +122,7 @@ fn main() -> Result<()> {
         Some("bf16") => DType::BF16,
         Some("f32") => DType::F32,
         Some(dtype) => bail!("Unsupported dtype {dtype}"),
-        None => DType::F16,
+        None => DType::BF16,
     };
     let (llama, tokenizer_filename, cache) = {
         let api = Api::new()?;

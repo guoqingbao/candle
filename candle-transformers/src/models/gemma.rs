@@ -220,16 +220,13 @@ impl Attention {
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
         let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true)?;
 
-        let key_states = key_states.to_device(&Device::Cpu)?;
-        let value_states = value_states.to_device(&Device::Cpu)?;
-
         let (key_states, value_states) = match &self.kv_cache { //TODO: faster kv concat
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
-                // let key_states = kvconcat(prev_k, &key_states, 2)?;
-                // let value_states = kvconcat(prev_v, &value_states, 2)?;
+                // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let key_states = kvconcat(prev_k, &key_states, 2)?;
+                let value_states = kvconcat(prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -237,9 +234,6 @@ impl Attention {
 
         let key_states = self.repeat_kv(key_states)?.contiguous()?;
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
-
-        let key_states = key_states.to_device(&query_states.device())?;
-        let value_states = value_states.to_device(&query_states.device())?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);

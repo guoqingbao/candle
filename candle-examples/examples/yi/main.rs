@@ -230,10 +230,10 @@ fn main() -> Result<()> {
         Which::L34b => Config::config_34b(),
     };
     let device = candle_examples::device(args.cpu)?;
-    let dtype = if device.is_cuda() {
+    let dtype = if device.is_cuda() || device.is_gcu() {
         DType::BF16
     } else {
-        if device.is_gcu() {DType::F16} else {DType::F32}
+        DType::F32
     };
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
     let model = Model::new(&config, vb)?;

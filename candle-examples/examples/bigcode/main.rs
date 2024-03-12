@@ -40,7 +40,7 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    fn run(&mut self, prompt: &str, sample_len: usize, batch_size: usize) -> Result<()> {
         use std::io::Write;
         println!("starting the inference loop");
         print!("{prompt}");
@@ -61,8 +61,16 @@ impl TextGeneration {
                 (tokens.len(), 0)
             };
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            
+            let input = Tensor::new(ctxt, &self.device)?;
+            let input = if batch_size > 1 {
+                let dims = input.layout().dims();
+                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+            } else {
+                input.unsqueeze(0)?
+            };
             let logits = self.model.forward(&input, past_len)?;
+            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
 
             let next_token = self.logits_processor.sample(&logits)?;
@@ -118,6 +126,9 @@ struct Args {
 
     #[arg(long)]
     weight_file: Option<String>,
+
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -161,6 +172,6 @@ fn main() -> Result<()> {
         args.top_p,
         &device,
     );
-    pipeline.run(&args.prompt, args.sample_len)?;
+    pipeline.run(&args.prompt, args.sample_len, args.batch_size)?;
     Ok(())
 }

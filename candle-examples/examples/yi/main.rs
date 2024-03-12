@@ -56,7 +56,7 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    fn run(&mut self, prompt: &str, sample_len: usize, batch_size: usize) -> Result<()> {
         use std::io::Write;
         self.tokenizer.clear();
         let mut tokens = self
@@ -83,8 +83,17 @@ impl TextGeneration {
             let context_size = if index > 0 { 1 } else { tokens.len() };
             let start_pos = tokens.len().saturating_sub(context_size);
             let ctxt = &tokens[start_pos..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            let input = Tensor::new(ctxt, &self.device)?;
+            let input = if batch_size > 1 {
+                let dims = input.layout().dims();
+                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+            } else {
+                input.unsqueeze(0)?
+            };
             let logits = self.model.forward(&input, start_pos)?;
+            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            // let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            // let logits = self.model.forward(&input, start_pos)?;
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -114,9 +123,10 @@ impl TextGeneration {
             print!("{rest}");
         }
         std::io::stdout().flush()?;
+        let throughput_per_req = generated_tokens as f64 / dt.as_secs_f64();
         println!(
-            "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64(),
+            "\n{} tokens generated ({} x {generated_tokens} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", generated_tokens * batch_size,
+            batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req
         );
         Ok(())
     }
@@ -175,6 +185,9 @@ struct Args {
     /// The model size to use.
     #[arg(long, default_value = "6b")]
     which: Which,
+    
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -250,6 +263,6 @@ fn main() -> Result<()> {
         args.repeat_last_n,
         &device,
     );
-    pipeline.run(&args.prompt, args.sample_len)?;
+    pipeline.run(&args.prompt, args.sample_len, args.batch_size)?;
     Ok(())
 }

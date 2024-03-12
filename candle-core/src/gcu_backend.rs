@@ -1849,11 +1849,11 @@ impl BackendStorage for GcuStorage {
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 // let bias = dev.alloc::<bf16>(n).w()?;
-                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataBf16, b, m, k, n);
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataBf16, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n);
                 let kernel_name = "matmul_bf16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 let params = (lhs.device_ptr(), rhs.device_ptr(), out.device_ptr(), //bias.device_ptr(), 
-                    param.input_dtype, b, m, k, n,
+                    param.input_dtype, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n,
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
@@ -1867,12 +1867,12 @@ impl BackendStorage for GcuStorage {
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 // let bias = dev.alloc::<f16>(n).w()?;
-                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp16, b, m, k, n);
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp16, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n);
                 let kernel_name = "matmul_f16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
 
                 let params = (lhs.device_ptr(), rhs.device_ptr(), out.device_ptr(), //bias.device_ptr(), 
-                    param.input_dtype, b, m, k, n,
+                    param.input_dtype, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n,
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
@@ -1888,13 +1888,13 @@ impl BackendStorage for GcuStorage {
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 // let bias = dev.alloc::<f32>(n).w()?;
-                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp32, b, m, k, n);
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataFp32, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n);
 
                 let kernel_name = "matmul_f32".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
 
                 let params = (lhs.device_ptr(), rhs.device_ptr(), out.device_ptr(), //bias.device_ptr(), 
-                    param.input_dtype, b, m, k, n,
+                    param.input_dtype, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n,
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,
@@ -1909,12 +1909,12 @@ impl BackendStorage for GcuStorage {
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let out = dev.alloc::<f64>(elem_count).w()?;
                 // let bias = dev.alloc::<f64>(n).w()?;
-                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataF64, b, m, k, n);
+                let param = dev.get_gemm_launch_params(ubridge::DATATYPE::DataF64, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n);
                 let kernel_name = "matmul_f64".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
 
                 let params = (lhs.device_ptr(), rhs.device_ptr(), out.device_ptr(), //bias.device_ptr(), 
-                    param.input_dtype, b, m, k, n,
+                    param.input_dtype, if broadcasted_weight > 0 {1} else {b}, if broadcasted_weight > 0 {b * m} else {m}, k, n,
                     param.lhs_multicore, param.rhs_multicore, param.batch_multicore,
                     lhs_transpose, rhs_transpose,
                     param.alpha, param.beta, param.addmm_beta, //param.bias,

@@ -59,7 +59,7 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    fn run(&mut self, prompt: &str, sample_len: usize, batch_size: usize) -> Result<()> {
         use std::io::Write;
         println!("starting the inference loop");
         let tokens = self.tokenizer.encode(prompt, true).map_err(E::msg)?;
@@ -84,12 +84,20 @@ impl TextGeneration {
         for index in 0..sample_len {
             let context_size = if index > 0 { 1 } else { tokens.len() };
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            let input = Tensor::new(ctxt, &self.device)?;
+            let input = if batch_size > 1 {
+                let dims = input.layout().dims();
+                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+            } else {
+                input.unsqueeze(0)?
+            };
+
             let logits = match &mut self.model {
                 Model::MixFormer(m) => m.forward(&input)?,
                 Model::Phi(m) => m.forward(&input)?,
                 Model::Quantized(m) => m.forward(&input)?,
             };
+            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -113,9 +121,10 @@ impl TextGeneration {
             std::io::stdout().flush()?;
         }
         let dt = start_gen.elapsed();
+        let throughput_per_req = generated_tokens as f64 / dt.as_secs_f64();
         println!(
-            "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64(),
+            "\n{} tokens generated ({} x {generated_tokens} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", generated_tokens * batch_size,
+            batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req
         );
         Ok(())
     }
@@ -199,6 +208,9 @@ struct Args {
     /// The context size to consider for the repeat penalty.
     #[arg(long, default_value_t = 64)]
     repeat_last_n: usize,
+
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -366,7 +378,7 @@ fn main() -> Result<()> {
                 args.verbose_prompt,
                 &device,
             );
-            pipeline.run(&prompt, args.sample_len)?;
+            pipeline.run(&prompt, args.sample_len, args.batch_size)?;
         }
         (None, Some(mmlu_dir)) => mmlu(model, tokenizer, &device, mmlu_dir)?,
     }

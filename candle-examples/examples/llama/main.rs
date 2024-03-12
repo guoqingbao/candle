@@ -101,6 +101,9 @@ struct Args {
     /// The context size to consider for the repeat penalty.
     #[arg(long, default_value_t = 64)]
     repeat_last_n: usize,
+
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -198,8 +201,16 @@ fn main() -> Result<()> {
             (tokens.len(), 0)
         };
         let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-        let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
-        let logits = llama.forward(&input, context_index)?;
+        let input = Tensor::new(ctxt, &device)?;
+        let input = if args.batch_size > 1 {
+            let dims = input.layout().dims();
+            input.broadcast_as((args.batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+        } else {
+            input.unsqueeze(0)?
+        };
+        let logits = llama.forward(&input, index_pos)?;
+        let logits = if args.batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+
         let logits = logits.squeeze(0)?;
         let logits = if args.repeat_penalty == 1. {
             logits
@@ -229,10 +240,10 @@ fn main() -> Result<()> {
         print!("{rest}");
     }
     let dt = start_gen.elapsed();
+    let throughput_per_req = token_generated as f64 / dt.as_secs_f64();
     println!(
-        "\n\n{} tokens generated ({} token/s)\n",
-        token_generated,
-        token_generated as f64 / dt.as_secs_f64(),
+        "\n{} tokens generated ({} x {token_generated} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", token_generated * args.batch_size,
+        args.batch_size, throughput_per_req * args.batch_size as f64, args.batch_size, throughput_per_req
     );
     Ok(())
 }

@@ -8,7 +8,7 @@ fn linear(size1: usize, size2: usize, bias: bool, vb: VarBuilder) -> Result<Line
     } else {
         None
     };
-    Ok(Linear::new(weight, bias))
+    Ok(Linear::new(weight, bias, true))
 }
 
 fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {

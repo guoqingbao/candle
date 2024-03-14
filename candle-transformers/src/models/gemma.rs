@@ -328,7 +328,7 @@ impl Model {
             layers.push(layer)
         }
         let norm = candle_nn::ops::rms_norm_fused_shifted(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"), 1.0)?;
-        let lm_head = Linear::new(embed_tokens.embeddings().clone(), None);
+        let lm_head = Linear::new(embed_tokens.embeddings().clone(), None, true);
         Ok(Self {
             embed_tokens,
             layers,

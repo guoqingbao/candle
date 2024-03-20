@@ -37,7 +37,7 @@ impl RmsNorm {
 
 impl Module for RmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
+        // let _enter = self.span.enter();
         self.inner.forward(x)
     }
 }
@@ -208,7 +208,7 @@ impl Attention {
         //     self.rotary_emb
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
 
-        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true)?;
+        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
 
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
@@ -226,9 +226,9 @@ impl Attention {
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
 
         let in_dtype = query_states.dtype();
-        let query_states = query_states.to_dtype(DType::F32)?;
-        let key_states = key_states.to_dtype(DType::F32)?;
-        let value_states = value_states.to_dtype(DType::F32)?;
+        // let query_states = query_states.to_dtype(DType::F32)?;
+        // let key_states = key_states.to_dtype(DType::F32)?;
+        // let value_states = value_states.to_dtype(DType::F32)?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
@@ -241,7 +241,7 @@ impl Attention {
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
         };
-        attn_output.to_dtype(in_dtype)?
+        attn_output
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
             .apply(&self.o_proj)
@@ -360,7 +360,7 @@ impl Model {
         } else {
             mask
         };
-        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))
+        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?.to_dtype(self.dtype)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

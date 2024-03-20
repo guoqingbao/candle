@@ -81,9 +81,10 @@ impl TextGeneration {
             std::io::stdout().flush()?;
         }
         let dt = start_gen.elapsed();
+        let throughput_per_req = sample_len as f64 / dt.as_secs_f64();
         println!(
-            "{sample_len} tokens generated ({:.3} token/s)",
-            sample_len as f64 / dt.as_secs_f64(),
+            "\n{} tokens generated ({} x {sample_len} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", sample_len * batch_size,
+            batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req
         );
         Ok(())
     }

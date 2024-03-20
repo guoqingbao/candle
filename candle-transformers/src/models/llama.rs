@@ -226,7 +226,7 @@ impl CausalSelfAttention {
             .transpose(1, 2)?;
 
 
-        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&self.cache.cos_sin} else {&self.cache.cos}, &self.cache.sin, index_pos, 0, true)?;
+        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&self.cache.cos_sin} else {&self.cache.cos}, &self.cache.sin, index_pos, 0, true, true)?;
 
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();

@@ -218,7 +218,7 @@ impl Attention {
         // let (query_states, key_states) =
         //     self.rotary_emb
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
-        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true)?;
+        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
 
         let (key_states, value_states) = match &self.kv_cache { //TODO: faster kv concat
             None => (key_states, value_states),

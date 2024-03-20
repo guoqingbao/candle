@@ -290,12 +290,12 @@ impl SelfAttention {
             None => 0,
             Some((prev_k, _)) => prev_k.dim(0)?,
         };
-        let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
-        let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
+        // let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
+        // let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
 
-        // let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2; //ROPE on GCU -> TODO
-        // #[cfg(feature = "gcu")]
-        // let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(&query_layer, &key_layer, &rotary_emb.cos_sin, &rotary_emb.cache, seqlen_offset, rot_dim, false)?;
+        let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2; 
+        #[cfg(feature = "gcu")]
+        let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(&query_layer, &key_layer, &rotary_emb.cos_sin, &rotary_emb.cache, seqlen_offset, rot_dim, false, false)?;
 
         // KV cache.
         let (key_layer, value_layer) = match &self.kv_cache {

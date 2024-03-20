@@ -224,7 +224,7 @@ impl Attention {
         let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true)?;
 
         #[cfg(feature = "gcu")]
-        let (query_states, key_states) = candle_nn::ops::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true)?;
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true, true)?;
 
         // KV cache.
         let (key_states, value_states) = match &self.kv_cache {

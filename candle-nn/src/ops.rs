@@ -348,7 +348,8 @@ pub fn replication_pad2d(xs: &Tensor, pad: usize) -> Result<Tensor> {
 
 //gcu apply_rotary_emb_qkv supports both rope and partial rope
 #[cfg(feature = "gcu")]
-pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, index_pos: usize, split_dim: usize, query_key_transposed: bool) -> Result<(Tensor, Tensor)> {
+pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, 
+        index_pos: usize, split_dim: usize, query_key_transposed: bool, gpt_neox: bool) -> Result<(Tensor, Tensor)> {
     pub fn fused_rope(
         query: &Tensor,
         key: &Tensor,
@@ -380,13 +381,13 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
         let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
         Ok((query.contiguous()?, key.contiguous()?))
-    } else {
+    } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
         //(b_sz, q_len, num_kv_heads, head_dim)
-        let (_, seq_len, q_head_size, hidden_size) = query.dims4()?;
+        let (seq_len_0, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
         //cost_sin must be type of float32
-        let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
+        let cos_sin = cos_sin.narrow(0, index_pos, if gpt_neox {seq_len} else { seq_len_0 })?;
+        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.to_owned(), key.to_owned()))
     }
 
@@ -399,8 +400,11 @@ pub fn apply_rotary_emb_qkv(
     cos: &Tensor,
     sin: &Tensor,
     index_pos: usize,
-    split_dim: usize, query_key_transposed: bool
+    split_dim: usize, query_key_transposed: bool, gpt_neox: bool
 ) -> Result<(Tensor, Tensor)> {
+    if !gpt_neox {
+        panic!("Not supported non-gpt-neox in apply_rotary_emb_qkv!");
+    }
     use candle::D;
     fn rotate_half(xs: &Tensor) -> Result<Tensor> {
         let last_dim = xs.dim(D::Minus1)?;
@@ -428,7 +432,7 @@ pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, si
     let key_rot = key.narrow(D::Minus1, 0, rot_ndims)?;
     let key_pass = key.narrow(D::Minus1, rot_ndims, pass_ndims)?;
     let (query_rot, key_rot) =
-        apply_rotary_emb_qkv(&query_rot, &key_rot, &cos_sin, &sin, index_pos, 0, query_key_transposed)?;
+        apply_rotary_emb_qkv(&query_rot, &key_rot, &cos_sin, &sin, index_pos, 0, query_key_transposed, true)?;
     let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
     let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
     Ok((query_states, key_states))

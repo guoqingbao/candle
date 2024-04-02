@@ -6,7 +6,7 @@ use std::sync::Arc;
 use candle_nn::ops::layer_norm_fused as layer_norm;
 use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
-// https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/configuration_stablelm_epoch.py
+// https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/configuration_stablelm.py
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
     pub(crate) vocab_size: usize,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{kvconcat, apply_rotary_emb_qkv, linear_no_bias, Linear, VarBuilder};
+use candle_nn::{kvconcat, apply_rotary_emb_qkv, linear_b as linear, Linear, VarBuilder};
 use candle_nn::ops::rms_norm_fused_shifted as rms_norm;
 use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
@@ -95,9 +95,9 @@ impl MLP {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let intermediate_sz = cfg.intermediate_size;
-        let gate_proj = linear_no_bias(hidden_sz, intermediate_sz, vb.pp("gate_proj"))?;
-        let up_proj = linear_no_bias(hidden_sz, intermediate_sz, vb.pp("up_proj"))?;
-        let down_proj = linear_no_bias(intermediate_sz, hidden_sz, vb.pp("down_proj"))?;
+        let gate_proj = linear(hidden_sz, intermediate_sz, false, vb.pp("gate_proj"))?;
+        let up_proj = linear(hidden_sz, intermediate_sz, false, vb.pp("up_proj"))?;
+        let down_proj = linear(intermediate_sz, hidden_sz, false, vb.pp("down_proj"))?;
         Ok(Self {
             gate_proj,
             up_proj,
@@ -136,10 +136,11 @@ impl Attention {
         let num_kv_heads = cfg.num_key_value_heads;
         let num_kv_groups = num_heads / num_kv_heads;
         let head_dim = cfg.head_dim;
-        let q_proj = linear_no_bias(hidden_sz, num_heads * head_dim, vb.pp("q_proj"))?;
-        let k_proj = linear_no_bias(hidden_sz, num_kv_heads * head_dim, vb.pp("k_proj"))?;
-        let v_proj = linear_no_bias(hidden_sz, num_kv_heads * head_dim, vb.pp("v_proj"))?;
-        let o_proj = linear_no_bias(num_heads * head_dim, hidden_sz, vb.pp("o_proj"))?;
+        let bias = cfg.attention_bias;
+        let q_proj = linear(hidden_sz, num_heads * head_dim, bias, vb.pp("q_proj"))?;
+        let k_proj = linear(hidden_sz, num_kv_heads * head_dim, bias, vb.pp("k_proj"))?;
+        let v_proj = linear(hidden_sz, num_kv_heads * head_dim, bias, vb.pp("v_proj"))?;
+        let o_proj = linear(num_heads * head_dim, hidden_sz, bias, vb.pp("o_proj"))?;
         Ok(Self {
             q_proj,
             k_proj,
@@ -243,7 +244,7 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-        rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"), 1.0)?;
+            rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"), 1.0)?;
         let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,

@@ -2044,12 +2044,12 @@ impl crate::CustomOp3 for Rope {
 
     fn cpu_fwd(
         &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-        s3: &CpuStorage,
-        l3: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         crate::bail!("no cpu support for rope")
     }
@@ -2114,10 +2114,10 @@ impl crate::CustomOp2 for KVConcat {
 
     fn cpu_fwd(
         &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         crate::bail!("no cpu support for kvconcat")
     }
@@ -2212,12 +2212,12 @@ impl crate::CustomOp3 for LayerNorm {
 
     fn cpu_fwd(
         &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-        s3: &CpuStorage,
-        l3: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         crate::bail!("no cpu support for rope")
     }
@@ -2295,7 +2295,7 @@ impl crate::CustomOp1 for Activation {
         }
     }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
         crate::bail!("no cpu support for gcu activation!")
     }
 

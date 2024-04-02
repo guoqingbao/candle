@@ -672,6 +672,31 @@ fn cat(device: &Device) -> Result<()> {
             [2.0, 7.0, 1.0, 8.0, 2.0, 2.0, 7.0, 1.0, 8.0, 2.0]
         ]
     );
+
+    // 3D
+    let t1 = Tensor::arange(0, 48i64, device)?.reshape((2, 6, 4))?;
+    let t2 = Tensor::arange(100, 124i64, device)?.reshape((2, 3, 4))?;
+    let t3 = Tensor::arange(10000, 10032i64, device)?.reshape((2, 4, 4))?;
+
+    let t_cat = Tensor::cat(&[&t1, &t2, &t3], 1)?;
+
+    let t1 = t1.t()?.contiguous()?.t()?;
+    let t2 = t2.t()?.contiguous()?.t()?;
+    let t3 = t3.t()?.contiguous()?.t()?;
+    let t_cat2 = Tensor::cat(&[&t1, &t2, &t3], 1)?;
+
+    let diff = t_cat.eq(&t_cat2)?.to_dtype(DType::F32)?.sum_all()?;
+    assert_eq!(diff.to_vec0::<f32>()?, 104.0);
+    assert_eq!(t_cat.i((0, 0, 0))?.to_vec0::<i64>()?, 0);
+    assert_eq!(t_cat.i((0, 4, 0))?.to_vec0::<i64>()?, 16);
+    assert_eq!(t_cat.i((0, 5, 0))?.to_vec0::<i64>()?, 20);
+    assert_eq!(t_cat.i((1, 5, 0))?.to_vec0::<i64>()?, 44);
+    assert_eq!(t_cat.i((0, 6, 0))?.to_vec0::<i64>()?, 100);
+    assert_eq!(t_cat.i((1, 6, 0))?.to_vec0::<i64>()?, 112);
+    assert_eq!(t_cat.i((0, 6, 1))?.to_vec0::<i64>()?, 101);
+    assert_eq!(t_cat.i((0, 7, 1))?.to_vec0::<i64>()?, 105);
+    assert_eq!(t_cat.i((0, 12, 1))?.to_vec0::<i64>()?, 10013);
+    assert_eq!(t_cat.i((1, 12, 3))?.to_vec0::<i64>()?, 10031);
     Ok(())
 }
 
@@ -681,6 +706,8 @@ fn embeddings(device: &Device) -> Result<()> {
     let hs = t.embedding(&ids)?;
     assert_eq!(hs.to_vec2::<f32>()?, &[[0.0, 1.0], [4.0, 5.0], [2.0, 3.0]]);
     let hs = t.index_select(&ids, 0)?;
+    assert_eq!(hs.to_vec2::<f32>()?, &[[0.0, 1.0], [4.0, 5.0], [2.0, 3.0]]);
+    let hs = t.index_select(&ids.to_dtype(DType::I64)?, 0)?;
     assert_eq!(hs.to_vec2::<f32>()?, &[[0.0, 1.0], [4.0, 5.0], [2.0, 3.0]]);
     Ok(())
 }
@@ -709,44 +736,47 @@ fn index_select(device: &Device) -> Result<()> {
             [9.0, 10.0, 11.0]
         ]
     );
-    let hs = t.index_select(&ids, 1)?;
-    assert_eq!(
-        hs.to_vec2::<f32>()?,
-        &[
-            [0.0, 2.0, 1.0],
-            [3.0, 5.0, 4.0],
-            [6.0, 8.0, 7.0],
-            [9.0, 11.0, 10.0]
-        ]
-    );
-    let hs = t.index_select(&ids, 0)?;
-    assert_eq!(
-        hs.to_vec2::<f32>()?,
-        &[[0.0, 1.0, 2.0], [6.0, 7.0, 8.0], [3.0, 4.0, 5.0]]
-    );
-    // Prior to https://github.com/huggingface/candle/pull/1022
-    // There would be a bug where the last values in the result tensor would be set to 0.
-    let ids = Tensor::new(&[0u32, 2u32, 1u32, 0u32, 2u32, 1u32], device)?;
-    let hs = t.index_select(&ids, 0)?;
-    assert_eq!(
-        hs.to_vec2::<f32>()?,
-        &[
-            [0.0, 1.0, 2.0],
-            [6.0, 7.0, 8.0],
-            [3.0, 4.0, 5.0],
-            [0.0, 1.0, 2.0],
-            [6.0, 7.0, 8.0],
-            [3.0, 4.0, 5.0],
-        ]
-    );
+    for dtype in [DType::U8, DType::U32, DType::I64] {
+        let ids = ids.to_dtype(dtype)?;
+        let hs = t.index_select(&ids, 1)?;
+        assert_eq!(
+            hs.to_vec2::<f32>()?,
+            &[
+                [0.0, 2.0, 1.0],
+                [3.0, 5.0, 4.0],
+                [6.0, 8.0, 7.0],
+                [9.0, 11.0, 10.0]
+            ]
+        );
+        let hs = t.index_select(&ids, 0)?;
+        assert_eq!(
+            hs.to_vec2::<f32>()?,
+            &[[0.0, 1.0, 2.0], [6.0, 7.0, 8.0], [3.0, 4.0, 5.0]]
+        );
+        // Prior to https://github.com/huggingface/candle/pull/1022
+        // There would be a bug where the last values in the result tensor would be set to 0.
+        let ids = Tensor::new(&[0u32, 2u32, 1u32, 0u32, 2u32, 1u32], device)?;
+        let hs = t.index_select(&ids, 0)?;
+        assert_eq!(
+            hs.to_vec2::<f32>()?,
+            &[
+                [0.0, 1.0, 2.0],
+                [6.0, 7.0, 8.0],
+                [3.0, 4.0, 5.0],
+                [0.0, 1.0, 2.0],
+                [6.0, 7.0, 8.0],
+                [3.0, 4.0, 5.0],
+            ]
+        );
 
-    // Test when selecting dim > 0 with ids size different from elem count of
-    // target dim in source/input.
-    let ids = Tensor::new(&[1u32, 0u32, 1u32], device)?;
-    let t = Tensor::arange(1f32, 5f32, device)?.reshape((2, 2))?;
-    assert_eq!(t.to_vec2::<f32>()?, &[[1.0, 2.0], [3.0, 4.0]]);
-    let hs = t.index_select(&ids, 1)?;
-    assert_eq!(hs.to_vec2::<f32>()?, &[[2.0, 1.0, 2.0], [4.0, 3.0, 4.0]]);
+        // Test when selecting dim > 0 with ids size different from elem count of
+        // target dim in source/input.
+        let ids = Tensor::new(&[1u32, 0u32, 1u32], device)?;
+        let t = Tensor::arange(1f32, 5f32, device)?.reshape((2, 2))?;
+        assert_eq!(t.to_vec2::<f32>()?, &[[1.0, 2.0], [3.0, 4.0]]);
+        let hs = t.index_select(&ids, 1)?;
+        assert_eq!(hs.to_vec2::<f32>()?, &[[2.0, 1.0, 2.0], [4.0, 3.0, 4.0]]);
+    }
 
     Ok(())
 }
@@ -1080,8 +1110,57 @@ fn broadcasting(device: &Device) -> Result<()> {
 fn randn(device: &Device) -> Result<()> {
     let tensor = Tensor::randn(0f32, 1f32, (5, 3), device)?;
     assert_eq!(tensor.dims(), [5, 3]);
+    // Check that the seed gets updated by checking that
+    // a new series of numbers is generated each time
+    let tensor2 = Tensor::randn(0f32, 1f32, (5, 3), device)?;
+    assert_ne!(tensor.to_vec2::<f32>()?, tensor2.to_vec2::<f32>()?);
     let tensor = Tensor::rand(0f32, 1f32, (5, 3), device)?;
     assert_eq!(tensor.dims(), [5, 3]);
+    // Check that the seed gets updated by checking that
+    // a new series of numbers is generated each time
+    let tensor2 = Tensor::rand(0f32, 1f32, (5, 3), device)?;
+    assert_ne!(tensor.to_vec2::<f32>()?, tensor2.to_vec2::<f32>()?);
+    // We do not expect deterministic elements at any index.
+    // There once was a bug that had a deterministic zero element in evenly sized tensors.
+    const N: usize = 2;
+    let v = (0..100)
+        .map(|_| Tensor::randn(0f32, 1f32, N, device).and_then(|t| t.to_vec1::<f32>()))
+        .collect::<Result<Vec<_>>>()?;
+    assert!(
+        (0..N).all(|i| v.windows(2).any(|pair| pair[0][i] != pair[1][i])),
+        "There are deterministic values in the randn tensors"
+    );
+    let v = (0..100)
+        .map(|_| Tensor::rand(0f32, 1f32, N, device).and_then(|t| t.to_vec1::<f32>()))
+        .collect::<Result<Vec<_>>>()?;
+    assert!(
+        (0..N).all(|i| v.windows(2).any(|pair| pair[0][i] != pair[1][i])),
+        "There are deterministic values in the rand tensors"
+    );
+    Ok(())
+}
+
+// https://github.com/huggingface/candle/issues/1948
+fn squeeze_mm(device: &Device) -> Result<()> {
+    let seq_len = 8_usize;
+    let a = Tensor::zeros((1, seq_len, 16), DType::F32, device)?;
+    let x = a.i((.., seq_len - 1, ..))?;
+    println!(
+        "x shape:{:?}, stride:{:?}, is_contiguous:{}",
+        x.shape(),
+        x.stride(),
+        x.is_contiguous()
+    );
+
+    let w = Tensor::zeros((32, 16), DType::F32, device)?.t()?;
+    println!(
+        "w shape:{:?}, stride:{:?}, is_contiguous:{}",
+        w.shape(),
+        w.stride(),
+        w.is_contiguous()
+    );
+    let x = x.matmul(&w)?;
+    assert_eq!(x.dims(), &[1, 32]);
     Ok(())
 }
 
@@ -1140,6 +1219,7 @@ test_device!(
 test_device!(randn, randn_cpu, randn_gpu, randn_metal);
 test_device!(clamp, clamp_cpu, clamp_gpu, clamp_metal);
 test_device!(var, var_cpu, var_gpu, var_metal);
+test_device!(squeeze_mm, squeeze_mm_cpu, squeeze_mm_gpu, squeeze_mm_metal);
 
 // There was originally a bug on the CPU implementation for randn
 // https://github.com/huggingface/candle/issues/381

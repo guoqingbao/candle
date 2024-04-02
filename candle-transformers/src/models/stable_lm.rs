@@ -1,8 +1,10 @@
 use crate::models::with_tracing::{linear, linear_no_bias, Linear};
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{Activation, LayerNorm, VarBuilder};
+use candle_nn::{Activation, VarBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 // https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/configuration_stablelm_epoch.py
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -66,6 +68,7 @@ impl Config {
 pub(crate) struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -82,15 +85,17 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f64 / dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            cos_sin
         })
     }
 
@@ -252,22 +257,20 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (rot_ndims, pass_ndims) = (self.rotary_ndims, self.head_dim - self.rotary_ndims);
-        let query_rot = query_states.narrow(D::Minus1, 0, rot_ndims)?;
-        let query_pass = query_states.narrow(D::Minus1, rot_ndims, pass_ndims)?;
-        let key_rot = key_states.narrow(D::Minus1, 0, rot_ndims)?;
-        let key_pass = key_states.narrow(D::Minus1, rot_ndims, pass_ndims)?;
-        let (query_rot, key_rot) =
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_rot, &key_rot, seqlen_offset)?;
-        let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
-        let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
+    
+        #[cfg(not(feature = "gcu"))]
+        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims, true)?;
+
+        #[cfg(feature = "gcu")]
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims, true, true)?;
 
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let key_states = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
+                let value_states = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -277,6 +280,12 @@ impl Attention {
 
         let key_states = self.repeat_kv(key_states)?.contiguous()?;
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
+
+        let dtype = query_states.dtype();
+
+        let query_states = query_states.to_dtype(DType::F32)?;
+        let key_states = key_states.to_dtype(DType::F32)?;
+        let value_states = value_states.to_dtype(DType::F32)?;
 
         let attn_output = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
@@ -296,7 +305,7 @@ impl Attention {
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
         };
-        attn_output
+        attn_output.to_dtype(dtype)?
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
             .apply(&self.o_proj)
@@ -316,9 +325,12 @@ impl DecoderLayer {
     fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let input_layernorm =
-            candle_nn::layer_norm(cfg.hidden_size, cfg.norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = candle_nn::layer_norm(
+        let input_layernorm = layer_norm(
+            cfg.hidden_size,
+            cfg.norm_eps,
+            vb.pp("input_layernorm"),
+        )?;
+        let post_attention_layernorm = layer_norm(
             cfg.hidden_size,
             cfg.norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -372,7 +384,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = candle_nn::layer_norm(cfg.hidden_size, cfg.norm_eps, vb_m.pp("norm"))?;
+        let norm = layer_norm(cfg.hidden_size, cfg.norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,
@@ -403,7 +415,8 @@ impl Model {
             mask
         };
         mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
-            .to_dtype(self.dtype)
+            // .to_dtype(self.dtype)
+            .to_dtype(DType::F32)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

@@ -101,6 +101,9 @@ struct Args {
     /// The context size to consider for the repeat penalty.
     #[arg(long, default_value_t = 64)]
     repeat_last_n: usize,
+
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -122,9 +125,9 @@ fn main() -> Result<()> {
         Some("bf16") => DType::BF16,
         Some("f32") => DType::F32,
         Some(dtype) => bail!("Unsupported dtype {dtype}"),
-        None => DType::F16,
+        None => DType::BF16,
     };
-    let (llama, tokenizer_filename, cache) = {
+    let (llama, tokenizer_filename, mut cache) = {
         let api = Api::new()?;
         let model_id = args.model_id.unwrap_or_else(|| match args.which {
             Which::V1 => "Narsil/amall-7b".to_string(),
@@ -147,17 +150,33 @@ fn main() -> Result<()> {
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
         let config = config.into_config(args.use_flash_attn);
 
-        let filenames = match args.which {
-            Which::V1 | Which::V2 | Which::Solar10_7B => {
-                candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
+        let filenames = match &args.local_weights {
+            Some(path) => {
+                let mut filenames = vec![];
+                for rfilename in [
+                    "model-00001-of-00002.safetensors",
+                    "model-00002-of-00002.safetensors",
+                ] {
+                    filenames.push((path.to_owned() + rfilename).into());
+                }
+                filenames
             }
-            Which::TinyLlama1_1BChat => vec![api.get("model.safetensors")?],
+            _ => {
+                let filenames = match args.which {
+                    Which::V1 | Which::V2 | Which::Solar10_7B => {
+                        candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
+                    }
+                    Which::TinyLlama1_1BChat => vec![api.get("model.safetensors")?],
+                };
+                filenames
+            }
         };
+       
         println!("building the model");
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
-        (Llama::load(vb, &cache, &config)?, tokenizer_filename, cache)
+        (Llama::load(vb, &config)?, tokenizer_filename, cache)
     };
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
     let eos_token_id = tokenizer.token_to_id(EOS_TOKEN);
@@ -182,8 +201,16 @@ fn main() -> Result<()> {
             (tokens.len(), 0)
         };
         let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-        let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
-        let logits = llama.forward(&input, context_index)?;
+        let input = Tensor::new(ctxt, &device)?;
+        let input = if args.batch_size > 1 {
+            let dims = input.layout().dims();
+            input.broadcast_as((args.batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+        } else {
+            input.unsqueeze(0)?
+        };
+        let logits = llama.forward(&input, index_pos, &mut cache)?;
+        let logits = if args.batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+
         let logits = logits.squeeze(0)?;
         let logits = if args.repeat_penalty == 1. {
             logits
@@ -213,10 +240,10 @@ fn main() -> Result<()> {
         print!("{rest}");
     }
     let dt = start_gen.elapsed();
+    let throughput_per_req = token_generated as f64 / dt.as_secs_f64();
     println!(
-        "\n\n{} tokens generated ({} token/s)\n",
-        token_generated,
-        token_generated as f64 / dt.as_secs_f64(),
+        "\n{} tokens generated ({} x {token_generated} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", token_generated * args.batch_size,
+        args.batch_size, throughput_per_req * args.batch_size as f64, args.batch_size, throughput_per_req
     );
     Ok(())
 }

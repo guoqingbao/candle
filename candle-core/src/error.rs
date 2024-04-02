@@ -152,6 +152,9 @@ pub enum Error {
     #[error("the candle crate has not been built with cuda support")]
     NotCompiledWithCudaSupport,
 
+    #[error("the candle crate has not been built with gcu support")]
+    NotCompiledWithGcuSupport,
+
     #[error("the candle crate has not been built with metal support")]
     NotCompiledWithMetalSupport,
 

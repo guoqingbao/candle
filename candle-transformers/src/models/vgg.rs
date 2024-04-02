@@ -130,7 +130,7 @@ fn get_weights_and_biases(
         up: bound,
     };
     let bs = vs.get_with_hints(target_in, "bias", init_bs)?;
-    Ok(candle_nn::Linear::new(ws, Some(bs)))
+    Ok(candle_nn::Linear::new(ws, Some(bs), true))
 }
 
 fn vgg13_blocks(vb: VarBuilder) -> Result<Vec<FuncT>> {

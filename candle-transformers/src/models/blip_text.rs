@@ -1,7 +1,9 @@
 use super::with_tracing::{linear, Embedding, Linear};
 use candle::{Module, Result, Tensor, D};
-use candle_nn::{layer_norm, LayerNorm, VarBuilder};
+use candle_nn::VarBuilder;
 use serde::Deserialize;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -122,8 +124,10 @@ impl TextSelfAttention {
                 let (key, value) = match &self.kv_cache {
                     None => (key, value),
                     Some((prev_key, prev_value)) => {
-                        let key = Tensor::cat(&[prev_key, &key], 2)?;
-                        let value = Tensor::cat(&[prev_value, &value], 2)?;
+                        // let key = Tensor::cat(&[prev_key, &key], 2)?;
+                        // let value = Tensor::cat(&[prev_value, &value], 2)?;
+                        let key = candle_nn::kvconcat(&prev_key, &key, 2)?;
+                        let value = candle_nn::kvconcat(&prev_value, &value, 2)?;
                         (key, value)
                     }
                 };

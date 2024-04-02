@@ -42,6 +42,10 @@ impl Device {
             Device::Cuda(_cuda) => {
                 crate::bail!("Cuda ggml quantization not supported");
             }
+            // #[cfg(not(feature = "gcu"))]
+            Device::Gcu(_gcu) => {
+                crate::bail!("Gcu ggml quantization not supported");
+            }
         }
     }
 }

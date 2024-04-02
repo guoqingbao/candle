@@ -161,6 +161,9 @@ struct Args {
     /// The context size to consider for the repeat penalty.
     #[arg(long, default_value_t = 64)]
     repeat_last_n: usize,
+
+    // #[arg(long, default_value_t = 1)] #TODO batch_size > 1
+    // batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -207,7 +210,10 @@ fn main() -> Result<()> {
             .get("chatglm-tokenizer.json")?,
     };
     let filenames = match args.weight_file {
-        Some(weight_file) => vec![std::path::PathBuf::from(weight_file)],
+        Some(files) => files
+            .split(',')
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>(),
         None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
     };
     println!("retrieved the files in {:?}", start.elapsed());
@@ -216,7 +222,7 @@ fn main() -> Result<()> {
     let start = std::time::Instant::now();
     let config = Config::glm3_6b();
     let device = candle_examples::device(args.cpu)?;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::BF16, &device)? };
     let model = Model::new(&config, vb)?;
 
     println!("loaded the model in {:?}", start.elapsed());

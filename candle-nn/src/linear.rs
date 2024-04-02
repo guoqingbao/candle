@@ -23,11 +23,12 @@ use candle::{Result, Tensor};
 pub struct Linear {
     weight: Tensor,
     bias: Option<Tensor>,
+    weight_transpose: bool,
 }
 
 impl Linear {
-    pub fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self { weight, bias }
+    pub fn new(weight: Tensor, bias: Option<Tensor>, weight_transpose: bool) -> Self {
+        Self { weight: if weight_transpose {weight.t().unwrap().contiguous().unwrap()} else {weight}, bias, weight_transpose}
     }
 
     pub fn weight(&self) -> &Tensor {
@@ -41,12 +42,31 @@ impl Linear {
 
 impl super::Module for Linear {
     fn forward(&self, x: &Tensor) -> candle::Result<Tensor> {
-        let w = match *x.dims() {
-            [b1, b2, _, _] => self.weight.broadcast_left((b1, b2))?.t()?,
-            [bsize, _, _] => self.weight.broadcast_left(bsize)?.t()?,
-            _ => self.weight.t()?,
+        let x = match *x.dims() {
+            [b1, b2, _, _] => {
+                if self.weight_transpose {
+                    x.matmul(&self.weight.broadcast_left((b1, b2))?)?
+                } else {
+                    x.matmul(&self.weight.broadcast_left((b1, b2))?.t()?)?
+                }
+            }
+            [bsize, _, _] => {
+                if self.weight_transpose { 
+                    x.matmul(&self.weight.broadcast_left(bsize)?)?
+                } else {
+                    x.matmul(&self.weight.broadcast_left(bsize)?.t()? )?
+                }
+            }
+            _ => {
+                if self.weight_transpose { 
+                    x.matmul(&self.weight)?
+                } else {
+                    x.matmul(&self.weight.t()?)?
+                }
+            }
         };
-        let x = x.matmul(&w)?;
+
+        // let x = x.matmul(&w)?;
         match &self.bias {
             None => Ok(x),
             Some(bias) => x.broadcast_add(bias),
@@ -66,12 +86,25 @@ pub fn linear(in_dim: usize, out_dim: usize, vs: crate::VarBuilder) -> Result<Li
         up: bound,
     };
     let bs = vs.get_with_hints(out_dim, "bias", init_bs)?;
-    Ok(Linear::new(ws, Some(bs)))
+    Ok(Linear::new(ws, Some(bs), true))
 }
 
 /// Create or initialize a new linear layer without biases.
 pub fn linear_no_bias(in_dim: usize, out_dim: usize, vs: crate::VarBuilder) -> Result<Linear> {
     let init_ws = crate::init::DEFAULT_KAIMING_NORMAL;
     let ws = vs.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    Ok(Linear::new(ws, None))
+    Ok(Linear::new(ws, None, true))
+}
+
+pub fn linear_b(
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+    vb: crate::VarBuilder,
+) -> Result<Linear> {
+    if bias {
+        linear(in_dim, out_dim, vb)
+    } else {
+        linear_no_bias(in_dim, out_dim, vb)
+    }
 }

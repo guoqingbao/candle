@@ -1,8 +1,9 @@
 use super::with_tracing::{linear_no_bias as linear, Linear};
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, Embedding, Module, VarBuilder};
+use candle_nn::{embedding, Embedding, Module, VarBuilder, apply_rotary_emb_qkv, kvconcat};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use candle_nn::ops::rms_norm_fused as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 pub const MAX_SEQ_LEN: usize = 4096;
 
@@ -84,10 +85,9 @@ impl Config {
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    masks: Arc<Mutex<HashMap<usize, Tensor>>>,
+    masks: HashMap<usize, Tensor>,
     pub use_kv_cache: bool,
-    #[allow(clippy::type_complexity)]
-    kvs: Arc<Mutex<Vec<Option<(Tensor, Tensor)>>>>,
+    kvs: Vec<Option<(Tensor, Tensor)>>,
     cos: Tensor,
     sin: Tensor,
     cos_sin: Tensor,
@@ -113,11 +113,10 @@ impl Cache {
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
         let cos = idx_theta.cos()?.to_dtype(dtype)?;
         let sin = idx_theta.sin()?.to_dtype(dtype)?;
-
         Ok(Self {
-            masks: Arc::new(Mutex::new(HashMap::new())),
+            masks: HashMap::new(),
             use_kv_cache,
-            kvs: Arc::new(Mutex::new(vec![None; config.num_hidden_layers])),
+            kvs: vec![None; config.num_hidden_layers],
             device: device.clone(),
             cos,
             sin,
@@ -125,37 +124,17 @@ impl Cache {
         })
     }
 
-    fn mask(&self, t: usize) -> Result<Tensor> {
-        let mut masks = self.masks.lock().unwrap();
-        if let Some(mask) = masks.get(&t) {
+    fn mask(&mut self, t: usize) -> Result<Tensor> {
+        if let Some(mask) = self.masks.get(&t) {
             Ok(mask.clone())
         } else {
             let mask: Vec<_> = (0..t)
                 .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
                 .collect();
             let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
-            masks.insert(t, mask.clone());
+            self.masks.insert(t, mask.clone());
             Ok(mask)
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    inner: candle_nn::RmsNorm,
-    span: tracing::Span,
-}
-
-impl RmsNorm {
-    fn load(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "rms-norm");
-        let inner = candle_nn::rms_norm(size, eps, vb)?;
-        Ok(Self { inner, span })
-    }
-
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
-        self.inner.forward(x)
     }
 }
 
@@ -168,7 +147,6 @@ struct CausalSelfAttention {
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
-    cache: Cache,
     use_flash_attn: bool,
     span: tracing::Span,
     span_rot: tracing::Span,
@@ -190,55 +168,12 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
     unimplemented!("compile with '--features flash-attn'")
 }
 
-fn rotate_half(xs: &Tensor) -> Result<Tensor> {
-    let last_dim = xs.dim(D::Minus1)?;
-    let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
-    let xs2 = xs.narrow(D::Minus1, last_dim / 2, last_dim - last_dim / 2)?;
-    Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
-}
-
-use candle::gcu_backend::Rope;
-pub fn fused_rope(
-    x: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    num_tokens: i32,
-    num_heads: i32,
-    head_size: i32,
-    gpt_neox: i32,
-) -> Result<Tensor> {
-    let op = Rope {
-        num_tokens,
-        num_heads,
-        head_size,
-        gpt_neox
-    };
-    x.apply_op3(cos, sin, op)
-}
-
 impl CausalSelfAttention {
-    fn apply_rotary_emb_qkv(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        index_pos: usize,
-    ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
-        let cos = self.cache.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.cache.sin.narrow(0, index_pos, seq_len)?;
-        let cos = cos.broadcast_as(q.shape())?;
-        let sin = sin.broadcast_as(q.shape())?;
-
-        let q_embed = (q.mul(&cos)? + rotate_half(q)?.mul(&sin))?;
-        let k_embed = (k.mul(&cos)? + rotate_half(k)?.mul(&sin))?;
-        Ok((q_embed, k_embed))
-    }
-
-    fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize, cache: &Cache) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
         let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
-        let cos = self.cache.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.cache.sin.narrow(0, index_pos, seq_len)?;
+        let cos = cache.cos.narrow(0, index_pos, seq_len)?;
+        let sin = cache.sin.narrow(0, index_pos, seq_len)?;
         let cos = cos.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
         let sin = sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
         let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
@@ -248,16 +183,13 @@ impl CausalSelfAttention {
         Ok(rope)
     }
 
-    pub fn apply_rotary_emb_fused(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
-        let _enter = self.span_rot.enter();
-        let (_, head_size, seq_len, hidden_size) = query.dims4()?;
-        let cos_sin = self.cache.cos_sin.narrow(0, index_pos, seq_len)?;
-        //cost_sin must be type of float32
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, head_size as i32, hidden_size as i32, 1)?;
-        Ok((query.contiguous()?, key.contiguous()?))
-    }
-
-    fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        cache: &mut Cache,
+    ) -> Result<Tensor> {
         let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
         let q = self.q_proj.forward(x)?;
@@ -274,23 +206,14 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (q, mut k) = if q.device().is_cpu() { 
-            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
-        } 
-        else {
-            self.apply_rotary_emb_fused(&q, &k, index_pos)?
-        };
 
-        let qdevice = q.device();
-        // let q = q.to_device(&Device::Cpu)?;
-        let mut k = k.to_device(&Device::Cpu)?;
-        let mut v = v.to_device(&Device::Cpu)?;
+        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&cache.cos_sin} else {&cache.cos}, &cache.sin, index_pos, 0, true, true)?;
 
-        if self.cache.use_kv_cache { //kv cache TODO on GCU
-            let mut cache = self.cache.kvs.lock().unwrap();
-            if let Some((cache_k, cache_v)) = &cache[block_idx] {
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+        if cache.use_kv_cache {
+            if let Some((cache_k, cache_v)) = &cache.kvs[block_idx] {
+                //inputs for kvconcat must be contiguous tensors (on gcu)
+                k = kvconcat(&cache_k, &k, 2)?;
+                v = kvconcat(&cache_v, &v, 2)?;
                 let k_seq_len = k.dims()[1];
                 if k_seq_len > MAX_SEQ_LEN {
                     k = k
@@ -304,12 +227,8 @@ impl CausalSelfAttention {
                         .contiguous()?
                 }
             }
-            cache[block_idx] = Some((k.clone(), v.clone()))
+            cache.kvs[block_idx] = Some((k.clone(), v.clone()))
         }
-
-        // let q = q.to_device(&qdevice)?;
-        let k = k.to_device(&qdevice)?;
-        let v = v.to_device(&qdevice)?;
 
         let k = self.repeat_kv(k)?;
         let v = self.repeat_kv(v)?;
@@ -327,9 +246,13 @@ impl CausalSelfAttention {
             let k = k.to_dtype(DType::F32)?;
             let v = v.to_dtype(DType::F32)?;
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-            let mask = self.cache.mask(seq_len)?.broadcast_as(att.shape())?;
-            let att = masked_fill(&att, &mask, f32::NEG_INFINITY)?;
-            let att = candle_nn::ops::softmax(&att, D::Minus1)?;
+            let att = if seq_len == 1 {
+                att
+            } else {
+                let mask = cache.mask(seq_len)?.broadcast_as(att.shape())?;
+                masked_fill(&att, &mask, f32::NEG_INFINITY)?
+            };
+            let att = candle_nn::ops::softmax_last_dim(&att)?;
             // Convert to contiguous as matmul doesn't support strided vs for now.
             att.matmul(&v.contiguous()?)?.to_dtype(in_dtype)?
         };
@@ -352,7 +275,7 @@ impl CausalSelfAttention {
         }
     }
 
-    fn load(vb: VarBuilder, cache: &Cache, cfg: &Config) -> Result<Self> {
+    fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let span = tracing::span!(tracing::Level::TRACE, "attn");
         let span_rot = tracing::span!(tracing::Level::TRACE, "attn-rot");
         let size_in = cfg.hidden_size;
@@ -370,7 +293,6 @@ impl CausalSelfAttention {
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            cache: cache.clone(),
             use_flash_attn: cfg.use_flash_attn,
             span,
             span_rot,
@@ -426,22 +348,28 @@ struct Block {
 }
 
 impl Block {
-    fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        cache: &mut Cache,
+    ) -> Result<Tensor> {
         let _enter = self.span.enter();
         let residual = x;
         let x = self.rms_1.forward(x)?;
-        let x = (self.attn.forward(&x, index_pos, block_idx)? + residual)?;
+        let x = (self.attn.forward(&x, index_pos, block_idx, cache)? + residual)?;
         let residual = &x;
         let x = (self.mlp.forward(&self.rms_2.forward(&x)?)? + residual)?;
         Ok(x)
     }
 
-    fn load(vb: VarBuilder, cache: &Cache, cfg: &Config) -> Result<Self> {
+    fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let span = tracing::span!(tracing::Level::TRACE, "block");
-        let attn = CausalSelfAttention::load(vb.pp("self_attn"), cache, cfg)?;
+        let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = Mlp::load(vb.pp("mlp"), cfg)?;
-        let rms_1 = RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = RmsNorm::load(
+        let rms_1 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let rms_2 = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -465,24 +393,24 @@ pub struct Llama {
 }
 
 impl Llama {
-    pub fn forward(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    pub fn forward(&self, x: &Tensor, index_pos: usize, cache: &mut Cache) -> Result<Tensor> {
         let (_b_sz, seq_len) = x.dims2()?;
         let mut x = self.wte.forward(x)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
-            x = block.forward(&x, index_pos, block_idx)?;
+            x = block.forward(&x, index_pos, block_idx, cache)?;
         }
         let x = self.ln_f.forward(&x)?;
-        let x = x.i((.., seq_len - 1, ..))?;
+        let x = x.i((.., seq_len - 1, ..))?.contiguous()?;
         let logits = self.lm_head.forward(&x)?;
         logits.to_dtype(DType::F32)
     }
 
-    pub fn load(vb: VarBuilder, cache: &Cache, cfg: &Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let wte = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
         let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
-        let ln_f = RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
+        let ln_f = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
         let blocks: Vec<_> = (0..cfg.num_hidden_layers)
-            .map(|i| Block::load(vb.pp(&format!("model.layers.{i}")), cache, cfg).unwrap())
+            .map(|i| Block::load(vb.pp(&format!("model.layers.{i}")), cfg).unwrap())
             .collect();
 
         Ok(Self {

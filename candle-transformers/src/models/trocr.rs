@@ -424,7 +424,7 @@ impl TrOCRForCausalLM {
     pub fn new(decoder_cfg: &TrOCRConfig, vb: VarBuilder) -> Result<Self> {
         let decoder = TrOCRDecoder::new(decoder_cfg, vb.clone())?;
         let output_projection = if decoder_cfg.tie_word_embeddings {
-            candle_nn::Linear::new(decoder.embed_tokens.embeddings().clone(), None)
+            candle_nn::Linear::new(decoder.embed_tokens.embeddings().clone(), None, true)
         } else {
             candle_nn::linear_no_bias(
                 decoder_cfg.d_model,

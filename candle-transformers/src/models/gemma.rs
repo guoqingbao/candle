@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{linear_no_bias, Linear, VarBuilder};
+use candle_nn::{kvconcat, apply_rotary_emb_qkv, linear_no_bias, Linear, VarBuilder};
+use candle_nn::ops::rms_norm_fused_shifted as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 fn default_max_position_embeddings() -> usize {
     4096
@@ -25,40 +27,12 @@ pub struct Config {
     pub max_position_embeddings: usize,
 }
 
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    weight: Tensor,
-    eps: f64,
-}
-
-impl RmsNorm {
-    fn new(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let weight = vb.get(dim, "weight")?;
-        Ok(Self { weight, eps })
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x_dtype = x.dtype();
-        let internal_dtype = match x_dtype {
-            DType::F16 | DType::BF16 => DType::F32,
-            d => d,
-        };
-        let hidden_size = x.dim(D::Minus1)?;
-        let x = x.to_dtype(internal_dtype)?;
-        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-        let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
-        x_normed
-            .to_dtype(x_dtype)?
-            .broadcast_mul(&(&self.weight + 1.0)?)
-    }
-}
 
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -77,15 +51,17 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f64 / dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            cos_sin,
         })
     }
 
@@ -212,15 +188,18 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (query_states, key_states) =
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
+        // let (query_states, key_states) =
+        //     self.rotary_emb
+        //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
+        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
 
-        let (key_states, value_states) = match &self.kv_cache {
+        let (key_states, value_states) = match &self.kv_cache { 
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let key_states = kvconcat(prev_k, &key_states, 2)?;
+                let value_states = kvconcat(prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -264,11 +243,11 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-            RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = RmsNorm::new(
+        rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"), 1.0)?;
+        let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            vb.pp("post_attention_layernorm"),
+            vb.pp("post_attention_layernorm"), 1.0
         )?;
         Ok(Self {
             self_attn,
@@ -321,8 +300,8 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
-        let lm_head = Linear::new(embed_tokens.embeddings().clone(), None);
+        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"), 1.0)?;
+        let lm_head = Linear::new(embed_tokens.embeddings().clone(), None, true);
         Ok(Self {
             embed_tokens,
             layers,

@@ -1,5 +1,5 @@
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module, VarBuilder};
+use candle_nn::{Embedding, Module, VarBuilder, apply_rotary_emb_qkv, kvconcat};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -80,32 +80,6 @@ impl Config {
         }
     }
 }
-
-// #[derive(Debug)]
-// pub struct Linear {
-//     pub weight: Tensor,
-//     bias: Option<Tensor>,
-// }
-
-// impl Linear {
-//     pub fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-//         Self { weight, bias }
-//     }
-// }
-
-// impl super::Module for Linear {
-//     fn forward(&self, x: &Tensor) -> candle::Result<Tensor> {
-//         let w = match x.dims() {
-//             &[bsize, _, _] => self.weight.broadcast_left(bsize)?.t()?,
-//             _ => self.weight.t()?,
-//         };
-//         let x = x.matmul(&w)?;
-//         match &self.bias {
-//             None => Ok(x),
-//             Some(bias) => x.broadcast_add(bias),
-//         }
-//     }
-// }
 
 // We wrap the `Linear` layer here to add some tracing so that it's easier to profile the resulting
 // model.
@@ -239,50 +213,7 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
     unimplemented!("compile with '--features flash-attn'")
 }
 
-fn rotate_half(xs: &Tensor) -> Result<Tensor> {
-    let last_dim = xs.dim(D::Minus1)?;
-    let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
-    let xs2 = xs.narrow(D::Minus1, last_dim / 2, last_dim - last_dim / 2)?;
-    Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
-}
-
-use candle::gcu_backend::Rope;
-pub fn fused_rope(
-    query: &Tensor,
-    key: &Tensor,
-    cos_sin: &Tensor,
-    num_tokens: i32,
-    num_heads: i32,
-    head_size: i32,
-    gpt_neox: i32
-) -> Result<Tensor> {
-    let op = Rope {
-        num_tokens,
-        num_heads,
-        head_size,
-        gpt_neox
-    };
-    query.apply_op3(key, cos_sin, op)
-}
-
 impl CausalSelfAttention {
-    fn apply_rotary_emb_qkv(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        index_pos: usize,
-    ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
-        let cos = self.cache.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.cache.sin.narrow(0, index_pos, seq_len)?;
-        let cos = cos.broadcast_as(q.shape())?;
-        let sin = sin.broadcast_as(q.shape())?;
-
-        let q_embed = (q.mul(&cos)? + rotate_half(q)?.mul(&sin))?;
-        let k_embed = (k.mul(&cos)? + rotate_half(k)?.mul(&sin))?;
-        Ok((q_embed, k_embed))
-    }
-
     pub fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
         let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
@@ -296,15 +227,7 @@ impl CausalSelfAttention {
         let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)
     }
-
-    pub fn apply_rotary_emb_fused(&self, query: &Tensor, key: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
-        let _enter = self.span_rot.enter();
-        let (b_sz, head_size, seq_len, hidden_size) = query.dims4()?;
-        let cos_sin = self.cache.cos_sin.narrow(0, index_pos, seq_len)?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, (b_sz * head_size) as i32, hidden_size as i32, 1)?;
-        Ok((query.contiguous()?, key.contiguous()?))
-    }
-    
+   
     pub fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
         let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
@@ -322,18 +245,20 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (q, mut k) = if q.device().is_cpu() { 
-            self.apply_rotary_emb_qkv(&q, &k, index_pos)?
-        } 
-        else {
-            self.apply_rotary_emb_fused(&q, &k, index_pos)?
-        };
+        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&self.cache.cos_sin} else {&self.cache.cos}, &self.cache.sin, index_pos, 0, true, true)?;
         
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+                if k.device().is_gcu() {
+                    //inputs for kvconcat must be contiguous tensors
+                    k = kvconcat(&cache_k, &k, 2)?;
+                    v = kvconcat(&cache_v, &v, 2)?;
+                } else {
+                    k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
+                    v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+                }
+
                 let k_seq_len = k.dims()[1];
                 if k_seq_len > MAX_SEQ_LEN {
                     k = k

@@ -41,10 +41,16 @@ pub struct Linear {
 
 impl Linear {
     pub fn from_weights(weights: Tensor, bias: Option<Tensor>) -> Self {
-        let inner = candle_nn::Linear::new(weights, bias);
+        let inner = candle_nn::Linear::new(weights, bias, true);
         let span = tracing::span!(tracing::Level::TRACE, "linear");
         Self { inner, span }
     }
+}
+
+pub fn linear_b(d1: usize, d2: usize, b: bool, vb: VarBuilder) -> Result<Linear> {
+    let inner = candle_nn::linear_b(d1, d2, b, vb)?;
+    let span = tracing::span!(tracing::Level::TRACE, "linear");
+    Ok(Linear { inner, span })
 }
 
 pub fn linear(d1: usize, d2: usize, vb: VarBuilder) -> Result<Linear> {

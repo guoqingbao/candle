@@ -1,10 +1,6 @@
 use crate::backend::BackendStorage;
 use crate::op::{self, CmpOp, CustomOp1, CustomOp2, CustomOp3, ReduceOp};
-use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
-#[cfg(feature = "gcu")]
-use crate::GcuStorage as GcuStorage;
-#[cfg(not(feature = "gcu"))]
-use crate::CudaStorage as GcuStorage;
+use crate::{CpuStorage, CudaStorage, GcuStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
 
 // We do not want to implement Clone on Storage as cloning may fail because of
 // out of memory. Instead try_clone should be used.

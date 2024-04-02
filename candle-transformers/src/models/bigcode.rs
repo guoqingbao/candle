@@ -1,21 +1,7 @@
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, Embedding, LayerNorm, Linear, Module, VarBuilder};
-
-fn linear(size1: usize, size2: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
-    let weight = vb.get((size2, size1), "weight")?;
-    let bias = if bias {
-        Some(vb.get(size2, "bias")?)
-    } else {
-        None
-    };
-    Ok(Linear::new(weight, bias))
-}
-
-fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
-    let weight = vb.get(size, "weight")?;
-    let bias = vb.get(size, "bias")?;
-    Ok(LayerNorm::new(weight, bias, eps))
-}
+use candle_nn::{embedding, linear_b as linear, Embedding, Linear, Module, VarBuilder};
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 fn make_causal_mask(t: usize, device: &Device) -> Result<Tensor> {
     let mask: Vec<_> = (0..t)
@@ -148,11 +134,12 @@ impl Attention {
         value: &Tensor,
         attention_mask: &Tensor,
     ) -> Result<Tensor> {
-        if query.dtype() != DType::F32 {
-            // If we start supporting f16 models, we may need the upcasting scaling bits.
-            // https://github.com/huggingface/transformers/blob/a0042379269bea9182c1f87e6b2eee4ba4c8cce8/src/transformers/models/gpt_bigcode/modeling_gpt_bigcode.py#L133
-            candle::bail!("upcasting is not supported {:?}", query.dtype())
-        }
+        // if query.dtype() != DType::F32 {
+        //     // If we start supporting f16 models, we may need the upcasting scaling bits.
+        //     // https://github.com/huggingface/transformers/blob/a0042379269bea9182c1f87e6b2eee4ba4c8cce8/src/transformers/models/gpt_bigcode/modeling_gpt_bigcode.py#L133
+        //     candle::bail!("upcasting is not supported {:?}", query.dtype())
+        // }
+        let dtype = query.dtype();
         let scale_factor = 1f64 / (self.head_dim as f64).sqrt();
         let initial_query_shape = query.shape();
         let key_len = key.dim(D::Minus1)?;
@@ -171,6 +158,10 @@ impl Attention {
             (query, key, attn_shape, attn_view)
         };
 
+        let query = query.to_dtype(DType::F32)?;
+        let key = key.to_dtype(DType::F32)?;
+        let value = value.to_dtype(DType::F32)?;
+
         let attn_weights =
             (query.matmul(&key.contiguous()?)? * scale_factor)?.reshape(attn_shape)?;
         let attention_mask = attention_mask.broadcast_as(attn_shape)?;
@@ -187,7 +178,7 @@ impl Attention {
         } else {
             attn_weights.matmul(&value)?
         };
-        Ok(attn_output)
+        Ok(attn_output.to_dtype(dtype)?)
     }
 
     fn forward(&mut self, hidden_states: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
@@ -211,7 +202,8 @@ impl Attention {
             if let Some(kv_cache) = &self.kv_cache {
                 // TODO: we could trim the tensors to MAX_SEQ_LEN so that this would work for
                 // arbitrarily large sizes.
-                key_value = Tensor::cat(&[kv_cache, &key_value], D::Minus2)?.contiguous()?;
+                // key_value = Tensor::cat(&[kv_cache, &key_value], D::Minus2)?.contiguous()?;
+                key_value = candle_nn::kvconcat(&kv_cache, &key_value, 2)?;
             }
             self.kv_cache = Some(key_value.clone())
         }

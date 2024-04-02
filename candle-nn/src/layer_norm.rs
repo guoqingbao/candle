@@ -62,10 +62,10 @@ impl From<f64> for LayerNormConfig {
 // This layer norm version handles both weight and bias so removes the mean.
 #[derive(Clone, Debug)]
 pub struct LayerNorm {
-    weight: Tensor,
-    bias: Option<Tensor>,
-    remove_mean: bool,
-    eps: f64,
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub remove_mean: bool,
+    pub eps: f64,
 }
 
 impl LayerNorm {

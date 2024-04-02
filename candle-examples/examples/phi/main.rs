@@ -15,6 +15,7 @@ use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::Api, Repo, RepoType};
+use safetensors::Dtype;
 use tokenizers::Tokenizer;
 
 enum Model {
@@ -58,7 +59,7 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    fn run(&mut self, prompt: &str, sample_len: usize, batch_size: usize) -> Result<()> {
         use std::io::Write;
         println!("starting the inference loop");
         let tokens = self.tokenizer.encode(prompt, true).map_err(E::msg)?;
@@ -83,12 +84,20 @@ impl TextGeneration {
         for index in 0..sample_len {
             let context_size = if index > 0 { 1 } else { tokens.len() };
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            let input = Tensor::new(ctxt, &self.device)?;
+            let input = if batch_size > 1 {
+                let dims = input.layout().dims();
+                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+            } else {
+                input.unsqueeze(0)?
+            };
+
             let logits = match &mut self.model {
                 Model::MixFormer(m) => m.forward(&input)?,
                 Model::Phi(m) => m.forward(&input)?,
                 Model::Quantized(m) => m.forward(&input)?,
             };
+            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -112,9 +121,10 @@ impl TextGeneration {
             std::io::stdout().flush()?;
         }
         let dt = start_gen.elapsed();
+        let throughput_per_req = generated_tokens as f64 / dt.as_secs_f64();
         println!(
-            "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64(),
+            "\n{} tokens generated ({} x {generated_tokens} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", generated_tokens * batch_size,
+            batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req
         );
         Ok(())
     }
@@ -189,6 +199,8 @@ struct Args {
     #[arg(long)]
     quantized: bool,
 
+    #[arg(long)]
+    config: Option<String>,
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
     repeat_penalty: f32,
@@ -196,6 +208,9 @@ struct Args {
     /// The context size to consider for the repeat penalty.
     #[arg(long, default_value_t = 64)]
     repeat_last_n: usize,
+
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -273,7 +288,10 @@ fn main() -> Result<()> {
         },
     };
     let filenames = match args.weight_file {
-        Some(weight_file) => vec![std::path::PathBuf::from(weight_file)],
+        Some(files) => files
+            .split(',')
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>(),
         None => {
             if args.quantized {
                 match args.model {
@@ -320,13 +338,16 @@ fn main() -> Result<()> {
         };
         Model::Quantized(model)
     } else {
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::BF16, &device)? };
         match args.model {
             WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 => {
-                let config_filename = repo.get("config.json")?;
+                let config_filename = match args.config {
+                    Some(file) => std::path::PathBuf::from(file),
+                    _ => repo.get("config.json")?
+                };
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: PhiConfig = serde_json::from_str(&config)?;
-                let phi = Phi::new(&config, vb)?;
+                let phi = Phi::new(&config, DType::F16, vb)?;
                 Model::Phi(phi)
             }
             WhichModel::V2Old => {
@@ -357,7 +378,7 @@ fn main() -> Result<()> {
                 args.verbose_prompt,
                 &device,
             );
-            pipeline.run(&prompt, args.sample_len)?;
+            pipeline.run(&prompt, args.sample_len, args.batch_size)?;
         }
         (None, Some(mmlu_dir)) => mmlu(model, tokenizer, &device, mmlu_dir)?,
     }

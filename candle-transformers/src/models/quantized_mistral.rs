@@ -21,11 +21,12 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
 
 impl RotaryEmbedding {
     fn new(cfg: &Config, dev: &Device) -> Result<Self> {
+        let rope_theta = cfg.rope_theta as f32;
         let dim = cfg.hidden_size / cfg.num_attention_heads;
         let max_seq_len = cfg.max_position_embeddings;
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
-            .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
+            .map(|i| 1f32 / rope_theta.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?;
@@ -33,7 +34,6 @@ impl RotaryEmbedding {
             .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
@@ -257,7 +257,7 @@ pub struct Model {
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: Linear,
-    sliding_window: usize,
+    sliding_window: Option<usize>,
     device: Device,
 }
 
@@ -287,15 +287,14 @@ impl Model {
 
     fn prepare_decoder_attention_mask(
         &self,
-        b_size: usize,
         tgt_len: usize,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        // Sliding window mask?
+        let sliding_window = self.sliding_window.unwrap_or(tgt_len + 1);
         let mask: Vec<_> = (0..tgt_len)
             .flat_map(|i| {
                 (0..tgt_len).map(move |j| {
-                    if i < j || j + self.sliding_window < i {
+                    if i < j || j + sliding_window < i {
                         f32::NEG_INFINITY
                     } else {
                         0.
@@ -310,16 +309,16 @@ impl Model {
         } else {
             mask
         };
-        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
+        mask.expand((1, 1, tgt_len, tgt_len + seqlen_offset))?
             .to_dtype(DType::F32)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
-        let (b_size, seq_len) = input_ids.dims2()?;
+        let (_b_size, seq_len) = input_ids.dims2()?;
         let attention_mask = if seq_len <= 1 {
             None
         } else {
-            let mask = self.prepare_decoder_attention_mask(b_size, seq_len, seqlen_offset)?;
+            let mask = self.prepare_decoder_attention_mask(seq_len, seqlen_offset)?;
             Some(mask)
         };
         let mut xs = self.embed_tokens.forward(input_ids)?;
@@ -327,6 +326,7 @@ impl Model {
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
         }
         xs.narrow(1, seq_len - 1, 1)?
+            .contiguous()?
             .apply(&self.norm)?
             .apply(&self.lm_head)
     }

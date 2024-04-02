@@ -1,8 +1,10 @@
 use super::blip_text;
 use super::with_tracing::{conv2d, linear, Conv2d, Linear};
 use candle::{Module, Result, Tensor, D};
-use candle_nn::{layer_norm, Conv2dConfig, LayerNorm, VarBuilder};
+use candle_nn::{Conv2dConfig, VarBuilder};
 use serde::Deserialize;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VisionConfig {

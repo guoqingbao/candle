@@ -1,10 +1,5 @@
 use crate::backend::BackendDevice;
 use crate::cpu_backend::CpuDevice;
-#[cfg(feature = "gcu")]
-use crate::gcu_backend::GcuDevice as GcuDevice;
-#[cfg(not(feature = "gcu"))]
-use crate::CudaDevice as GcuDevice;
-
 use crate::{CpuStorage, DType, Result, Shape, Storage, WithDType};
 
 /// A `DeviceLocation` represents a physical device whereas multiple `Device`
@@ -21,7 +16,7 @@ pub enum DeviceLocation {
 pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
-    Gcu(GcuDevice),
+    Gcu(crate::GcuDevice),
     Metal(crate::MetalDevice),
 }
 
@@ -138,7 +133,7 @@ impl Device {
     }
 
     pub fn new_gcu(ordinal: usize) -> Result<Self> {
-        Ok(Self::Gcu(GcuDevice::new(ordinal)?))
+        Ok(Self::Gcu(crate::GcuDevice::new(ordinal)?))
     }
 
     pub fn new_metal(ordinal: usize) -> Result<Self> {
@@ -179,6 +174,10 @@ impl Device {
 
     pub fn is_cuda(&self) -> bool {
         matches!(self, Self::Cuda(_))
+    }
+
+    pub fn is_gcu(&self) -> bool {
+        matches!(self, Self::Gcu(_))
     }
 
     pub fn is_metal(&self) -> bool {

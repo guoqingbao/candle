@@ -3,6 +3,8 @@ use crate::models::with_tracing::{linear_no_bias, Linear};
 use candle::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
+use candle_nn::ops::rms_norm_fused as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -51,30 +53,10 @@ impl Config {
 }
 
 #[derive(Debug, Clone)]
-struct RmsNorm {
-    inner: candle_nn::RmsNorm,
-    span: tracing::Span,
-}
-
-impl RmsNorm {
-    fn new(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "rms-norm");
-        let inner = candle_nn::rms_norm(size, eps, vb)?;
-        Ok(Self { inner, span })
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
-        self.inner.forward(x)
-    }
-}
-
-#[derive(Debug, Clone)]
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -93,15 +75,18 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let freqs = freqs.to_dtype(dtype)?;
         let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            cos_sin
         })
     }
 
@@ -230,15 +215,20 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (query_states, key_states) =
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
+        // let (query_states, key_states) =
+        //     self.rotary_emb
+        //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
 
+        let (query_states, key_states) = 
+            candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
+    
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                let key_states = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
+                let value_states = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -277,8 +267,8 @@ impl DecoderLayer {
     fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let ln1 = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let ln2 = RmsNorm::new(
+        let ln1 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let ln2 = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -329,7 +319,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,

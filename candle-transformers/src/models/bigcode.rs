@@ -1,21 +1,7 @@
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, Embedding, LayerNorm, Linear, Module, VarBuilder};
-
-fn linear(size1: usize, size2: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
-    let weight = vb.get((size2, size1), "weight")?;
-    let bias = if bias {
-        Some(vb.get(size2, "bias")?)
-    } else {
-        None
-    };
-    Ok(Linear::new(weight, bias, true))
-}
-
-fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
-    let weight = vb.get(size, "weight")?;
-    let bias = vb.get(size, "bias")?;
-    Ok(LayerNorm::new(weight, bias, eps))
-}
+use candle_nn::{embedding, linear_b as linear, Embedding, Linear, Module, VarBuilder};
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 fn make_causal_mask(t: usize, device: &Device) -> Result<Tensor> {
     let mask: Vec<_> = (0..t)
@@ -258,9 +244,9 @@ impl Mlp {
 
 // TODO: Add cross-attention?
 struct Block {
-    ln_1: candle_nn::ops::LayerRmsNorm,
+    ln_1: LayerNorm,
     attn: Attention,
-    ln_2: candle_nn::ops::LayerRmsNorm,
+    ln_2: LayerNorm,
     mlp: Mlp,
 }
 
@@ -268,9 +254,9 @@ impl Block {
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let inner_dim = cfg.n_inner.unwrap_or(4 * hidden_size);
-        let ln_1 = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_1"))?;
+        let ln_1 = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_1"))?;
         let attn = Attention::load(vb.pp("attn"), cfg)?;
-        let ln_2 = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_2"))?;
+        let ln_2 = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb.pp("ln_2"))?;
         let mlp = Mlp::load(inner_dim, vb.pp("mlp"), cfg)?;
         Ok(Self {
             ln_1,
@@ -297,7 +283,7 @@ pub struct GPTBigCode {
     wte: Embedding,
     wpe: Embedding,
     blocks: Vec<Block>,
-    ln_f: candle_nn::ops::LayerRmsNorm,
+    ln_f: LayerNorm,
     lm_head: Linear,
     bias: Tensor,
     config: Config,
@@ -316,7 +302,7 @@ impl GPTBigCode {
         let blocks = (0..cfg.num_hidden_layers)
             .map(|i| Block::load(vb_t.pp(&format!("h.{i}")), &cfg))
             .collect::<Result<Vec<_>>>()?;
-        let ln_f = candle_nn::ops::layer_norm_fused(hidden_size, cfg.layer_norm_epsilon, vb_t.pp("ln_f"))?;
+        let ln_f = layer_norm(hidden_size, cfg.layer_norm_epsilon, vb_t.pp("ln_f"))?;
         let lm_head = linear(hidden_size, cfg.vocab_size, false, vb_t.pp("wte"))?;
         let bias = make_causal_mask(cfg.max_position_embeddings, vb.device())?;
         Ok(Self {

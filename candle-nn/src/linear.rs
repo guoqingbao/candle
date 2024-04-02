@@ -95,3 +95,16 @@ pub fn linear_no_bias(in_dim: usize, out_dim: usize, vs: crate::VarBuilder) -> R
     let ws = vs.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
     Ok(Linear::new(ws, None, true))
 }
+
+pub fn linear_b(
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+    vb: crate::VarBuilder,
+) -> Result<Linear> {
+    if bias {
+        linear(in_dim, out_dim, vb)
+    } else {
+        linear_no_bias(in_dim, out_dim, vb)
+    }
+}

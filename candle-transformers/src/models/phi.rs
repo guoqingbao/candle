@@ -1,4 +1,4 @@
-use crate::models::with_tracing::{layer_norm, linear, Embedding, LayerNorm, Linear};
+use crate::models::with_tracing::{linear, Embedding, Linear};
 /// Phi model.
 /// https://huggingface.co/microsoft/phi-2
 /// There is an alternative implementation of the phi model in mixformers.rs.
@@ -7,6 +7,9 @@ use crate::models::with_tracing::{layer_norm, linear, Embedding, LayerNorm, Line
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use serde::Deserialize;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
+
 
 // https://huggingface.co/microsoft/phi-2/blob/main/configuration_phi.py
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -116,8 +119,8 @@ struct Attention {
     v_proj: Linear,
     dense: Linear,
     kv_cache: Option<(Tensor, Tensor)>,
-    q_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
-    k_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
+    q_layernorm: Option<LayerNorm>,
+    k_layernorm: Option<LayerNorm>,
     rotary_emb: RotaryEmbedding,
     softmax_scale: f64,
     num_heads: usize,
@@ -152,8 +155,8 @@ impl Attention {
         // Alternative rope scalings are not supported.
         let rotary_emb = RotaryEmbedding::new(cfg, dtype, vb.device())?;
         let (q_layernorm, k_layernorm) = if cfg.qk_layernorm {
-            let q_layernorm = candle_nn::ops::layer_norm_fused(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
-            let k_layernorm = candle_nn::ops::layer_norm_fused(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
+            let q_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
+            let k_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
             (Some(q_layernorm), Some(k_layernorm))
         } else {
             (None, None)
@@ -274,7 +277,7 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: candle_nn::ops::LayerRmsNorm,
+    input_layernorm: LayerNorm,
     span: tracing::Span,
 }
 
@@ -282,7 +285,7 @@ impl DecoderLayer {
     fn new(cfg: &Config, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(cfg, dtype, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let input_layernorm = candle_nn::ops::layer_norm_fused(
+        let input_layernorm = layer_norm(
             cfg.hidden_size,
             cfg.layer_norm_eps,
             vb.pp("input_layernorm"),
@@ -313,7 +316,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
-    final_layernorm: candle_nn::ops::LayerRmsNorm,
+    final_layernorm: LayerNorm,
     lm_head: Linear,
     span: tracing::Span,
 }
@@ -323,7 +326,7 @@ impl Model {
         let vb_m = vb.pp("model");
         let embed_tokens =
             Embedding::new(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
-        let final_layernorm = candle_nn::ops::layer_norm_fused(
+        let final_layernorm = layer_norm(
             cfg.hidden_size,
             cfg.layer_norm_eps,
             vb_m.pp("final_layernorm"),

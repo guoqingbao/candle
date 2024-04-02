@@ -3,6 +3,8 @@ use crate::models::with_tracing::{linear_no_bias, Linear};
 use candle::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
+use candle_nn::ops::rms_norm_fused as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -47,27 +49,6 @@ impl Config {
             rms_norm_eps: 1e-5,
             rope_theta: 5_000_000.,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    inner: candle_nn::RmsNorm,
-    span: tracing::Span,
-}
-
-impl RmsNorm {
-    fn new(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "rms-norm");
-        let inner = candle_nn::rms_norm(size, eps, vb)?;
-        Ok(Self { inner, span })
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
-        self.inner.forward(x)
     }
 }
 
@@ -278,16 +259,16 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    ln1: candle_nn::ops::LayerRmsNorm,
-    ln2: candle_nn::ops::LayerRmsNorm,
+    ln1: RmsNorm,
+    ln2: RmsNorm,
 }
 
 impl DecoderLayer {
     fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let ln1 = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let ln2 = candle_nn::ops::rms_norm_fused(
+        let ln1 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let ln2 = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -320,7 +301,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
-    norm: candle_nn::ops::LayerRmsNorm,
+    norm: RmsNorm,
     lm_head: Linear,
     device: Device,
     dtype: DType,
@@ -338,7 +319,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,

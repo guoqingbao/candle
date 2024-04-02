@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{kvconcat, apply_rotary_emb_qkv, linear_no_bias, Linear, VarBuilder};
+use candle_nn::ops::rms_norm_fused_shifted as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 fn default_max_position_embeddings() -> usize {
     4096
@@ -25,35 +27,6 @@ pub struct Config {
     pub max_position_embeddings: usize,
 }
 
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    weight: Tensor,
-    eps: f64,
-}
-
-impl RmsNorm {
-    fn new(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let weight = vb.get(dim, "weight")?;
-        Ok(Self { weight, eps })
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x_dtype = x.dtype();
-        let internal_dtype = match x_dtype {
-            DType::F16 | DType::BF16 => DType::F32,
-            d => d,
-        };
-        let hidden_size = x.dim(D::Minus1)?;
-        let x = x.to_dtype(internal_dtype)?;
-        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-        let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
-        x_normed
-            .to_dtype(x_dtype)?
-            .broadcast_mul(&(&self.weight + 1.0)?)
-    }
-}
 
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
@@ -220,7 +193,7 @@ impl Attention {
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
         let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
 
-        let (key_states, value_states) = match &self.kv_cache { //TODO: faster kv concat
+        let (key_states, value_states) = match &self.kv_cache { 
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
                 // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
@@ -261,8 +234,8 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: candle_nn::ops::LayerRmsNorm,
-    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
+    input_layernorm: RmsNorm,
+    post_attention_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
@@ -270,8 +243,8 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-                candle_nn::ops::rms_norm_fused_shifted(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"), 1.0)?;
-        let post_attention_layernorm = candle_nn::ops::rms_norm_fused_shifted(
+        rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"), 1.0)?;
+        let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"), 1.0
@@ -308,7 +281,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
-    norm: candle_nn::ops::LayerRmsNorm,
+    norm: RmsNorm,
     lm_head: Linear,
     device: Device,
     dtype: DType,
@@ -327,7 +300,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = candle_nn::ops::rms_norm_fused_shifted(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"), 1.0)?;
+        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"), 1.0)?;
         let lm_head = Linear::new(embed_tokens.embeddings().clone(), None, true);
         Ok(Self {
             embed_tokens,

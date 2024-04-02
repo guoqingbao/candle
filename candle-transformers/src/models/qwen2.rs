@@ -2,6 +2,8 @@ use crate::models::with_tracing::{linear, linear_no_bias, Linear};
 use candle::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{Activation, apply_rotary_emb_qkv, kvconcat, VarBuilder};
 use std::sync::Arc;
+use candle_nn::ops::rms_norm_fused as rms_norm;
+use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Config {
@@ -19,27 +21,6 @@ pub struct Config {
     pub rms_norm_eps: f64,
     pub use_sliding_window: bool,
     pub hidden_act: Activation,
-}
-
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    inner: candle_nn::RmsNorm,
-    span: tracing::Span,
-}
-
-impl RmsNorm {
-    fn new(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "rms-norm");
-        let inner = candle_nn::rms_norm(size, eps, vb)?;
-        Ok(Self { inner, span })
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // let _enter = self.span.enter();
-        self.inner.forward(x)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -225,11 +206,6 @@ impl Attention {
         let key_states = self.repeat_kv(key_states)?.contiguous()?;
         let value_states = self.repeat_kv(value_states)?.contiguous()?;
 
-        let in_dtype = query_states.dtype();
-        // let query_states = query_states.to_dtype(DType::F32)?;
-        // let key_states = key_states.to_dtype(DType::F32)?;
-        // let value_states = value_states.to_dtype(DType::F32)?;
-
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
             let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
@@ -256,8 +232,8 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: candle_nn::ops::LayerRmsNorm,
-    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
+    input_layernorm: RmsNorm,
+    post_attention_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
@@ -265,8 +241,8 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-            candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = candle_nn::ops::rms_norm_fused(
+            rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -303,7 +279,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
-    norm: candle_nn::ops::LayerRmsNorm,
+    norm: RmsNorm,
     lm_head: Linear,
     sliding_window: usize,
     device: Device,
@@ -322,7 +298,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = candle_nn::ops::rms_norm_fused(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,
@@ -360,7 +336,8 @@ impl Model {
         } else {
             mask
         };
-        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?.to_dtype(self.dtype)
+        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
+            .to_dtype(self.dtype)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

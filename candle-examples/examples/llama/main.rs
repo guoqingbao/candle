@@ -57,7 +57,7 @@ struct Args {
     seed: u64,
 
     /// The length of the sample to generate (in tokens).
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10000)]
     sample_len: usize,
 
     /// Disable the key-value cache.
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
         Some(dtype) => bail!("Unsupported dtype {dtype}"),
         None => DType::BF16,
     };
-    let (llama, tokenizer_filename, cache) = {
+    let (llama, tokenizer_filename, mut cache) = {
         let api = Api::new()?;
         let model_id = args.model_id.unwrap_or_else(|| match args.which {
             Which::V1 => "Narsil/amall-7b".to_string(),
@@ -176,7 +176,7 @@ fn main() -> Result<()> {
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
-        (Llama::load(vb, &cache, &config)?, tokenizer_filename, cache)
+        (Llama::load(vb, &config)?, tokenizer_filename, cache)
     };
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
     let eos_token_id = tokenizer.token_to_id(EOS_TOKEN);
@@ -208,7 +208,7 @@ fn main() -> Result<()> {
         } else {
             input.unsqueeze(0)?
         };
-        let logits = llama.forward(&input, index_pos)?;
+        let logits = llama.forward(&input, index_pos, &mut cache)?;
         let logits = if args.batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
 
         let logits = logits.squeeze(0)?;

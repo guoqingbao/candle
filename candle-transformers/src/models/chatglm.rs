@@ -1,6 +1,9 @@
-use crate::models::with_tracing::Linear;
+use crate::models::with_tracing::{linear_b as linear, Linear};
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::VarBuilder;
+use candle_nn::ops::rms_norm_fused as rms_norm;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerRmsNorm;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -48,14 +51,6 @@ impl Config {
             attention_softmax_in_fp32: true,
             fp32_residual_connection: false,
         }
-    }
-}
-
-fn linear(in_dim: usize, out_dim: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
-    if bias {
-        crate::models::with_tracing::linear(in_dim, out_dim, vb)
-    } else {
-        crate::models::with_tracing::linear_no_bias(in_dim, out_dim, vb)
     }
 }
 
@@ -384,9 +379,9 @@ impl Module for MLP {
 
 #[derive(Debug, Clone)]
 struct Block {
-    input_layernorm: candle_nn::ops::LayerRmsNorm,
+    input_layernorm: LayerRmsNorm,
     self_attention: SelfAttention,
-    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
+    post_attention_layernorm: LayerRmsNorm,
     mlp: MLP,
     apply_residual_connection_post_layernorm: bool,
 }
@@ -394,26 +389,26 @@ struct Block {
 impl Block {
     fn new(layer_number: usize, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let input_layernorm = if cfg.rmsnorm {
-            candle_nn::ops::rms_norm_fused(
+            rms_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
         } else {
-            candle_nn::ops::layer_norm_fused(
+            layer_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
         };
         let post_attention_layernorm = if cfg.rmsnorm {
-            candle_nn::ops::rms_norm_fused(
+            rms_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
             )?
         } else {
-            candle_nn::ops::layer_norm_fused(
+            layer_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
@@ -464,7 +459,7 @@ impl Block {
 #[derive(Debug, Clone)]
 struct Transformer {
     layers: Vec<Block>,
-    final_layernorm: Option<candle_nn::ops::LayerRmsNorm>,
+    final_layernorm: Option<LayerRmsNorm>,
     rotary_emb: RotaryEmbedding,
 }
 
@@ -478,13 +473,13 @@ impl Transformer {
         }
         let final_layernorm = if cfg.post_layer_norm {
             let ln = if cfg.rmsnorm {
-                candle_nn::ops::rms_norm_fused(
+                rms_norm(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),
                 )?
             } else {
-                candle_nn::ops::layer_norm_fused(
+                layer_norm(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),

@@ -1,8 +1,10 @@
 use crate::models::with_tracing::{linear, linear_no_bias, Linear};
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{Activation, LayerNorm, VarBuilder};
+use candle_nn::{Activation, VarBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 // https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/configuration_stablelm_epoch.py
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -314,8 +316,8 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: candle_nn::ops::LayerRmsNorm,
-    post_attention_layernorm: candle_nn::ops::LayerRmsNorm,
+    input_layernorm: LayerNorm,
+    post_attention_layernorm: LayerNorm,
     span: tracing::Span,
 }
 
@@ -323,9 +325,12 @@ impl DecoderLayer {
     fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let input_layernorm =
-        candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = candle_nn::ops::layer_norm_fused(
+        let input_layernorm = layer_norm(
+            cfg.hidden_size,
+            cfg.norm_eps,
+            vb.pp("input_layernorm"),
+        )?;
+        let post_attention_layernorm = layer_norm(
             cfg.hidden_size,
             cfg.norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -360,7 +365,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
-    norm: candle_nn::ops::LayerRmsNorm,
+    norm: LayerNorm,
     lm_head: Linear,
     device: Device,
     dtype: DType,
@@ -379,7 +384,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.norm_eps, vb_m.pp("norm"))?;
+        let norm = layer_norm(cfg.hidden_size, cfg.norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,

@@ -1,7 +1,9 @@
 use super::with_tracing::{linear, Embedding, Linear};
 use candle::{Module, Result, Tensor, D};
-use candle_nn::{layer_norm, LayerNorm, VarBuilder};
+use candle_nn::VarBuilder;
 use serde::Deserialize;
+use candle_nn::ops::layer_norm_fused as layer_norm;
+use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -22,7 +24,7 @@ pub struct Config {
 struct TextEmbeddings {
     word_embedddings: Embedding,
     position_embeddings: Embedding,
-    layer_norm: candle_nn::ops::LayerRmsNorm,
+    layer_norm: LayerNorm,
     position_ids: Tensor,
 }
 
@@ -35,7 +37,7 @@ impl TextEmbeddings {
             cfg.hidden_size,
             vb.pp("position_embeddings"),
         )?;
-        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         let position_ids =
             Tensor::arange(0, cfg.max_position_embeddings as u32, vb.device())?.unsqueeze(0)?;
         Ok(Self {
@@ -122,8 +124,10 @@ impl TextSelfAttention {
                 let (key, value) = match &self.kv_cache {
                     None => (key, value),
                     Some((prev_key, prev_value)) => {
-                        let key = Tensor::cat(&[prev_key, &key], 2)?;
-                        let value = Tensor::cat(&[prev_value, &value], 2)?;
+                        // let key = Tensor::cat(&[prev_key, &key], 2)?;
+                        // let value = Tensor::cat(&[prev_value, &value], 2)?;
+                        let key = candle_nn::kvconcat(&prev_key, &key, 2)?;
+                        let value = candle_nn::kvconcat(&prev_value, &value, 2)?;
                         (key, value)
                     }
                 };
@@ -156,13 +160,13 @@ impl TextSelfAttention {
 #[derive(Debug, Clone)]
 struct TextSelfOutput {
     dense: Linear,
-    layer_norm: candle_nn::ops::LayerRmsNorm,
+    layer_norm: LayerNorm,
 }
 
 impl TextSelfOutput {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self { dense, layer_norm })
     }
 
@@ -226,13 +230,13 @@ impl Module for TextIntermediate {
 #[derive(Debug, Clone)]
 struct TextOutput {
     dense: Linear,
-    layer_norm: candle_nn::ops::LayerRmsNorm,
+    layer_norm: LayerNorm,
 }
 
 impl TextOutput {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.intermediate_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self { dense, layer_norm })
     }
 
@@ -349,13 +353,13 @@ impl Module for TextPooler {
 struct TextPredictionHeadTransform {
     dense: Linear,
     transform_act_fn: candle_nn::Activation,
-    layer_norm: candle_nn::ops::LayerRmsNorm,
+    layer_norm: LayerNorm,
 }
 
 impl TextPredictionHeadTransform {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self {
             dense,
             transform_act_fn: cfg.hidden_act,

@@ -1040,8 +1040,7 @@ impl<'a> Map2 for Conv2D<'a> {
             crate::bail!("unexpected input shape for conv2d {dims:?}")
         };
         let ds = dev.htod_copy(ds).w()?;
-        let params = (el, out_w, out_h, p.stride, p.padding, ds.device_ptr(), inp.device_ptr(), k, out.device_ptr());
-        // SAFETY: ffi.
+        let params = (el, out_w, out_h, p.stride, p.padding, p.dilation, ds.device_ptr(), inp.device_ptr(), k, out.device_ptr());
         unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
         Ok(out)
     }

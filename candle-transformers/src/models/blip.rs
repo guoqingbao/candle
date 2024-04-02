@@ -189,17 +189,17 @@ impl Module for MLP {
 #[derive(Debug, Clone)]
 struct EncoderLayer {
     self_attn: Attention,
-    layer_norm1: LayerNorm,
+    layer_norm1: candle_nn::ops::LayerRmsNorm,
     mlp: MLP,
-    layer_norm2: LayerNorm,
+    layer_norm2: candle_nn::ops::LayerRmsNorm,
 }
 
 impl EncoderLayer {
     fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         let embed_dim = cfg.hidden_size;
         let self_attn = Attention::new(cfg, vb.pp("self_attn"))?;
-        let layer_norm1 = layer_norm(embed_dim, cfg.layer_norm_eps, vb.pp("layer_norm1"))?;
-        let layer_norm2 = layer_norm(embed_dim, cfg.layer_norm_eps, vb.pp("layer_norm2"))?;
+        let layer_norm1 = candle_nn::ops::layer_norm_fused(embed_dim, cfg.layer_norm_eps, vb.pp("layer_norm1"))?;
+        let layer_norm2 = candle_nn::ops::layer_norm_fused(embed_dim, cfg.layer_norm_eps, vb.pp("layer_norm2"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         Ok(Self {
             self_attn,
@@ -250,7 +250,7 @@ impl Encoder {
 pub struct VisionModel {
     embeddings: VisionEmbeddings,
     encoder: Encoder,
-    post_layernorm: LayerNorm,
+    post_layernorm: candle_nn::ops::LayerRmsNorm,
 }
 
 impl VisionModel {
@@ -258,7 +258,7 @@ impl VisionModel {
         let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
         let encoder = Encoder::new(cfg, vb.pp("encoder"))?;
         let post_layernorm =
-            layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
+            candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
         Ok(Self {
             embeddings,
             encoder,

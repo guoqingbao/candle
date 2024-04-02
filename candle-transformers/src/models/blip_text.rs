@@ -22,7 +22,7 @@ pub struct Config {
 struct TextEmbeddings {
     word_embedddings: Embedding,
     position_embeddings: Embedding,
-    layer_norm: LayerNorm,
+    layer_norm: candle_nn::ops::LayerRmsNorm,
     position_ids: Tensor,
 }
 
@@ -35,7 +35,7 @@ impl TextEmbeddings {
             cfg.hidden_size,
             vb.pp("position_embeddings"),
         )?;
-        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         let position_ids =
             Tensor::arange(0, cfg.max_position_embeddings as u32, vb.device())?.unsqueeze(0)?;
         Ok(Self {
@@ -156,13 +156,13 @@ impl TextSelfAttention {
 #[derive(Debug, Clone)]
 struct TextSelfOutput {
     dense: Linear,
-    layer_norm: LayerNorm,
+    layer_norm: candle_nn::ops::LayerRmsNorm,
 }
 
 impl TextSelfOutput {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self { dense, layer_norm })
     }
 
@@ -226,13 +226,13 @@ impl Module for TextIntermediate {
 #[derive(Debug, Clone)]
 struct TextOutput {
     dense: Linear,
-    layer_norm: LayerNorm,
+    layer_norm: candle_nn::ops::LayerRmsNorm,
 }
 
 impl TextOutput {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.intermediate_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self { dense, layer_norm })
     }
 
@@ -349,13 +349,13 @@ impl Module for TextPooler {
 struct TextPredictionHeadTransform {
     dense: Linear,
     transform_act_fn: candle_nn::Activation,
-    layer_norm: LayerNorm,
+    layer_norm: candle_nn::ops::LayerRmsNorm,
 }
 
 impl TextPredictionHeadTransform {
     fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let dense = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("dense"))?;
-        let layer_norm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
+        let layer_norm = candle_nn::ops::layer_norm_fused(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("LayerNorm"))?;
         Ok(Self {
             dense,
             transform_act_fn: cfg.hidden_act,

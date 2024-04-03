@@ -154,6 +154,19 @@ impl crate::backend::BackendStorage for GcuStorage {
         Err(Error::NotCompiledWithGcuSupport)
     }
 
+    fn copy2d(
+        &self,
+        _: &mut Self,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+    ) -> Result<()> {
+        Err(Error::NotCompiledWithGcuSupport)
+    }
+
     fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self> {
         Err(Error::NotCompiledWithGcuSupport)
     }
@@ -197,7 +210,15 @@ impl crate::backend::BackendDevice for GcuDevice {
         Err(Error::NotCompiledWithGcuSupport)
     }
 
+    unsafe fn alloc_uninit(&self, _shape: &Shape, _dtype: DType) -> Result<Self::Storage> {
+        Err(Error::NotCompiledWithGcuSupport)
+    }
+
     fn storage_from_cpu_storage(&self, _: &CpuStorage) -> Result<Self::Storage> {
+        Err(Error::NotCompiledWithGcuSupport)
+    }
+
+    fn storage_from_cpu_storage_owned(&self, _: CpuStorage) -> Result<Self::Storage> {
         Err(Error::NotCompiledWithGcuSupport)
     }
 

@@ -286,6 +286,13 @@ class Tensor:
         Flattens the tensor on the dimension indexes from `0` to `dim` (inclusive).
         """
         pass
+
+    def gather(self, index, dim):
+        """
+        Gathers values along an axis specified by dim.
+        """
+        pass
+
     def get(self, index: int) -> Tensor:
         """
         Gets the value at the specified index.

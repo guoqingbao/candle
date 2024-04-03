@@ -22,15 +22,15 @@ pub struct Config {
     pub rescale_every: usize,
 }
 
-struct StatePerLayer {
-    extract_key_value: Tensor,
-    linear_attention: Tensor,
-    feed_forward: Tensor,
+pub struct StatePerLayer {
+    pub extract_key_value: Tensor,
+    pub linear_attention: Tensor,
+    pub feed_forward: Tensor,
 }
 
 pub struct State {
-    per_layer: Vec<StatePerLayer>,
-    pos: usize,
+    pub per_layer: Vec<StatePerLayer>,
+    pub pos: usize,
 }
 
 impl State {
@@ -124,7 +124,7 @@ impl SelfAttention {
         let (b, t, s) = xs.dims3()?;
         let s = s / h;
         let (receptance, key, value, gate) = {
-            // exctract key-value
+            // extract key-value
             let shifted = state.per_layer[self.layer_id].extract_key_value.clone();
             let shifted = if shifted.rank() == 2 {
                 shifted.unsqueeze(1)?
@@ -164,7 +164,6 @@ impl SelfAttention {
 
         let mut out: Vec<Tensor> = Vec::with_capacity(t);
         for t_ in 0..t {
-            //
             let rt = receptance.i((.., .., t_..t_ + 1))?.contiguous()?;
             let kt = key.i((.., .., .., t_..t_ + 1))?.contiguous()?;
             let vt = value.i((.., .., t_..t_ + 1))?.contiguous()?;

@@ -7,12 +7,35 @@ extern crate accelerate_src;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 
-use candle_transformers::models::rwkv_v5::{Config, Model, State, Tokenizer};
+use candle_transformers::models::quantized_rwkv_v5::Model as Q5;
+use candle_transformers::models::quantized_rwkv_v6::Model as Q6;
+use candle_transformers::models::rwkv_v5::{Config, Model as M5, State, Tokenizer};
+use candle_transformers::models::rwkv_v6::Model as M6;
 
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::Api, Repo, RepoType};
+
+const EOS_TOKEN_ID: u32 = 261;
+
+enum Model {
+    M5(M5),
+    Q5(Q5),
+    M6(M6),
+    Q6(Q6),
+}
+
+impl Model {
+    fn forward(&self, xs: &Tensor, state: &mut State) -> candle::Result<Tensor> {
+        match self {
+            Self::M5(m) => m.forward(xs, state),
+            Self::Q5(m) => m.forward(xs, state),
+            Self::M6(m) => m.forward(xs, state),
+            Self::Q6(m) => m.forward(xs, state),
+        }
+    }
+}
 
 struct TextGeneration {
     model: Model,
@@ -83,6 +106,9 @@ impl TextGeneration {
             let next_token = self.logits_processor.sample(&logits)?;
             tokens.push(next_token);
             generated_tokens += 1;
+            if next_token == EOS_TOKEN_ID || next_token == 0 {
+                break;
+            }
             print!("{}", self.tokenizer.decode(&[next_token])?);
             std::io::stdout().flush()?;
 
@@ -103,6 +129,7 @@ enum Which {
     Eagle7b,
     World1b5,
     World3b,
+    World6_1b6,
 }
 
 impl std::fmt::Display for Which {
@@ -114,9 +141,10 @@ impl std::fmt::Display for Which {
 impl Which {
     fn model_id(&self) -> &'static str {
         match self {
-            Self::Eagle7b => "RWKV/HF_v5-Eagle-7B",
+            Self::Eagle7b => "RWKV/v5-Eagle-7B-HF",
             Self::World1b5 => "RWKV/rwkv-5-world-1b5",
             Self::World3b => "RWKV/rwkv-5-world-3b",
+            Self::World6_1b6 => "paperfun/rwkv",
         }
     }
 
@@ -124,6 +152,7 @@ impl Which {
         match self {
             Self::Eagle7b => "refs/pr/1",
             Self::World1b5 | Self::World3b => "refs/pr/2",
+            Self::World6_1b6 => "main",
         }
     }
 }
@@ -175,6 +204,9 @@ struct Args {
 
     #[arg(long)]
     config_file: Option<String>,
+
+    #[arg(long)]
+    quantized: bool,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
@@ -236,7 +268,27 @@ fn main() -> Result<()> {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>(),
         None => {
-            vec![repo.get("model.safetensors")?]
+            if args.quantized {
+                vec![match args.which {
+                    Which::World1b5 => api
+                        .model("lmz/candle-rwkv".to_string())
+                        .get("world1b5-q4k.gguf")?,
+                    Which::World3b => api
+                        .model("lmz/candle-rwkv".to_string())
+                        .get("world3b-q4k.gguf")?,
+                    Which::Eagle7b => api
+                        .model("lmz/candle-rwkv".to_string())
+                        .get("eagle7b-q4k.gguf")?,
+                    Which::World6_1b6 => repo.get("rwkv-6-world-1b6-q4k.gguf")?,
+                }]
+            } else {
+                vec![match args.which {
+                    Which::World1b5 | Which::World3b | Which::Eagle7b => {
+                        repo.get("model.safetensors")?
+                    }
+                    Which::World6_1b6 => repo.get("rwkv-6-world-1b6.safetensors")?,
+                }]
+            }
         }
     };
     println!("retrieved the files in {:?}", start.elapsed());
@@ -245,8 +297,21 @@ fn main() -> Result<()> {
     let start = std::time::Instant::now();
     let config: Config = serde_json::from_slice(&std::fs::read(config_filename)?)?;
     let device = candle_examples::device(args.cpu)?;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
-    let model = Model::new(&config, vb)?;
+    let model = if args.quantized {
+        let filename = &filenames[0];
+        let vb =
+            candle_transformers::quantized_var_builder::VarBuilder::from_gguf(filename, &device)?;
+        match args.which {
+            Which::World1b5 | Which::World3b | Which::Eagle7b => Model::Q5(Q5::new(&config, vb)?),
+            Which::World6_1b6 => Model::Q6(Q6::new(&config, vb)?),
+        }
+    } else {
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, DType::F32, &device)? };
+        match args.which {
+            Which::World1b5 | Which::World3b | Which::Eagle7b => Model::M5(M5::new(&config, vb)?),
+            Which::World6_1b6 => Model::M6(M6::new(&config, vb)?),
+        }
+    };
     println!("loaded the model in {:?}", start.elapsed());
 
     let mut pipeline = TextGeneration::new(

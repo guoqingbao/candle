@@ -392,6 +392,44 @@ impl BackendDevice for GcuDevice {
         self.const_impl(1., shape, dtype)
     }
 
+    unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
+        let elem_count = shape.elem_count();
+        let slice = match dtype {
+            DType::U8 => {
+                let data = self.alloc::<u8>(elem_count).w()?;
+                GcuStorageSlice::U8(data)
+            }
+            DType::U32 => {
+                let data = self.alloc::<u32>(elem_count).w()?;
+                GcuStorageSlice::U32(data)
+            }
+            DType::I64 => {
+                let data = self.alloc::<i64>(elem_count).w()?;
+                GcuStorageSlice::I64(data)
+            }
+            DType::BF16 => {
+                let data = self.alloc::<bf16>(elem_count).w()?;
+                GcuStorageSlice::BF16(data)
+            }
+            DType::F16 => {
+                let data = self.alloc::<f16>(elem_count).w()?;
+                GcuStorageSlice::F16(data)
+            }
+            DType::F32 => {
+                let data = self.alloc::<f32>(elem_count).w()?;
+                GcuStorageSlice::F32(data)
+            }
+            DType::F64 => {
+                let data = self.alloc::<f64>(elem_count).w()?;
+                GcuStorageSlice::F64(data)
+            }
+        };
+        Ok(GcuStorage {
+            slice,
+            device: self.clone(),
+        })
+    }
+
     fn storage_from_cpu_storage(&self, storage: &CpuStorage) -> Result<GcuStorage> {
         let slice = match storage {
             CpuStorage::U8(storage) => {
@@ -428,6 +466,44 @@ impl BackendDevice for GcuDevice {
             device: self.clone(),
         })
     }
+
+    fn storage_from_cpu_storage_owned(&self, storage: CpuStorage) -> Result<GcuStorage> {
+        let slice = match storage {
+            CpuStorage::U8(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::U8(data)
+            }
+            CpuStorage::U32(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::U32(data)
+            }
+            CpuStorage::I64(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::I64(data)
+            }
+            CpuStorage::BF16(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::BF16(data)
+            }
+            CpuStorage::F16(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::F16(data)
+            }
+            CpuStorage::F32(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::F32(data)
+            }
+            CpuStorage::F64(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::F64(data)
+            }
+        };
+        Ok(GcuStorage {
+            slice,
+            device: self.clone(),
+        })
+    }
+
 }
 
 
@@ -1926,6 +2002,67 @@ impl BackendStorage for GcuStorage {
         };
         let device = dev.clone();
         Ok(Self { slice, device })
+    }
+
+    fn copy2d(
+        &self,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_s: usize,
+        dst_s: usize,
+        src_o: usize,
+        dst_o: usize,
+    ) -> Result<()> {
+        panic!("not implemented!");
+        let dev = &self.device;
+        let d1 = d1 as u32;
+        let d2 = d2 as u32;
+        let dst_s = dst_s as u32;
+        let src_s = src_s as u32;
+        let cfg = &dev.launch_cfg;
+        let (src, dst, kname) = match (&self.slice, &mut dst.slice) {
+            (S::U8(s), S::U8(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_u8",
+            ),
+            (S::U32(s), S::U32(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_u32",
+            ),
+            (S::I64(s), S::I64(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_i64",
+            ),
+            (S::BF16(s), S::BF16(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_bf16",
+            ),
+            (S::F16(s), S::F16(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_f16",
+            ),
+            (S::F32(s), S::F32(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_f32",
+            ),
+            (S::F64(s), S::F64(d)) => (
+                s.slice(src_o..).device_ptr(),
+                d.slice(dst_o..).device_ptr(),
+                "copy2d_f64",
+            ),
+            _ => Err(GcuError::InternalError("dtype mismatch in copy2d"))?,
+        };
+        let func = dev.get_or_load_func(kname, ubridge::FILLCOPY)?;
+        let params = (src, dst, d1, d2, src_s, dst_s);
+        unsafe { func.launch(cfg, params) }.w()?;
+        Ok(())
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {

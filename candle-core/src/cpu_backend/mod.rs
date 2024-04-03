@@ -2112,7 +2112,49 @@ impl BackendStorage for CpuStorage {
         }
     }
 
-        fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
+    fn copy2d(
+        &self,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_s: usize,
+        dst_s: usize,
+        src_o: usize,
+        dst_o: usize,
+    ) -> Result<()> {
+        match (self, dst) {
+            (Self::U8(src), Self::U8(dst)) => copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o),
+            (Self::U32(src), Self::U32(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::I64(src), Self::I64(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::BF16(src), Self::BF16(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F16(src), Self::F16(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F32(src), Self::F32(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F64(src), Self::F64(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (_, dst) => {
+                return Err(Error::DTypeMismatchBinaryOp {
+                    lhs: self.dtype(),
+                    rhs: dst.dtype(),
+                    op: "copy2d",
+                }
+                .bt());
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
         match (self, dst) {
             (Self::U8(src), Self::U8(dst)) => copy_strided_src_(src, dst, dst_offset, src_l),
             (Self::U32(src), Self::U32(dst)) => copy_strided_src_(src, dst, dst_offset, src_l),
@@ -2182,7 +2224,7 @@ impl BackendStorage for CpuStorage {
             // Make the kernel contiguous if not already the case.
             let mut kernel_c = unsafe {
                 self.device()
-                    .zeros_impl(kernel_l.shape(), kernel.dtype())?
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
             };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
@@ -2191,7 +2233,7 @@ impl BackendStorage for CpuStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         };
         let res_l = Layout::contiguous((b, l_out, params.c_out)).transpose(1, 2)?;
-        let mut res_t = unsafe { self.device().zeros_impl(res_l.shape(), res.dtype())? };
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -2284,7 +2326,7 @@ impl BackendStorage for CpuStorage {
             // Make the kernel contiguous if not already the case.
             let mut kernel_c = unsafe {
                 self.device()
-                    .zeros_impl(kernel_l.shape(), kernel.dtype())?
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
             };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l)
@@ -2295,7 +2337,7 @@ impl BackendStorage for CpuStorage {
         let res_l = Layout::contiguous((b, h_out, w_out, params.c_out))
             .transpose(1, 2)?
             .transpose(1, 3)?;
-        let mut res_t = unsafe { self.device().zeros_impl(res_l.shape(), res.dtype())? };
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -2418,6 +2460,10 @@ impl BackendDevice for CpuDevice {
         Ok(s.clone())
     }
 
+    fn storage_from_cpu_storage_owned(&self, s: CpuStorage) -> Result<Self::Storage> {
+        Ok(s)
+    }
+
     fn new(_: usize) -> Result<Self> {
         Ok(Self)
     }
@@ -2517,6 +2563,53 @@ impl BackendDevice for CpuDevice {
                 Ok(CpuStorage::F64(data))
             }
         }
+    }
+
+    #[allow(clippy::uninit_vec)]
+    unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {
+        let elem_count = shape.elem_count();
+        // The code below is highly unsafe but hopefully not directly unsound as we only consider
+        // types that are Copy, not Drop, and for which all bit patterns are proper values.
+        // It's still pretty risky, see the following for more details:
+        // https://github.com/rust-lang/rust-clippy/issues/4483
+        let storage = match dtype {
+            DType::U8 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::U8(v)
+            }
+            DType::U32 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::U32(v)
+            }
+            DType::I64 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::I64(v)
+            }
+            DType::BF16 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::BF16(v)
+            }
+            DType::F16 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F16(v)
+            }
+            DType::F32 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F32(v)
+            }
+            DType::F64 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F64(v)
+            }
+        };
+        Ok(storage)
     }
 
     fn ones_impl(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {

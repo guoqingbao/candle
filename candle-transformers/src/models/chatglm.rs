@@ -1,9 +1,6 @@
 use crate::models::with_tracing::{linear_b as linear, Linear};
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::VarBuilder;
-use candle_nn::ops::rms_norm_fused as rms_norm;
-use candle_nn::ops::layer_norm_fused as layer_norm;
-use candle_nn::ops::LayerRmsNorm as LayerRmsNorm;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -379,9 +376,9 @@ impl Module for MLP {
 
 #[derive(Debug, Clone)]
 struct Block {
-    input_layernorm: LayerRmsNorm,
+    input_layernorm: candle_nn::LayerNorm,
     self_attention: SelfAttention,
-    post_attention_layernorm: LayerRmsNorm,
+    post_attention_layernorm: candle_nn::LayerNorm,
     mlp: MLP,
     apply_residual_connection_post_layernorm: bool,
 }
@@ -389,26 +386,28 @@ struct Block {
 impl Block {
     fn new(layer_number: usize, cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let input_layernorm = if cfg.rmsnorm {
-            rms_norm(
+            candle_nn::rms_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
+            .into_inner()
         } else {
-            layer_norm(
+            candle_nn::layer_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("input_layernorm"),
             )?
         };
         let post_attention_layernorm = if cfg.rmsnorm {
-            rms_norm(
+            candle_nn::rms_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
             )?
+            .into_inner()
         } else {
-            layer_norm(
+            candle_nn::layer_norm(
                 cfg.hidden_size,
                 cfg.layernorm_epsilon,
                 vb.pp("post_attention_layernorm"),
@@ -459,7 +458,7 @@ impl Block {
 #[derive(Debug, Clone)]
 struct Transformer {
     layers: Vec<Block>,
-    final_layernorm: Option<LayerRmsNorm>,
+    final_layernorm: Option<candle_nn::LayerNorm>,
     rotary_emb: RotaryEmbedding,
 }
 
@@ -473,13 +472,14 @@ impl Transformer {
         }
         let final_layernorm = if cfg.post_layer_norm {
             let ln = if cfg.rmsnorm {
-                rms_norm(
+                candle_nn::rms_norm(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),
                 )?
+                .into_inner()
             } else {
-                layer_norm(
+                candle_nn::layer_norm(
                     cfg.hidden_size,
                     cfg.layernorm_epsilon,
                     vb.pp("final_layernorm"),

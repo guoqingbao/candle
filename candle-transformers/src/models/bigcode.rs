@@ -1,7 +1,11 @@
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, linear_b as linear, Embedding, Linear, Module, VarBuilder};
-use candle_nn::ops::layer_norm_fused as layer_norm;
-use candle_nn::ops::LayerRmsNorm as LayerNorm;
+use candle_nn::{embedding, linear_b as linear, Embedding, LayerNorm, Linear, Module, VarBuilder};
+
+fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
+    let weight = vb.get(size, "weight")?;
+    let bias = vb.get(size, "bias")?;
+    Ok(LayerNorm::new(weight, bias, eps))
+}
 
 fn make_causal_mask(t: usize, device: &Device) -> Result<Tensor> {
     let mask: Vec<_> = (0..t)

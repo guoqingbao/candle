@@ -136,7 +136,7 @@ fn get_mask(size: usize, device: &Device) -> Result<Tensor> {
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
     let shape = mask.shape();
     let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
-    let m = mask.where_cond(&on_true, on_false)?;
+    let m = mask.where_cond(&on_true.to_dtype(on_false.dtype())?, on_false)?;
     Ok(m)
 }
 
@@ -144,6 +144,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 impl RotaryEmbedding {
@@ -158,9 +159,11 @@ impl RotaryEmbedding {
             .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            cos_sin
         })
     }
 
@@ -287,6 +290,21 @@ impl MHA {
             span: tracing::span!(tracing::Level::TRACE, "mha"),
         })
     }
+    fn rotary_emb_qkv(&self, qkv: &Tensor, seqlen_offset: usize) -> Result<(Tensor, Tensor, Tensor)> {
+        if qkv.device().is_gcu() {
+            let q = qkv.i((.., .., 0))?;
+            let k = qkv.i((.., .., 1))?;
+            let v = qkv.i((.., .., 2))?;
+            let (_, rotary_dim) = self.rotary_emb.cos.dims2()?;
+            let rotary_dim = rotary_dim * 2;
+            #[cfg(feature = "gcu")]
+            let (q, k) = candle_nn::apply_rotary_emb_qkv(&q, &k, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, rotary_dim, false, true)?;
+            Ok((q, k, v))
+            
+        } else {
+            self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)
+        }
+    }
 
     fn forward(&mut self, xs: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
         let _enter = self.span.enter();
@@ -300,12 +318,12 @@ impl MHA {
             Some((prev_k, _)) => prev_k.dim(1)?,
         };
         // In the python implementation, a single tensor is returned with the third axis of size 3.
-        let (q, k, v) = self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)?;
+        let (q, k, v) = self.rotary_emb_qkv(&qkv, seqlen_offset)?;
         let (k, v) = match &self.kv_cache {
             None => (k, v),
             Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &k], 1)?;
-                let v = Tensor::cat(&[prev_v, &v], 1)?;
+                let k = candle_nn::kvconcat(&prev_k, &k, 1)?;
+                let v = candle_nn::kvconcat(&prev_v, &v, 1)?;
                 (k, v)
             }
         };

@@ -2269,7 +2269,7 @@ impl crate::CustomOp2 for KVConcat {
         rtensor: &GcuStorage,
         rtensor_l: &Layout,
     ) -> Result<(GcuStorage, Shape)> {
-        assert!(self.concat_dim == 2 || self.concat_dim == 0); //must be in the dim of sequence len 
+        assert!(self.concat_dim == 2 || self.concat_dim == 0 || self.concat_dim == 1); //must be in the dim of sequence len 
         let dev = &ltensor.device;
         let cfg = &dev.launch_cfg;
         let elem_count = ltensor_l.shape().elem_count() + rtensor_l.shape().elem_count();
@@ -2319,7 +2319,9 @@ impl crate::CustomOp2 for KVConcat {
         let mut lshape: Vec<usize> = ltensor_l.shape().dims().to_vec();
         if self.concat_dim == 0 {
             lshape[0] += rtensor_l.shape().dims()[0];      
-        }  else {
+        } else if self.concat_dim == 1 {
+            lshape[1] += rtensor_l.shape().dims()[1];      
+        } else {
             if dims > 3 {
                 lshape[2] += rtensor_l.shape().dims()[2];
             } else {

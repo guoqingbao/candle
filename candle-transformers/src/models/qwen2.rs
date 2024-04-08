@@ -1,9 +1,7 @@
-use crate::models::with_tracing::{linear, linear_no_bias, Linear};
+use crate::models::with_tracing::{linear, linear_no_bias, Linear, RmsNorm};
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{Activation, apply_rotary_emb_qkv, kvconcat, VarBuilder};
+use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
-use candle_nn::ops::rms_norm_fused as rms_norm;
-use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Config {
@@ -189,15 +187,15 @@ impl Attention {
         //     self.rotary_emb
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
 
-        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
 
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
                 // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
                 // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
-                let key_states = kvconcat(&prev_k, &key_states, 2)?;
-                let value_states = kvconcat(&prev_v, &value_states, 2)?;
+                let key_states = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
+                let value_states = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -241,8 +239,8 @@ impl DecoderLayer {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
-            rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = rms_norm(
+            RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -298,7 +296,7 @@ impl Model {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
             layers.push(layer)
         }
-        let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
         Ok(Self {
             embed_tokens,

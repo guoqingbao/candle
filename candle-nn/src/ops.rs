@@ -703,62 +703,6 @@ impl LayerRmsNorm {
     }
 }
 
-#[cfg(not(feature = "gcu"))]
-impl crate::Module for LayerRmsNorm {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.0.forward(xs)
-    }
-}
-
-#[cfg(feature = "gcu")]
-impl crate::Module for LayerRmsNorm {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if xs.device().is_gcu() {
-            use candle::gcu_backend::LayerNorm;
-            let op = LayerNorm {
-                eps: self.0.eps as f32,
-                remove_mean: self.0.remove_mean,
-                affine: self.0.bias.is_some(),
-            };
-            let x = xs.contiguous()?;
-            match &self.0.bias {
-                Some(bias) => x.apply_op3(&self.0.weight, &bias, op),
-                None => x.apply_op3(&self.0.weight, &self.0.weight, op),
-            }
-        } else {
-            self.0.forward(xs)
-        }
-    }
-}
-
-pub fn rms_norm_fused(size: usize, eps: f64, vb: crate::VarBuilder) -> Result<LayerRmsNorm> {
-    let config = LayerNormConfig {
-        eps,
-        remove_mean: false,
-        affine: false,
-    };
-    Ok(LayerRmsNorm(layer_norm(size, config, vb)?))
-}
-
-pub fn rms_norm_fused_shifted(size: usize, eps: f64, vb: crate::VarBuilder, shift: f64) -> Result<LayerRmsNorm> {
-    let config = LayerNormConfig {
-        eps,
-        remove_mean: false,
-        affine: false,
-    };
-    let mut ln = layer_norm(size, config, vb)?;
-    ln.weight = (ln.weight + shift)?;
-    Ok(LayerRmsNorm(ln))
-}
-
-pub fn layer_norm_fused<C: Into<LayerNormConfig>>(
-    size: usize,
-    c: C,
-    vb: VarBuilder,
-) -> Result<LayerRmsNorm> {
-    Ok(LayerRmsNorm(layer_norm(size, c, vb)?))
-}
-
 #[cfg(feature = "gcu")]
 pub fn silu(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;

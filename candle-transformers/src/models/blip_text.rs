@@ -1,9 +1,7 @@
 use super::with_tracing::{linear, Embedding, Linear};
 use candle::{Module, Result, Tensor, D};
-use candle_nn::VarBuilder;
+use candle_nn::{layer_norm, LayerNorm, VarBuilder};
 use serde::Deserialize;
-use candle_nn::ops::layer_norm_fused as layer_norm;
-use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {

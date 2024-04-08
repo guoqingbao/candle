@@ -1,9 +1,7 @@
-use super::with_tracing::{linear_no_bias as linear, Linear};
+use super::with_tracing::{linear_no_bias as linear, Linear, RmsNorm};
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, Embedding, Module, VarBuilder, apply_rotary_emb_qkv, kvconcat};
+use candle_nn::{embedding, Embedding, Module, VarBuilder};
 use std::collections::HashMap;
-use candle_nn::ops::rms_norm_fused as rms_norm;
-use candle_nn::ops::LayerRmsNorm as RmsNorm;
 
 pub const MAX_SEQ_LEN: usize = 4096;
 
@@ -207,13 +205,13 @@ impl CausalSelfAttention {
             .transpose(1, 2)?;
 
 
-        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&cache.cos_sin} else {&cache.cos}, &cache.sin, index_pos, 0, true, true)?;
+        let (q, mut k) = candle_nn::apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&cache.cos_sin} else {&cache.cos}, &cache.sin, index_pos, 0, true, true)?;
 
         if cache.use_kv_cache {
             if let Some((cache_k, cache_v)) = &cache.kvs[block_idx] {
                 //inputs for kvconcat must be contiguous tensors (on gcu)
-                k = kvconcat(&cache_k, &k, 2)?;
-                v = kvconcat(&cache_v, &v, 2)?;
+                k = candle_nn::kvconcat(&cache_k, &k, 2)?;
+                v = candle_nn::kvconcat(&cache_v, &v, 2)?;
                 let k_seq_len = k.dims()[1];
                 if k_seq_len > MAX_SEQ_LEN {
                     k = k
@@ -368,8 +366,8 @@ impl Block {
         let span = tracing::span!(tracing::Level::TRACE, "block");
         let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = Mlp::load(vb.pp("mlp"), cfg)?;
-        let rms_1 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = rms_norm(
+        let rms_1 = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let rms_2 = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
@@ -408,7 +406,7 @@ impl Llama {
     pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let wte = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
         let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
-        let ln_f = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
+        let ln_f = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
         let blocks: Vec<_> = (0..cfg.num_hidden_layers)
             .map(|i| Block::load(vb.pp(&format!("model.layers.{i}")), cfg).unwrap())
             .collect();

@@ -105,6 +105,7 @@ impl LayerNorm {
     }
 }
 
+#[cfg(not(feature = "gcu"))]
 impl crate::Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x_dtype = x.dtype();
@@ -126,6 +127,55 @@ impl crate::Module for LayerNorm {
         match &self.bias {
             None => Ok(x),
             Some(bias) => x.broadcast_add(bias),
+        }
+    }
+}
+
+#[cfg(feature = "gcu")]
+impl crate::Module for LayerNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        if x.device().is_gcu() {
+            use candle::gcu_backend::LayerNorm;
+            let op = LayerNorm {
+                eps: self.eps as f32,
+                remove_mean: self.remove_mean,
+                affine: self.bias.is_some(),
+            };
+          
+            if x.is_contiguous() {
+                match &self.bias {
+                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
+                    None => x.apply_op3(&self.weight, &self.weight, op),
+                }
+            } else {
+                let x = x.contiguous()?;
+                match &self.bias {
+                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
+                    None => x.apply_op3(&self.weight, &self.weight, op),
+                }
+            }
+
+        } else {
+            let x_dtype = x.dtype();
+            let internal_dtype = match x_dtype {
+                DType::F16 | DType::BF16 => DType::F32,
+                d => d,
+            };
+            let hidden_size = x.dim(D::Minus1)?;
+            let x = x.to_dtype(internal_dtype)?;
+            let x = if self.remove_mean {
+                let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+                x.broadcast_sub(&mean_x)?
+            } else {
+                x
+            };
+            let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+            let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
+            let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(&self.weight)?;
+            match &self.bias {
+                None => Ok(x),
+                Some(bias) => x.broadcast_add(bias),
+            }
         }
     }
 }

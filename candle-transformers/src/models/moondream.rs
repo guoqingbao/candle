@@ -1,5 +1,5 @@
 use crate::models::mixformer::{Config as PhiConfig, MixFormerSequentialForCausalLM as PhiModel};
-use candle::{IndexOp, Result, Tensor, D};
+use candle::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::{layer_norm, linear_b, Linear, Module, VarBuilder};
 
 pub struct Config {
@@ -291,9 +291,9 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(config: &Config, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
         let text_model = PhiModel::new_v2(&config.phi_config, vb.pp("text_model"))?;
-        let vision_encoder = VisionEncoder::new(&config.vision_config, vb.pp("vision_encoder"))?;
+        let vision_encoder = VisionEncoder::new(&config.vision_config, vbcpu.pp("vision_encoder"))?;
         Ok(Self {
             text_model,
             vision_encoder,

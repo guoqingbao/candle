@@ -1,10 +1,8 @@
 use super::blip_text;
 use super::with_tracing::{conv2d, linear, Conv2d, Linear};
 use candle::{Module, Result, Tensor, D};
-use candle_nn::{Conv2dConfig, VarBuilder};
+use candle_nn::{layer_norm, Conv2dConfig, LayerNorm, VarBuilder};
 use serde::Deserialize;
-use candle_nn::ops::layer_norm_fused as layer_norm;
-use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VisionConfig {
@@ -70,7 +68,7 @@ struct VisionEmbeddings {
 }
 
 impl VisionEmbeddings {
-    fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &VisionConfig, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
         let class_embedding = vb.get((1, 1, cfg.hidden_size), "class_embedding")?;
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
@@ -81,7 +79,7 @@ impl VisionEmbeddings {
             cfg.hidden_size,
             cfg.patch_size,
             conv_cfg,
-            vb.pp("patch_embedding"),
+            vbcpu.pp("patch_embedding"),
         )?;
         let num_patches1 = cfg.image_size / cfg.patch_size;
         let num_patches = num_patches1 * num_patches1;
@@ -100,7 +98,7 @@ impl Module for VisionEmbeddings {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let target_dtype = xs.dtype();
         let b_size = xs.dim(0)?;
-        let patch_embeds = xs.apply(&self.patch_embedding)?.flatten_from(2)?.t()?;
+        let patch_embeds = xs.to_device(&candle::Device::Cpu)?.apply(&self.patch_embedding)?.flatten_from(2)?.t()?.to_device(&xs.device())?;
         let d = self.class_embedding.dim(D::Minus1)?;
         let class_embeds = self
             .class_embedding
@@ -256,8 +254,8 @@ pub struct VisionModel {
 }
 
 impl VisionModel {
-    fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
-        let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
+    fn new(cfg: &VisionConfig, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
+        let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"), vbcpu.pp("embeddings"))?;
         let encoder = Encoder::new(cfg, vb.pp("encoder"))?;
         let post_layernorm =
             layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
@@ -285,8 +283,8 @@ pub struct BlipForConditionalGeneration {
 }
 
 impl BlipForConditionalGeneration {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let vision_model = VisionModel::new(&cfg.vision_config, vb.pp("vision_model"))?;
+    pub fn new(cfg: &Config, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
+        let vision_model = VisionModel::new(&cfg.vision_config, vb.pp("vision_model"), vbcpu.pp("vision_model"))?;
         let text_decoder =
             blip_text::TextLMHeadModel::new(&cfg.text_config, vb.pp("text_decoder"))?;
         Ok(Self {

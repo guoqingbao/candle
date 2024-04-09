@@ -136,7 +136,7 @@ fn get_mask(size: usize, device: &Device) -> Result<Tensor> {
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
     let shape = mask.shape();
     let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
-    let m = mask.where_cond(&on_true.to_dtype(on_false.dtype())?, on_false)?;
+    let m = mask.where_cond(&on_true, on_false)?;
     Ok(m)
 }
 
@@ -161,8 +161,8 @@ impl RotaryEmbedding {
         let freqs = t.matmul(&inv_freq)?;
         let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
         Ok(Self {
-            sin: freqs.sin()?,
-            cos: freqs.cos()?,
+            sin: freqs.sin()?.to_dtype(DType::BF16)?,
+            cos: freqs.cos()?.to_dtype(DType::BF16)?,
             cos_sin
         })
     }
@@ -338,13 +338,13 @@ impl MHA {
         // scores = scores + causal_mask.to(dtype=scores.dtype)
         let attn_weights = match mask {
             None => attn_weights,
-            Some(mask) => masked_fill(
-                &attn_weights,
-                &mask.broadcast_left(b_size * self.n_head)?,
+            Some(mask) => masked_fill( //TODO: fix the alighment issue on GCU
+                &attn_weights.to_device(&Device::Cpu)?,
+                &mask.to_device(&Device::Cpu)?.broadcast_left(b_size * self.n_head)?,
                 f32::NEG_INFINITY,
             )?,
         };
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_device(&qkv.device())?)?;
 
         // output = torch.einsum('bhts,bshd->bthd', attention_drop, v)
         // attn_weights: b*h,t,s, v: b*h,s,d

@@ -247,7 +247,7 @@ fn main() -> Result<()> {
         args.repeat_last_n
     );
 
-    let dtype = DType::BF16;
+    let dtype = DType::F32;
     let start = std::time::Instant::now();
     let api = hf_hub::api::sync::Api::new()?;
     let model_id = match args.model_id {

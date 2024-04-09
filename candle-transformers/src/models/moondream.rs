@@ -277,9 +277,10 @@ impl Module for VisionEncoder {
         let (p1, p2) = (14, 14);
         let h = hp1 / p1;
         let w = wp2 / p2;
-        xs.reshape((b, c, h, p1, h, p2))?
+        //TODO: resolve problem of reshape+permute+reshape on GCU
+        xs.to_device(&Device::Cpu)?.reshape((b, c, h, p1, h, p2))?
             .permute((0, 2, 4, 1, 3, 5))?
-            .reshape((b, h * w, c * p1 * p2))?
+            .reshape((b, h * w, c * p1 * p2))?.to_device(&xs.device())?
             .apply(&self.encoder)?
             .apply(&self.projection)
     }
@@ -291,9 +292,9 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(config: &Config, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
+    pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
         let text_model = PhiModel::new_v2(&config.phi_config, vb.pp("text_model"))?;
-        let vision_encoder = VisionEncoder::new(&config.vision_config, vbcpu.pp("vision_encoder"))?;
+        let vision_encoder = VisionEncoder::new(&config.vision_config, vb.pp("vision_encoder"))?;
         Ok(Self {
             text_model,
             vision_encoder,

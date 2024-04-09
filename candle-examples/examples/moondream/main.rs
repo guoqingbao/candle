@@ -247,6 +247,7 @@ fn main() -> Result<()> {
         args.repeat_last_n
     );
 
+    let dtype = DType::BF16;
     let start = std::time::Instant::now();
     let api = hf_hub::api::sync::Api::new()?;
     let model_id = match args.model_id {
@@ -293,19 +294,17 @@ fn main() -> Result<()> {
         Model::Quantized(model)
     } else {
         let vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file.clone()], DType::BF16, &device)? };
-        let vbcpu =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &Device::Cpu)? };
-        let model = moondream::Model::new(&config, vb, vbcpu)?; //TODO: vision model on gcu
+            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file.clone()], dtype, &device)? };
+        let model = moondream::Model::new(&config, vb)?;
         Model::Moondream(model)
     };
     println!("loaded the model in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
     let image = load_image(args.image)?;
-    let image_embeds = image.unsqueeze(0)?;
+    let image_embeds = image.unsqueeze(0)?.to_dtype(dtype)?.to_device(&device)?;
     let image_embeds = match model {
-        Model::Moondream(ref m) => image_embeds.apply(m.vision_encoder())?.to_device(&device)?.to_dtype(DType::BF16)?,
+        Model::Moondream(ref m) => image_embeds.apply(m.vision_encoder())?,
         Model::Quantized(ref m) => image_embeds.apply(m.vision_encoder())?,
     };
     println!(

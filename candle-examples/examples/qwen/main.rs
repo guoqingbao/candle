@@ -212,6 +212,9 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+
+    #[arg(long)]
+    config: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -286,7 +289,10 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
     let start = std::time::Instant::now();
-    let config_file = repo.get("config.json")?;
+    let config_file = match args.config {
+        Some(file) => std::path::PathBuf::from(file),
+        _ => repo.get("config.json")?
+    };
     let device = candle_examples::device(args.cpu)?;
     let dtype = if device.is_cuda() || device.is_gcu(){
         DType::BF16

@@ -85,9 +85,12 @@ impl TextGeneration {
             Some(token) => token,
             None => anyhow::bail!("cannot find the <|endoftext|> token"),
         };
-        let start_gen = std::time::Instant::now();
+        let mut start_gen = std::time::Instant::now();
         for index in 0..sample_len {
             let context_size = if index > 0 { 1 } else { tokens.len() };
+            if index == 1 {
+                start_gen = std::time::Instant::now()
+            }
             let start_pos = tokens.len().saturating_sub(context_size);
             let ctxt = &tokens[start_pos..];
             let input = Tensor::new(ctxt, &self.device)?;
@@ -127,7 +130,7 @@ impl TextGeneration {
             print!("{rest}");
         }
         std::io::stdout().flush()?;
-        let throughput_per_req = generated_tokens as f64 / dt.as_secs_f64();
+        let throughput_per_req = (generated_tokens - 1) as f64 / dt.as_secs_f64();
         println!(
             "\n{} tokens generated ({} x {generated_tokens} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", generated_tokens * batch_size,
             batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req

@@ -191,7 +191,7 @@ fn main() -> Result<()> {
     println!("starting the inference loop");
     print!("{prompt}");
     let mut logits_processor = LogitsProcessor::new(args.seed, args.temperature, args.top_p);
-    let start_gen = std::time::Instant::now();
+    let mut start_gen = std::time::Instant::now();
     let mut index_pos = 0;
     let mut token_generated = 0;
     for index in 0..args.sample_len {
@@ -200,6 +200,9 @@ fn main() -> Result<()> {
         } else {
             (tokens.len(), 0)
         };
+        if index == 1 {
+            start_gen = std::time::Instant::now()
+        }
         let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
         let input = Tensor::new(ctxt, &device)?;
         let input = if args.batch_size > 1 {
@@ -240,7 +243,7 @@ fn main() -> Result<()> {
         print!("{rest}");
     }
     let dt = start_gen.elapsed();
-    let throughput_per_req = token_generated as f64 / dt.as_secs_f64();
+    let throughput_per_req = (token_generated - 1) as f64 / dt.as_secs_f64();
     println!(
         "\n{} tokens generated ({} x {token_generated} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", token_generated * args.batch_size,
         args.batch_size, throughput_per_req * args.batch_size as f64, args.batch_size, throughput_per_req

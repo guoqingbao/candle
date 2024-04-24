@@ -1552,7 +1552,7 @@ impl BackendStorage for GcuStorage {
         } else {
             //cast op does not support non-contiguous operand 
             let device = self.device().clone();
-            let mut src_l = device.zeros_impl(layout.shape(), self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, layout)?; //convert to contiguous
             self.to_dtype_impl(&src_l, &Layout::contiguous(layout.shape()), dtype)
         }
@@ -1614,7 +1614,7 @@ impl BackendStorage for GcuStorage {
             dst_layout.backup.insert(0, layout.clone());
             dst_layout.transform_ops.insert(0, crate::layout::LayoutTransformOP::TransformTranspose);
 
-            let mut src_l = device.zeros_impl(src_shape, self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(src_shape, self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, &dst_layout)?; //convert to contiguous
             
             let slice = FastReduce(sum_dims, op).map(&src_l.slice, &device, layout)?;
@@ -1637,7 +1637,7 @@ impl BackendStorage for GcuStorage {
             let slice = U::V.map(&self.slice, &device, layout)?;
             Ok(Self { slice, device })
         } else {
-            let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+            let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
             self.copy_strided_src(&mut src, 0, layout)?;
             let slice = U::V.map(&src.slice, &device, &Layout::contiguous(layout.shape()))?;
             Ok(Self { slice, device })
@@ -1653,7 +1653,7 @@ impl BackendStorage for GcuStorage {
         let device = self.device().clone();
         if lhs_l.is_contiguous() {
             if !rhs_l.is_contiguous() {
-                let mut src_r = device.zeros_impl(rhs_l.shape(), self.dtype())?;
+                let mut src_r = unsafe { device.alloc_uninit(rhs_l.shape(), self.dtype())? };
                 rhs.copy_strided_src(&mut src_r, 0, rhs_l)?; //convert to contiguous
                 let slice = B::V.map(&self.slice, lhs_l, &src_r.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
                 Ok(Self { slice, device })
@@ -1662,10 +1662,10 @@ impl BackendStorage for GcuStorage {
                 Ok(Self { slice, device })
             }
         } else { //binary op does not support non-contiguous left operand 
-            let mut src_l = device.zeros_impl(lhs_l.shape(), self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(lhs_l.shape(), self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, lhs_l)?; //convert to contiguous
             if !rhs_l.is_contiguous() {
-                let mut src_r = device.zeros_impl(rhs_l.shape(), self.dtype())?;
+                let mut src_r = unsafe { device.alloc_uninit(rhs_l.shape(), self.dtype())? };
                 rhs.copy_strided_src(&mut src_r, 0, rhs_l)?; //convert to contiguous
                 let slice = B::V.map(&src_l.slice, &Layout::contiguous(lhs_l.shape()), &src_r.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
                 Ok(Self { slice, device })
@@ -1730,7 +1730,7 @@ impl BackendStorage for GcuStorage {
                 let slice = WhereCond(self, layout).map(&t.slice, t_l, &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&t.slice, t_l, &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
@@ -1738,39 +1738,39 @@ impl BackendStorage for GcuStorage {
         } 
 
         if !t_l.is_contiguous() && !f_l.is_contiguous() { 
-            let mut src_t = device.zeros_impl(t_l.shape(), t.dtype())?;
+            let mut src_t = unsafe { device.alloc_uninit(t_l.shape(), t.dtype())? };
             t.copy_strided_src(&mut src_t, 0, t_l)?; //convert to contiguous
-            let mut src_f = device.zeros_impl(f_l.shape(), f.dtype())?;
+            let mut src_f = unsafe { device.alloc_uninit(f_l.shape(), f.dtype())? };
             f.copy_strided_src(&mut src_f, 0, f_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             }
         } else if !t_l.is_contiguous() {
-            let mut src_t = device.zeros_impl(t_l.shape(), t.dtype())?;
+            let mut src_t = unsafe { device.alloc_uninit(t_l.shape(), t.dtype())? };
             t.copy_strided_src(&mut src_t, 0, t_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             }
         } else {
-            let mut src_f = device.zeros_impl(f_l.shape(), f.dtype())?;
+            let mut src_f = unsafe { device.alloc_uninit(f_l.shape(), f.dtype())? };
             f.copy_strided_src(&mut src_f, 0, f_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&t.slice, t_l, &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&t.slice, t_l, &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
@@ -1869,7 +1869,7 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         ScatterAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)
@@ -1884,7 +1884,7 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)

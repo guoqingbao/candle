@@ -69,6 +69,7 @@ metal = ["candle/metal", "candle-nn/metal"]
 #default = ["gcu", "scorpio", "candle/gcu", "candle-nn/gcu", "candle-transformers/gcu",] #for gcu development
 microphone = ["cpal"]
 encodec = ["cpal", "symphonia", "rubato"]
+async = ["candle/async"]
 
 [[example]]
 name = "llama_multiprocess"

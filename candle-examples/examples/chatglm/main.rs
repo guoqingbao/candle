@@ -71,9 +71,12 @@ impl TextGeneration {
         };
         print!("{prompt}");
         std::io::stdout().flush()?;
-        let start_gen = std::time::Instant::now();
+        let mut start_gen = std::time::Instant::now();
         for index in 0..sample_len {
             let context_size = if index > 0 { 1 } else { tokens.len() };
+            if index == 1 {
+                start_gen = std::time::Instant::now()
+            }
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
             let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
             let logits = self.model.forward(&input)?;
@@ -102,7 +105,7 @@ impl TextGeneration {
         let dt = start_gen.elapsed();
         println!(
             "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64(),
+            (generated_tokens - 1) as f64 / dt.as_secs_f64(),
         );
         Ok(())
     }

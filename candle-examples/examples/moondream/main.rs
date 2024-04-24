@@ -85,9 +85,12 @@ impl TextGeneration {
             None => anyhow::bail!("cannot find the EOS token"),
         };
 
-        let start_gen = std::time::Instant::now();
+        let mut start_gen = std::time::Instant::now();
         for index in 0..sample_len {
             let context_size = if index > 0 { 1 } else { tokens.len() };
+            if index == 1 {
+                start_gen = std::time::Instant::now()
+            }
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
             let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
             let logits = if index > 0 {
@@ -135,7 +138,7 @@ impl TextGeneration {
         let dt = start_gen.elapsed();
         println!(
             "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64()
+            (generated_tokens - 1) as f64 / dt.as_secs_f64()
         );
 
         Ok(())
@@ -215,11 +218,12 @@ pub fn load_image<P: AsRef<std::path::Path>>(p: P) -> candle::Result<Tensor> {
     let std = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu)?.reshape((3, 1, 1))?;
     (data.to_dtype(candle::DType::F32)? / 255.)?
         .broadcast_sub(&mean)?
-        .broadcast_div(&std)
+        .broadcast_div(&std) //?.to_dtype(candle::DType::BF16)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+// #[tokio::main]
+// async 
+fn main() -> Result<()> {
     use tracing_chrome::ChromeLayerBuilder;
     use tracing_subscriber::prelude::*;
 
@@ -246,8 +250,9 @@ async fn main() -> anyhow::Result<()> {
         args.repeat_last_n
     );
 
+    let dtype = DType::F32;
     let start = std::time::Instant::now();
-    let api = hf_hub::api::tokio::Api::new()?;
+    let api = hf_hub::api::sync::Api::new()?;
     let model_id = match args.model_id {
         Some(model_id) => model_id.to_string(),
         None => {
@@ -267,15 +272,15 @@ async fn main() -> anyhow::Result<()> {
         Some(m) => m.into(),
         None => {
             if args.quantized {
-                repo.get("model-q4_0.gguf").await?
+                repo.get("model-q4_0.gguf")?
             } else {
-                repo.get("model.safetensors").await?
+                repo.get("model.safetensors")?
             }
         }
     };
     let tokenizer = match args.tokenizer_file {
         Some(m) => m.into(),
-        None => repo.get("tokenizer.json").await?,
+        None => repo.get("tokenizer.json")?,
     };
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer).map_err(E::msg)?;
@@ -292,15 +297,15 @@ async fn main() -> anyhow::Result<()> {
         Model::Quantized(model)
     } else {
         let vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &device)? };
+            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file.clone()], dtype, &device)? };
         let model = moondream::Model::new(&config, vb)?;
         Model::Moondream(model)
     };
     println!("loaded the model in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
-    let image = load_image(args.image)?.to_device(&device)?;
-    let image_embeds = image.unsqueeze(0)?;
+    let image = load_image(args.image)?;
+    let image_embeds = image.unsqueeze(0)?.to_dtype(dtype)?.to_device(&device)?;
     let image_embeds = match model {
         Model::Moondream(ref m) => image_embeds.apply(m.vision_encoder())?,
         Model::Quantized(ref m) => image_embeds.apply(m.vision_encoder())?,

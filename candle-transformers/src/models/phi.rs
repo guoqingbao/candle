@@ -1,4 +1,4 @@
-use crate::models::with_tracing::{linear, Embedding, Linear};
+use crate::models::with_tracing::{layer_norm, linear, Embedding, LayerNorm, Linear};
 /// Phi model.
 /// https://huggingface.co/microsoft/phi-2
 /// There is an alternative implementation of the phi model in mixformers.rs.
@@ -7,8 +7,6 @@ use crate::models::with_tracing::{linear, Embedding, Linear};
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use serde::Deserialize;
-use candle_nn::ops::layer_norm_fused as layer_norm;
-use candle_nn::ops::LayerRmsNorm as LayerNorm;
 
 
 // https://huggingface.co/microsoft/phi-2/blob/main/configuration_phi.py

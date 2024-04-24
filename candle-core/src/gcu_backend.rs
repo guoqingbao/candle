@@ -265,6 +265,9 @@ impl BackendDevice for GcuDevice {
     fn new(ordinal: usize) -> Result<Self>
     {
         Ok(GcuDevice {
+            #[cfg(feature = "async")]
+            device: RawDevice::new(ordinal, false).unwrap(),
+            #[cfg(not(feature = "async"))]
             device: RawDevice::new(ordinal, true).unwrap(),
         })
     }
@@ -1549,7 +1552,7 @@ impl BackendStorage for GcuStorage {
         } else {
             //cast op does not support non-contiguous operand 
             let device = self.device().clone();
-            let mut src_l = device.zeros_impl(layout.shape(), self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, layout)?; //convert to contiguous
             self.to_dtype_impl(&src_l, &Layout::contiguous(layout.shape()), dtype)
         }
@@ -1611,7 +1614,7 @@ impl BackendStorage for GcuStorage {
             dst_layout.backup.insert(0, layout.clone());
             dst_layout.transform_ops.insert(0, crate::layout::LayoutTransformOP::TransformTranspose);
 
-            let mut src_l = device.zeros_impl(src_shape, self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(src_shape, self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, &dst_layout)?; //convert to contiguous
             
             let slice = FastReduce(sum_dims, op).map(&src_l.slice, &device, layout)?;
@@ -1634,7 +1637,7 @@ impl BackendStorage for GcuStorage {
             let slice = U::V.map(&self.slice, &device, layout)?;
             Ok(Self { slice, device })
         } else {
-            let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+            let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
             self.copy_strided_src(&mut src, 0, layout)?;
             let slice = U::V.map(&src.slice, &device, &Layout::contiguous(layout.shape()))?;
             Ok(Self { slice, device })
@@ -1650,7 +1653,7 @@ impl BackendStorage for GcuStorage {
         let device = self.device().clone();
         if lhs_l.is_contiguous() {
             if !rhs_l.is_contiguous() {
-                let mut src_r = device.zeros_impl(rhs_l.shape(), self.dtype())?;
+                let mut src_r = unsafe { device.alloc_uninit(rhs_l.shape(), self.dtype())? };
                 rhs.copy_strided_src(&mut src_r, 0, rhs_l)?; //convert to contiguous
                 let slice = B::V.map(&self.slice, lhs_l, &src_r.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
                 Ok(Self { slice, device })
@@ -1659,10 +1662,10 @@ impl BackendStorage for GcuStorage {
                 Ok(Self { slice, device })
             }
         } else { //binary op does not support non-contiguous left operand 
-            let mut src_l = device.zeros_impl(lhs_l.shape(), self.dtype())?;
+            let mut src_l = unsafe { device.alloc_uninit(lhs_l.shape(), self.dtype())? };
             self.copy_strided_src(&mut src_l, 0, lhs_l)?; //convert to contiguous
             if !rhs_l.is_contiguous() {
-                let mut src_r = device.zeros_impl(rhs_l.shape(), self.dtype())?;
+                let mut src_r = unsafe { device.alloc_uninit(rhs_l.shape(), self.dtype())? };
                 rhs.copy_strided_src(&mut src_r, 0, rhs_l)?; //convert to contiguous
                 let slice = B::V.map(&src_l.slice, &Layout::contiguous(lhs_l.shape()), &src_r.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
                 Ok(Self { slice, device })
@@ -1727,7 +1730,7 @@ impl BackendStorage for GcuStorage {
                 let slice = WhereCond(self, layout).map(&t.slice, t_l, &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&t.slice, t_l, &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
@@ -1735,39 +1738,39 @@ impl BackendStorage for GcuStorage {
         } 
 
         if !t_l.is_contiguous() && !f_l.is_contiguous() { 
-            let mut src_t = device.zeros_impl(t_l.shape(), t.dtype())?;
+            let mut src_t = unsafe { device.alloc_uninit(t_l.shape(), t.dtype())? };
             t.copy_strided_src(&mut src_t, 0, t_l)?; //convert to contiguous
-            let mut src_f = device.zeros_impl(f_l.shape(), f.dtype())?;
+            let mut src_f = unsafe { device.alloc_uninit(f_l.shape(), f.dtype())? };
             f.copy_strided_src(&mut src_f, 0, f_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             }
         } else if !t_l.is_contiguous() {
-            let mut src_t = device.zeros_impl(t_l.shape(), t.dtype())?;
+            let mut src_t = unsafe { device.alloc_uninit(t_l.shape(), t.dtype())? };
             t.copy_strided_src(&mut src_t, 0, t_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &f.slice, f_l, &device)?;
                 return Ok(Self { slice, device });
             }
         } else {
-            let mut src_f = device.zeros_impl(f_l.shape(), f.dtype())?;
+            let mut src_f = unsafe { device.alloc_uninit(f_l.shape(), f.dtype())? };
             f.copy_strided_src(&mut src_f, 0, f_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&t.slice, t_l, &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
             } else {
-                let mut src = device.zeros_impl(layout.shape(), self.dtype())?;
+                let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&t.slice, t_l, &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
                 return Ok(Self { slice, device });
@@ -1866,7 +1869,7 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         ScatterAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)
@@ -1881,7 +1884,7 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)
@@ -2015,53 +2018,53 @@ impl BackendStorage for GcuStorage {
         dst_o: usize,
     ) -> Result<()> {
         panic!("not implemented!");
-        let dev = &self.device;
-        let d1 = d1 as u32;
-        let d2 = d2 as u32;
-        let dst_s = dst_s as u32;
-        let src_s = src_s as u32;
-        let cfg = &dev.launch_cfg;
-        let (src, dst, kname) = match (&self.slice, &mut dst.slice) {
-            (S::U8(s), S::U8(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_u8",
-            ),
-            (S::U32(s), S::U32(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_u32",
-            ),
-            (S::I64(s), S::I64(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_i64",
-            ),
-            (S::BF16(s), S::BF16(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_bf16",
-            ),
-            (S::F16(s), S::F16(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_f16",
-            ),
-            (S::F32(s), S::F32(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_f32",
-            ),
-            (S::F64(s), S::F64(d)) => (
-                s.slice(src_o..).device_ptr(),
-                d.slice(dst_o..).device_ptr(),
-                "copy2d_f64",
-            ),
-            _ => Err(GcuError::InternalError("dtype mismatch in copy2d"))?,
-        };
-        let func = dev.get_or_load_func(kname, ubridge::FILLCOPY)?;
-        let params = (src, dst, d1, d2, src_s, dst_s);
-        unsafe { func.launch(cfg, params) }.w()?;
+        // let dev = &self.device;
+        // let d1 = d1 as u32;
+        // let d2 = d2 as u32;
+        // let dst_s = dst_s as u32;
+        // let src_s = src_s as u32;
+        // let cfg = &dev.launch_cfg;
+        // let (src, dst, kname) = match (&self.slice, &mut dst.slice) {
+        //     (S::U8(s), S::U8(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_u8",
+        //     ),
+        //     (S::U32(s), S::U32(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_u32",
+        //     ),
+        //     (S::I64(s), S::I64(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_i64",
+        //     ),
+        //     (S::BF16(s), S::BF16(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_bf16",
+        //     ),
+        //     (S::F16(s), S::F16(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_f16",
+        //     ),
+        //     (S::F32(s), S::F32(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_f32",
+        //     ),
+        //     (S::F64(s), S::F64(d)) => (
+        //         s.slice(src_o..).device_ptr(),
+        //         d.slice(dst_o..).device_ptr(),
+        //         "copy2d_f64",
+        //     ),
+        //     _ => Err(GcuError::InternalError("dtype mismatch in copy2d"))?,
+        // };
+        // let func = dev.get_or_load_func(kname, ubridge::FILLCOPY)?;
+        // let params = (src, dst, d1, d2, src_s, dst_s);
+        // unsafe { func.launch(cfg, params) }.w()?;
         Ok(())
     }
 
@@ -2269,7 +2272,7 @@ impl crate::CustomOp2 for KVConcat {
         rtensor: &GcuStorage,
         rtensor_l: &Layout,
     ) -> Result<(GcuStorage, Shape)> {
-        assert!(self.concat_dim == 2 || self.concat_dim == 0); //must be in the dim of sequence len 
+        assert!(self.concat_dim == 2 || self.concat_dim == 0 || self.concat_dim == 1); //must be in the dim of sequence len 
         let dev = &ltensor.device;
         let cfg = &dev.launch_cfg;
         let elem_count = ltensor_l.shape().elem_count() + rtensor_l.shape().elem_count();
@@ -2319,7 +2322,9 @@ impl crate::CustomOp2 for KVConcat {
         let mut lshape: Vec<usize> = ltensor_l.shape().dims().to_vec();
         if self.concat_dim == 0 {
             lshape[0] += rtensor_l.shape().dims()[0];      
-        }  else {
+        } else if self.concat_dim == 1 {
+            lshape[1] += rtensor_l.shape().dims()[1];      
+        } else {
             if dims > 3 {
                 lshape[2] += rtensor_l.shape().dims()[2];
             } else {

@@ -1,5 +1,5 @@
 use crate::models::mixformer::{Config as PhiConfig, MixFormerSequentialForCausalLM as PhiModel};
-use candle::{IndexOp, Result, Tensor, D};
+use candle::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::{layer_norm, linear_b, Linear, Module, VarBuilder};
 
 pub struct Config {
@@ -277,9 +277,10 @@ impl Module for VisionEncoder {
         let (p1, p2) = (14, 14);
         let h = hp1 / p1;
         let w = wp2 / p2;
-        xs.reshape((b, c, h, p1, h, p2))?
+        //TODO: resolve problem of reshape+permute+reshape on GCU
+        xs.to_device(&Device::Cpu)?.reshape((b, c, h, p1, h, p2))?
             .permute((0, 2, 4, 1, 3, 5))?
-            .reshape((b, h * w, c * p1 * p2))?
+            .reshape((b, h * w, c * p1 * p2))?.to_device(&xs.device())?
             .apply(&self.encoder)?
             .apply(&self.projection)
     }

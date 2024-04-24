@@ -126,28 +126,22 @@ impl Module for Embedding {
     }
 }
 
-fn get_mask(size: usize, device: &Device) -> Result<Tensor> {
+fn get_mask(size: usize, dtype: DType, device: &Device) -> Result<Tensor> {
     let mask: Vec<_> = (0..size)
-        .flat_map(|i| (0..size).map(move |j| u8::from(j > i)))
+        .flat_map(|i| (0..size).map(move |j| if j > i { f32::NEG_INFINITY } else { 0. }))
         .collect();
-    Tensor::from_slice(&mask, (size, size), device)
-}
-
-fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
-    let shape = mask.shape();
-    let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
-    let m = mask.where_cond(&on_true, on_false)?;
-    Ok(m)
+    Tensor::from_slice(&mask, (size, size), device)?.to_dtype(dtype)
 }
 
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    cos_sin: Tensor,
 }
 
 impl RotaryEmbedding {
-    fn new(dim: usize, max_seq_len: usize, dev: &Device) -> Result<Self> {
+    fn new(dim: usize, max_seq_len: usize, dtype: DType, dev: &Device) -> Result<Self> {
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
             .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
@@ -158,9 +152,11 @@ impl RotaryEmbedding {
             .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
         Ok(Self {
-            sin: freqs.sin()?,
-            cos: freqs.cos()?,
+            sin: freqs.sin()?.to_dtype(dtype)?,
+            cos: freqs.cos()?.to_dtype(dtype)?,
+            cos_sin,
         })
     }
 
@@ -263,7 +259,6 @@ struct MHA {
     rotary_emb: RotaryEmbedding,
     kv_cache: Option<(Tensor, Tensor)>,
     head_dim: usize,
-    n_head: usize,
     softmax_scale: f64,
     span: tracing::Span,
 }
@@ -274,18 +269,33 @@ impl MHA {
         let op_size = cfg.n_embd;
         let wqkv = linear(cfg.n_embd, 3 * op_size, vb.pp("Wqkv"))?;
         let out_proj = linear(op_size, cfg.n_embd, vb.pp("out_proj"))?;
-        let rotary_emb = RotaryEmbedding::new(cfg.rotary_dim, MAX_SEQ_LEN, vb.device())?;
+        let rotary_emb =
+            RotaryEmbedding::new(cfg.rotary_dim, MAX_SEQ_LEN, vb.dtype(), vb.device())?;
         let softmax_scale = 1f64 / (head_dim as f64).sqrt();
         Ok(Self {
             wqkv,
             out_proj,
             head_dim,
-            n_head: cfg.n_head,
             kv_cache: None,
             rotary_emb,
             softmax_scale,
             span: tracing::span!(tracing::Level::TRACE, "mha"),
         })
+    }
+    fn rotary_emb_qkv(&self, qkv: &Tensor, seqlen_offset: usize) -> Result<(Tensor, Tensor, Tensor)> {
+        if qkv.device().is_gcu() {
+            let q = qkv.i((.., .., 0))?;
+            let k = qkv.i((.., .., 1))?;
+            let v = qkv.i((.., .., 2))?;
+            let (_, rotary_dim) = self.rotary_emb.cos.dims2()?;
+            let rotary_dim = rotary_dim * 2;
+            #[cfg(feature = "gcu")]
+            let (q, k) = candle_nn::apply_rotary_emb_qkv(&q, &k, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, rotary_dim, false, true)?;
+            Ok((q, k, v))
+            
+        } else {
+            self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)
+        }
     }
 
     fn forward(&mut self, xs: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
@@ -300,12 +310,12 @@ impl MHA {
             Some((prev_k, _)) => prev_k.dim(1)?,
         };
         // In the python implementation, a single tensor is returned with the third axis of size 3.
-        let (q, k, v) = self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)?;
+        let (q, k, v) = self.rotary_emb_qkv(&qkv, seqlen_offset)?;
         let (k, v) = match &self.kv_cache {
             None => (k, v),
             Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &k], 1)?;
-                let v = Tensor::cat(&[prev_v, &v], 1)?;
+                let k = candle_nn::kvconcat(&prev_k, &k, 1)?;
+                let v = candle_nn::kvconcat(&prev_v, &v, 1)?;
                 (k, v)
             }
         };
@@ -320,13 +330,13 @@ impl MHA {
         // scores = scores + causal_mask.to(dtype=scores.dtype)
         let attn_weights = match mask {
             None => attn_weights,
-            Some(mask) => masked_fill(
-                &attn_weights,
-                &mask.broadcast_left(b_size * self.n_head)?,
-                f32::NEG_INFINITY,
-            )?,
+            Some(mask) => {
+                attn_weights.broadcast_add(mask)?
+            }
         };
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = {
+            candle_nn::ops::softmax_last_dim(&attn_weights)?
+        };
 
         // output = torch.einsum('bhts,bshd->bthd', attention_drop, v)
         // attn_weights: b*h,t,s, v: b*h,s,d
@@ -430,7 +440,7 @@ impl MixFormerSequentialForCausalLM {
         let mask = if seq_len <= 1 {
             None
         } else {
-            Some(get_mask(seq_len, xs.device())?)
+            Some(get_mask(seq_len, xs.dtype(), xs.device())?)
         };
         for block in self.blocks.iter_mut() {
             xs = block.forward(&xs, mask.as_ref())?
@@ -451,7 +461,7 @@ impl MixFormerSequentialForCausalLM {
         // https://github.com/vikhyat/moondream/blob/a9d788a20d1543fb1479edc54106e88cff7759d3/moondream/moondream.py#L43-L56
         let mut xs = Tensor::cat(&[bos_token, img_embeds.clone(), xs], 1)?;
         let (_b_size, seq_len, _embds) = xs.dims3()?;
-        let mask = Some(get_mask(seq_len, xs.device())?);
+        let mask = Some(get_mask(seq_len, xs.dtype(), xs.device())?);
         for block in self.blocks.iter_mut() {
             xs = block.forward(&xs, mask.as_ref())?
         }

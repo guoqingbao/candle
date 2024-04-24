@@ -53,13 +53,16 @@ impl TextGeneration {
             .to_vec();
 
         let mut new_tokens = vec![];
-        let start_gen = std::time::Instant::now();
+        let mut start_gen = std::time::Instant::now();
         for index in 0..sample_len {
             let (context_size, past_len) = if self.model.config().use_cache && index > 0 {
                 (1, tokens.len().saturating_sub(1))
             } else {
                 (tokens.len(), 0)
             };
+            if index == 1 {
+                start_gen = std::time::Instant::now()
+            }
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
             
             let input = Tensor::new(ctxt, &self.device)?;
@@ -81,7 +84,7 @@ impl TextGeneration {
             std::io::stdout().flush()?;
         }
         let dt = start_gen.elapsed();
-        let throughput_per_req = sample_len as f64 / dt.as_secs_f64();
+        let throughput_per_req = (sample_len - 1) as f64 / dt.as_secs_f64();
         println!(
             "\n{} tokens generated ({} x {sample_len} tokens), throughput: {:.2} token/s ({} x {:.2} token/s)", sample_len * batch_size,
             batch_size, throughput_per_req * batch_size as f64, batch_size, throughput_per_req

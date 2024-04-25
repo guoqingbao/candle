@@ -72,18 +72,13 @@ impl TextGeneration {
         let mut tokens = tokens.get_ids().to_vec();
         let mut generated_tokens = 0usize;
 
-        // Moondream tokenizer bos_token is "<|endoftext|>"
+        // Moondream tokenizer bos_token and eos_token is "<|endoftext|>"
         // https://huggingface.co/vikhyatk/moondream2/blob/main/special_tokens_map.json
-        let bos_token = match self.tokenizer.get_vocab(true).get("<|endoftext|>") {
+        let special_token = match self.tokenizer.get_vocab(true).get("<|endoftext|>") {
             Some(token) => *token,
-            None => anyhow::bail!("cannot find the BOS token"),
+            None => anyhow::bail!("cannot find the special token"),
         };
-        // eos_token is "END"
-        // https://github.com/vikhyat/moondream/blob/a9d788a20d1543fb1479edc54106e88cff7759d3/moondream/moondream.py#L100
-        let eos_token = match self.tokenizer.get_vocab(true).get("END") {
-            Some(token) => *token,
-            None => anyhow::bail!("cannot find the EOS token"),
-        };
+        let (bos_token, eos_token) = (special_token, special_token);
 
         let mut start_gen = std::time::Instant::now();
         for index in 0..sample_len {
@@ -127,7 +122,7 @@ impl TextGeneration {
             let next_token = self.logits_processor.sample(&logits)?;
             tokens.push(next_token);
             generated_tokens += 1;
-            if next_token == eos_token {
+            if next_token == eos_token || tokens.ends_with(&[27, 10619, 29] /* <END> */) {
                 break;
             }
             let token = self.tokenizer.decode(&[next_token], true).map_err(E::msg)?;
@@ -137,7 +132,8 @@ impl TextGeneration {
 
         let dt = start_gen.elapsed();
         println!(
-            "\n{generated_tokens} tokens generated ({:.2} token/s)",
+            "\ngenerated in {} seconds\n{generated_tokens} tokens generated ({:.2} token/s)",
+            dt.as_secs_f64(),
             (generated_tokens - 1) as f64 / dt.as_secs_f64()
         );
 
@@ -197,6 +193,10 @@ struct Args {
     #[arg(long)]
     quantized: bool,
 
+    /// Use f16 precision for all the computations rather than f32.
+    #[arg(long)]
+    f16: bool,
+
     #[arg(long)]
     model_file: Option<String>,
 
@@ -218,12 +218,11 @@ pub fn load_image<P: AsRef<std::path::Path>>(p: P) -> candle::Result<Tensor> {
     let std = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu)?.reshape((3, 1, 1))?;
     (data.to_dtype(candle::DType::F32)? / 255.)?
         .broadcast_sub(&mean)?
-        .broadcast_div(&std) //?.to_dtype(candle::DType::BF16)
+        .broadcast_div(&std)
 }
 
-// #[tokio::main]
-// async 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     use tracing_chrome::ChromeLayerBuilder;
     use tracing_subscriber::prelude::*;
 
@@ -250,9 +249,8 @@ fn main() -> Result<()> {
         args.repeat_last_n
     );
 
-    let dtype = DType::F32;
     let start = std::time::Instant::now();
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::tokio::Api::new()?;
     let model_id = match args.model_id {
         Some(model_id) => model_id.to_string(),
         None => {
@@ -272,15 +270,15 @@ fn main() -> Result<()> {
         Some(m) => m.into(),
         None => {
             if args.quantized {
-                repo.get("model-q4_0.gguf")?
+                repo.get("model-q4_0.gguf").await?
             } else {
-                repo.get("model.safetensors")?
+                repo.get("model.safetensors").await?
             }
         }
     };
     let tokenizer = match args.tokenizer_file {
         Some(m) => m.into(),
-        None => repo.get("tokenizer.json")?,
+        None => repo.get("tokenizer.json").await?,
     };
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer).map_err(E::msg)?;
@@ -288,6 +286,18 @@ fn main() -> Result<()> {
     let start = std::time::Instant::now();
     let device = candle_examples::device(args.cpu)?;
     let config = moondream::Config::v2();
+    let dtype = if args.quantized {
+        if args.f16 {
+            anyhow::bail!("Quantized model does not support f16");
+        }
+        DType::F32
+    } else if device.is_cuda() || args.f16 {
+        DType::F16
+    } else if device.is_gcu() {
+        DType::BF16
+    } else {
+        DType::F32
+    };
     let model = if args.quantized {
         let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
             &model_file,
@@ -296,16 +306,17 @@ fn main() -> Result<()> {
         let model = quantized_moondream::Model::new(&config, vb)?;
         Model::Quantized(model)
     } else {
-        let vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file.clone()], dtype, &device)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], dtype, &device)? };
         let model = moondream::Model::new(&config, vb)?;
         Model::Moondream(model)
     };
     println!("loaded the model in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
-    let image = load_image(args.image)?;
-    let image_embeds = image.unsqueeze(0)?.to_dtype(dtype)?.to_device(&device)?;
+    let image = load_image(args.image)?
+        .to_device(&device)?
+        .to_dtype(dtype)?;
+    let image_embeds = image.unsqueeze(0)?;
     let image_embeds = match model {
         Model::Moondream(ref m) => image_embeds.apply(m.vision_encoder())?,
         Model::Quantized(ref m) => image_embeds.apply(m.vision_encoder())?,

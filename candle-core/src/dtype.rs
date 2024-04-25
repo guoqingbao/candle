@@ -2,6 +2,7 @@
 #![allow(clippy::redundant_closure_call)]
 use crate::backend::BackendStorage;
 use crate::{CpuStorage, Error, Result};
+use crate::cpu_backend::CpuStorageRef;
 
 /// The different types of elements allowed in tensors.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -100,12 +101,14 @@ pub trait WithDType:
     + 'static
     + Send
     + Sync
+    + std::any::Any
     + crate::cpu::kernels::VecOps
 {
     const DTYPE: DType;
 
     fn from_f64(v: f64) -> Self;
     fn to_f64(self) -> f64;
+    fn cpu_storage_ref(data: &[Self]) -> CpuStorageRef<'_>;
     fn to_cpu_storage_owned(data: Vec<Self>) -> CpuStorage;
 
     fn to_cpu_storage(data: &[Self]) -> CpuStorage {
@@ -127,6 +130,10 @@ macro_rules! with_dtype {
 
             fn to_f64(self) -> f64 {
                 $to_f64(self)
+            }
+
+            fn cpu_storage_ref(data: &[Self]) -> CpuStorageRef<'_> {
+                CpuStorageRef::$dtype(data)
             }
 
             fn to_cpu_storage_owned(data: Vec<Self>) -> CpuStorage {

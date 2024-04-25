@@ -47,7 +47,7 @@ impl VisionConfig {
             embed_dim: 1152,
             num_blocks: 27,
             num_heads: 16,
-            act: candle_nn::Activation::Gelu,
+            act: candle_nn::Activation::GeluPytorchTanh,
         }
     }
 }
@@ -286,6 +286,7 @@ impl Module for VisionEncoder {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Model {
     pub text_model: PhiModel,
     pub vision_encoder: VisionEncoder,

@@ -29,6 +29,7 @@
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType};
+use crate::cpu_backend::CpuStorageRef;
 use half::{bf16, f16};
 use ubridge::prelude::DevicePtr;
 use uhal::memory::DevicePointerTrait;
@@ -433,6 +434,44 @@ impl BackendDevice for GcuDevice {
         })
     }
 
+    
+    fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> Result<Self::Storage> {
+        let slice = match T::cpu_storage_ref(s) {
+            CpuStorageRef::U8(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::U8(data)
+            }
+            CpuStorageRef::U32(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::U32(data)
+            }
+            CpuStorageRef::I64(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::I64(data)
+            }
+            CpuStorageRef::BF16(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::BF16(data)
+            }
+            CpuStorageRef::F16(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::F16(data)
+            }
+            CpuStorageRef::F32(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::F32(data)
+            }
+            CpuStorageRef::F64(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::F64(data)
+            }
+        };
+        Ok(GcuStorage {
+            slice,
+            device: self.clone(),
+        })
+    }
+
     fn storage_from_cpu_storage(&self, storage: &CpuStorage) -> Result<GcuStorage> {
         let slice = match storage {
             CpuStorage::U8(storage) => {
@@ -505,6 +544,11 @@ impl BackendDevice for GcuDevice {
             slice,
             device: self.clone(),
         })
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        self.device.synchronize().map_err(crate::Error::wrap)?;
+        Ok(())
     }
 
 }

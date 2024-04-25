@@ -153,3 +153,23 @@ pub fn hub_load_safetensors(
         .collect::<Result<Vec<_>>>()?;
     Ok(safetensors_files)
 }
+
+pub fn hub_load_local_safetensors(path: &String,
+    json_file: &str,
+) -> Result<Vec<std::path::PathBuf>> {
+    let jsfile = std::fs::File::open(path.to_owned() + json_file)?;
+    let json: serde_json::Value =
+        serde_json::from_reader(&jsfile).map_err(candle::Error::wrap)?;
+    let weight_map = match json.get("weight_map") {
+        None => candle::bail!("no weight map in {json_file:?}"),
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => candle::bail!("weight map in {json_file:?} is not a map"),
+    };
+    let mut safetensors_files = Vec::<std::path::PathBuf>::new();
+    for value in weight_map.values() {
+        if let Some(file) = value.as_str() {
+            safetensors_files.insert(0, (path.to_owned() + file).into());
+        }
+    }
+    Ok(safetensors_files)
+}

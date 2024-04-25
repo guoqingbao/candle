@@ -31,6 +31,8 @@ const DEFAULT_PROMPT: &str = "My favorite theorem is ";
 enum Which {
     V1,
     V2,
+    V3,
+    V3Instruct,
     #[value(name = "solar-10.7b")]
     Solar10_7B,
     #[value(name = "tiny-llama-1.1b-chat")]
@@ -127,11 +129,13 @@ fn main() -> Result<()> {
         Some(dtype) => bail!("Unsupported dtype {dtype}"),
         None => DType::BF16,
     };
-    let (llama, tokenizer_filename, mut cache) = {
+    let (llama, tokenizer_filename, mut cache, config) = {
         let api = Api::new()?;
         let model_id = args.model_id.unwrap_or_else(|| match args.which {
             Which::V1 => "Narsil/amall-7b".to_string(),
             Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
+            Which::V3 => "meta-llama/Meta-Llama-3-8B".to_string(),
+            Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct".to_string(),
             Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0".to_string(),
             Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
         });
@@ -150,25 +154,28 @@ fn main() -> Result<()> {
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
         let config = config.into_config(args.use_flash_attn);
 
-        let filenames = match &args.local_weights {
-            Some(path) => {
-                let mut filenames = vec![];
-                for rfilename in [
-                    "model-00001-of-00002.safetensors",
-                    "model-00002-of-00002.safetensors",
-                ] {
-                    filenames.push((path.to_owned() + rfilename).into());
-                }
-                filenames
-            }
-            _ => {
-                let filenames = match args.which {
-                    Which::V1 | Which::V2 | Which::Solar10_7B => {
+        let filenames = match args.which {
+            Which::V1 | Which::V2 | Which::V3 | Which::V3Instruct | Which::Solar10_7B => {
+                match &args.local_weights {
+                    Some(path) => {
+                        candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+                    }
+                    _ => {
                         candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
                     }
-                    Which::TinyLlama1_1BChat => vec![api.get("model.safetensors")?],
-                };
-                filenames
+                }
+            }
+            Which::TinyLlama1_1BChat => {
+                match &args.local_weights {
+                    Some(path) => {
+                        let mut filenames = vec![];
+                        filenames.push((path.to_owned() + "model.safetensors").into());
+                        filenames
+                    }
+                    _ => { 
+                        vec![api.get("model.safetensors")?]
+                    }
+                }
             }
         };
        
@@ -176,10 +183,12 @@ fn main() -> Result<()> {
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
-        (Llama::load(vb, &config)?, tokenizer_filename, cache)
+        (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
     };
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
-    let eos_token_id = tokenizer.token_to_id(EOS_TOKEN);
+    let eos_token_id = config
+        .eos_token_id
+        .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
     let prompt = args.prompt.as_ref().map_or(DEFAULT_PROMPT, |p| p.as_str());
     let mut tokens = tokenizer
         .encode(prompt, true)
@@ -211,7 +220,7 @@ fn main() -> Result<()> {
         } else {
             input.unsqueeze(0)?
         };
-        let logits = llama.forward(&input, index_pos, &mut cache)?;
+        let logits = llama.forward(&input, context_index, &mut cache)?;
         let logits = if args.batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
 
         let logits = logits.squeeze(0)?;

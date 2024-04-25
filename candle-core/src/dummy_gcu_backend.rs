@@ -214,6 +214,10 @@ impl crate::backend::BackendDevice for GcuDevice {
         Err(Error::NotCompiledWithGcuSupport)
     }
 
+    fn storage_from_slice<T: crate::WithDType>(&self, _: &[T]) -> Result<Self::Storage> {
+        Err(Error::NotCompiledWithGcuSupport)
+    }
+
     fn storage_from_cpu_storage(&self, _: &CpuStorage) -> Result<Self::Storage> {
         Err(Error::NotCompiledWithGcuSupport)
     }
@@ -228,5 +232,9 @@ impl crate::backend::BackendDevice for GcuDevice {
 
     fn rand_normal(&self, _: &Shape, _: DType, _: f64, _: f64) -> Result<Self::Storage> {
         Err(Error::NotCompiledWithGcuSupport)
+    }
+    
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
     }
 }

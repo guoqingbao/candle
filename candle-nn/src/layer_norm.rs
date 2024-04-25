@@ -28,7 +28,7 @@
 //! ```
 //!
 //! [`Layer Normalization`]: https://arxiv.org/abs/1607.06450
-use candle::{DType, Result, Tensor, D};
+use candle::{DType, Module, Result, Tensor, D};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerNormConfig {
@@ -106,7 +106,7 @@ impl LayerNorm {
 }
 
 #[cfg(not(feature = "gcu"))]
-impl crate::Module for LayerNorm {
+impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x_dtype = x.dtype();
         let internal_dtype = match x_dtype {
@@ -132,7 +132,7 @@ impl crate::Module for LayerNorm {
 }
 
 #[cfg(feature = "gcu")]
-impl crate::Module for LayerNorm {
+impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         if x.device().is_gcu() {
             use candle::gcu_backend::LayerNorm;
@@ -212,11 +212,20 @@ impl RmsNorm {
     pub fn into_inner(self) -> LayerNorm {
         self.0
     }
+
+    /// Faster variant of the forward kernel, this can only be used on contiguous tensors though.
+    pub fn forward_diff(&self, xs: &Tensor) -> Result<Tensor> {
+        self.0.forward(xs)
+    }
 }
 
-impl crate::Module for RmsNorm {
+impl Module for RmsNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.0.forward(xs)
+        if !xs.device().is_gcu() && xs.is_contiguous() {
+            crate::ops::rms_norm(xs, &self.0.weight, self.0.eps as f32)
+        } else {
+            self.0.forward(xs)
+        }
     }
 }
 

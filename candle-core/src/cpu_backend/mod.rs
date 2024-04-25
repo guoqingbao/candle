@@ -27,6 +27,17 @@ pub enum CpuStorage {
 }
 
 #[derive(Debug, Clone)]
+pub enum CpuStorageRef<'a> {
+    U8(&'a [u8]),
+    U32(&'a [u32]),
+    I64(&'a [i64]),
+    BF16(&'a [bf16]),
+    F16(&'a [f16]),
+    F32(&'a [f32]),
+    F64(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct CpuDevice;
 
 struct Cmp(CmpOp);
@@ -1204,6 +1215,30 @@ impl MatMul {
         }))
         .bt()
     }
+
+    fn ab_skip(&self, lhs_l: &Layout, rhs_l: &Layout) -> Result<(usize, usize)> {
+        let lhs_stride = lhs_l.stride();
+        let rhs_stride = rhs_l.stride();
+        let rank = lhs_stride.len();
+        let (_b, m, n, k) = self.0;
+        let a_skip: usize = match lhs_stride[..rank - 2] {
+            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
+            [_, stride] if lhs_l.dims()[0] == 1 => stride,
+            [stride, _] if lhs_l.dims()[1] == 1 => stride,
+            [stride] => stride,
+            [] => m * k,
+            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
+        };
+        let b_skip: usize = match rhs_stride[..rank - 2] {
+            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
+            [_, stride] if rhs_l.dims()[0] == 1 => stride,
+            [stride, _] if rhs_l.dims()[1] == 1 => stride,
+            [stride] => stride,
+            [] => n * k,
+            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
+        };
+        Ok((a_skip, b_skip))
+    }
 }
 
 impl Map2 for MatMul {
@@ -1237,18 +1272,7 @@ impl Map2 for MatMul {
         let rhs_cs = rhs_stride[rank - 1];
         let rhs_rs = rhs_stride[rank - 2];
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let dst_shape: Shape = (m, n).into();
@@ -1308,20 +1332,8 @@ impl Map2 for MatMul {
 
         let lhs_stride = lhs_l.stride();
         let rhs_stride = rhs_l.stride();
-        let rank = lhs_stride.len();
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
@@ -1329,7 +1341,7 @@ impl Map2 for MatMul {
         let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
         let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
 
-        let (lda, transa) = if rhs_m1 == 1 && rhs_m2 == n {
+        let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
             (n as i32, b'N')
         } else if rhs_m1 == k && rhs_m2 == 1 {
             (k as i32, b'T')
@@ -1337,7 +1349,7 @@ impl Map2 for MatMul {
             Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?
         };
         // The b tensor has dims batching, m, k (lhs)
-        let (ldb, transb) = if lhs_m1 == 1 && lhs_m2 == k {
+        let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
             (k as i32, b'N')
         } else if lhs_m1 == m && lhs_m2 == 1 {
             (m as i32, b'T')
@@ -1411,20 +1423,8 @@ impl Map2 for MatMul {
 
         let lhs_stride = lhs_l.stride();
         let rhs_stride = rhs_l.stride();
-        let rank = lhs_stride.len();
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
@@ -1432,7 +1432,7 @@ impl Map2 for MatMul {
         let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
         let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
 
-        let (lda, transa) = if rhs_m1 == 1 && rhs_m2 == n {
+        let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
             (n as i32, b'N')
         } else if rhs_m1 == k && rhs_m2 == 1 {
             (k as i32, b'T')
@@ -1440,7 +1440,7 @@ impl Map2 for MatMul {
             Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?
         };
         // The b tensor has dims batching, m, k (lhs)
-        let (ldb, transb) = if lhs_m1 == 1 && lhs_m2 == k {
+        let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
             (k as i32, b'N')
         } else if lhs_m1 == m && lhs_m2 == 1 {
             (m as i32, b'T')
@@ -2456,6 +2456,10 @@ impl BackendDevice for CpuDevice {
         true
     }
 
+    fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> Result<Self::Storage> {
+        Ok(T::to_cpu_storage(s))
+    }
+
     fn storage_from_cpu_storage(&self, s: &CpuStorage) -> Result<Self::Storage> {
         Ok(s.clone())
     }
@@ -2638,6 +2642,10 @@ impl BackendDevice for CpuDevice {
             DType::F64 => CpuStorage::F64(vec![0f64; elem_count]),
         };
         Ok(storage)
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
     }
 }
 

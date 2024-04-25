@@ -51,10 +51,7 @@ impl Device {
                 let storage = cuda::QCudaStorage::zeros(cuda, elem_count, dtype)?;
                 Ok(QStorage::Cuda(storage))
             }
-            // #[cfg(not(feature = "gcu"))]
-            Device::Gcu(_gcu) => {
-                crate::bail!("Gcu ggml quantization not supported");
-            }
+            Device::Gcu(_) => todo!()
         }
     }
 }

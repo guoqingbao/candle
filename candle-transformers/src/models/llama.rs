@@ -16,6 +16,14 @@ pub struct LlamaConfig {
     pub rms_norm_eps: f64,
     #[serde(default = "default_rope")]
     pub rope_theta: f32,
+    pub bos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
+}
+
+impl LlamaConfig {
+    pub fn num_key_value_heads(&self) -> usize {
+        self.num_key_value_heads.unwrap_or(self.num_attention_heads)
+    }
 }
 
 fn default_rope() -> f32 {
@@ -30,10 +38,12 @@ impl LlamaConfig {
             vocab_size: self.vocab_size,
             num_hidden_layers: self.num_hidden_layers,
             num_attention_heads: self.num_attention_heads,
-            num_key_value_heads: self.num_key_value_heads.unwrap_or(self.num_attention_heads),
+            num_key_value_heads: self.num_key_value_heads(),
             rms_norm_eps: self.rms_norm_eps,
             rope_theta: self.rope_theta,
             use_flash_attn,
+            bos_token_id: self.bos_token_id,
+            eos_token_id: self.eos_token_id,
         }
     }
 }
@@ -49,6 +59,8 @@ pub struct Config {
     pub use_flash_attn: bool,
     pub rms_norm_eps: f64,
     pub rope_theta: f32,
+    pub bos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
 }
 
 impl Config {
@@ -63,6 +75,8 @@ impl Config {
             use_flash_attn,
             rms_norm_eps: 1e-6,
             rope_theta: 10_000.0,
+            bos_token_id: None,
+            eos_token_id: None,
         }
     }
 
@@ -77,6 +91,8 @@ impl Config {
             use_flash_attn,
             rms_norm_eps: 1e-5,
             rope_theta: 10_000.0,
+            bos_token_id: None,
+            eos_token_id: None,
         }
     }
 }
@@ -260,17 +276,7 @@ impl CausalSelfAttention {
     }
 
     fn repeat_kv(&self, x: Tensor) -> Result<Tensor> {
-        let n_rep = self.num_attention_heads / self.num_key_value_heads;
-        if n_rep == 1 {
-            Ok(x)
-        } else {
-            let (b_sz, n_kv_head, seq_len, head_dim) = x.dims4()?;
-            let x = x
-                .unsqueeze(2)?
-                .expand((b_sz, n_kv_head, n_rep, seq_len, head_dim))?
-                .reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))?;
-            Ok(x)
-        }
+        crate::utils::repeat_kv(x, self.num_attention_heads / self.num_key_value_heads)
     }
 
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {

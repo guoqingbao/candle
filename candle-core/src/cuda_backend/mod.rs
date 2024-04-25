@@ -10,8 +10,10 @@ use cudarc::driver::{
 use half::{bf16, f16};
 
 mod device;
-pub use device::{CudaDevice, DeviceId};
+mod error;
 mod utils;
+pub use device::{CudaDevice, DeviceId};
+pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, S};
 
 #[cfg(feature = "cudnn")]
@@ -39,67 +41,6 @@ impl SlicePtrOrNull<usize> {
             SlicePtrOrNull::Ptr(dev.htod_copy([l.dims(), l.stride()].concat()).w()?)
         };
         Ok(ds)
-    }
-}
-
-/// cudarc related errors
-#[derive(thiserror::Error, Debug)]
-pub enum CudaError {
-    #[error(transparent)]
-    Cuda(#[from] cudarc::driver::DriverError),
-
-    #[error(transparent)]
-    Compiler(#[from] cudarc::nvrtc::CompileError),
-
-    #[error(transparent)]
-    Cublas(#[from] cudarc::cublas::result::CublasError),
-
-    #[error(transparent)]
-    Curand(#[from] cudarc::curand::result::CurandError),
-
-    #[error("missing kernel '{module_name}'")]
-    MissingKernel { module_name: String },
-
-    #[error("unsupported dtype {dtype:?} for {op}")]
-    UnsupportedDtype { dtype: DType, op: &'static str },
-
-    #[error("internal error '{0}'")]
-    InternalError(&'static str),
-
-    #[error("matmul is only supported for contiguous tensors lstride: {lhs_stride:?} rstride: {rhs_stride:?} mnk: {mnk:?}")]
-    MatMulNonContiguous {
-        lhs_stride: Layout,
-        rhs_stride: Layout,
-        mnk: (usize, usize, usize),
-    },
-
-    #[error("{msg}, expected: {expected:?}, got: {got:?}")]
-    UnexpectedDType {
-        msg: &'static str,
-        expected: DType,
-        got: DType,
-    },
-
-    #[error("{cuda} when loading {module_name}")]
-    Load {
-        cuda: cudarc::driver::DriverError,
-        module_name: String,
-    },
-}
-
-impl From<CudaError> for crate::Error {
-    fn from(val: CudaError) -> Self {
-        crate::Error::Cuda(Box::new(val)).bt()
-    }
-}
-
-pub trait WrapErr<O> {
-    fn w(self) -> std::result::Result<O, crate::Error>;
-}
-
-impl<O, E: Into<CudaError>> WrapErr<O> for std::result::Result<O, E> {
-    fn w(self) -> std::result::Result<O, crate::Error> {
-        self.map_err(|e| crate::Error::Cuda(Box::new(e.into())))
     }
 }
 
@@ -1174,6 +1115,8 @@ fn gemm_config<T>(
 
     let stride_b: usize = match lhs_stride[..lhs_stride.len() - 2] {
         [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
+        [_, stride] if lhs_l.dims()[0] == 1 => stride,
+        [stride, _] if lhs_l.dims()[1] == 1 => stride,
         [stride] => stride,
         [] => m * k,
         _ => Err(CudaError::MatMulNonContiguous {
@@ -1184,6 +1127,8 @@ fn gemm_config<T>(
     };
     let stride_a: usize = match rhs_stride[..rhs_stride.len() - 2] {
         [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
+        [_, stride] if rhs_l.dims()[0] == 1 => stride,
+        [stride, _] if rhs_l.dims()[1] == 1 => stride,
         [stride] => stride,
         [] => n * k,
         _ => Err(CudaError::MatMulNonContiguous {
@@ -1757,6 +1702,11 @@ impl BackendStorage for CudaStorage {
         let dev = &self.device;
         let d1 = d1 as u32;
         let d2 = d2 as u32;
+        // Nothing to copy so we exit early to avoid launching a kernel and some potential invalid
+        // argument with a null pointer.
+        if d1 == 0 || d2 == 0 {
+            return Ok(());
+        }
         let dst_s = dst_s as u32;
         let src_s = src_s as u32;
         let (src, dst, kname) = match (&self.slice, &mut dst.slice) {

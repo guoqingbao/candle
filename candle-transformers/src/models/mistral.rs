@@ -103,7 +103,7 @@ impl RotaryEmbedding {
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?.to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous float32 tensor;
         let freqs = freqs.to_dtype(dtype)?;
         let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
 

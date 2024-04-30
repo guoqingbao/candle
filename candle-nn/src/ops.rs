@@ -307,191 +307,6 @@ pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
         xs.apply_op1_no_bwd(&SoftmaxLastDim)
 }
 
-#[cfg(feature = "cuda")]
-#[derive(Debug, Clone)]
-struct RmsNorm {
-    eps: f32,
-}
-
-#[cfg(feature = "cuda")]
-impl candle::CustomOp2 for RmsNorm {
-    fn name(&self) -> &'static str {
-        "rms-norm"
-    }
-
-    fn cpu_fwd(
-        &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-    ) -> Result<(CpuStorage, Shape)> {
-        use candle::backend::BackendStorage;
-
-        let eps = self.eps;
-        fn inner<
-            T: candle::WithDType
-                + num_traits::Float
-                + num_traits::AsPrimitive<f32>
-                + num_traits::FromPrimitive,
-        >(
-            src: &[T],
-            layout: &Layout,
-            alpha: &[T],
-            alpha_layout: &Layout,
-            eps: f32,
-        ) -> Result<(CpuStorage, Shape)> {
-            let src = match layout.contiguous_offsets() {
-                None => candle::bail!("input has to be contiguous"),
-                Some((o1, o2)) => &src[o1..o2],
-            };
-            let alpha = match alpha_layout.contiguous_offsets() {
-                None => candle::bail!("alpha has to be contiguous"),
-                Some((o1, o2)) => &alpha[o1..o2],
-            };
-            let el_count = layout.shape().elem_count();
-            let dims = layout.shape().dims();
-            let dim_m1 = dims[dims.len() - 1];
-            let mut dst = vec![T::zero(); el_count];
-            src.par_chunks(dim_m1)
-                .zip(dst.par_chunks_mut(dim_m1))
-                .for_each(|(src, dst)| {
-                    let sum2 = src
-                        .iter()
-                        .map(|&v| {
-                            let v = v.as_();
-                            v * v
-                        })
-                        .sum::<f32>();
-                    let m = (sum2 / dim_m1 as f32 + eps).sqrt();
-                    let m = T::from_f32(m).unwrap_or_else(T::nan);
-                    for ((d, s), alpha) in dst.iter_mut().zip(src.iter()).zip(alpha) {
-                        *d = *s / m * *alpha
-                    }
-                });
-            let storage = candle::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, Shape::from_dims(dims)))
-        }
-
-        use CpuStorage as C;
-        match (s1, s2) {
-            (C::BF16(s1), C::BF16(s2)) => inner::<half::bf16>(s1, l1, s2, l2, eps),
-            (C::F16(s1), C::F16(s2)) => inner::<half::f16>(s1, l1, s2, l2, eps),
-            (C::F32(s1), C::F32(s2)) => inner::<f32>(s1, l1, s2, l2, eps),
-            _ => candle::bail!("unsupported dtype for rmsnorm {:?}", s1.dtype()),
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        s1: &candle::CudaStorage,
-        l1: &Layout,
-        s2: &candle::CudaStorage,
-        l2: &Layout,
-    ) -> Result<(candle::CudaStorage, Shape)> {
-        use candle::cuda_backend::cudarc::driver::{
-            CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig,
-        };
-        use candle::cuda_backend::{kernel_name, kernels, Map2, WrapErr};
-        use candle::{CudaDevice, WithDType};
-
-        struct S {
-            eps: f32,
-        }
-        impl Map2 for S {
-            fn f<T: DeviceRepr + WithDType>(
-                &self,
-                src: &CudaSlice<T>,
-                layout: &Layout,
-                alpha: &CudaSlice<T>,
-                alpha_layout: &Layout,
-                dev: &CudaDevice,
-            ) -> Result<CudaSlice<T>> {
-                let src = match layout.contiguous_offsets() {
-                    None => candle::bail!("input has to be contiguous"),
-                    Some((o1, o2)) => src.slice(o1..o2),
-                };
-                let alpha = match alpha_layout.contiguous_offsets() {
-                    None => candle::bail!("alpha has to be contiguous"),
-                    Some((o1, o2)) => alpha.slice(o1..o2),
-                };
-                let el = layout.shape().elem_count();
-                let dims = layout.shape().dims();
-                let dim_m1 = dims[dims.len() - 1];
-                let (n_rows, n_cols) = (el / dim_m1, dim_m1);
-
-                let cfg = LaunchConfig {
-                    grid_dim: (n_rows as u32, 1, 1),
-                    block_dim: (1024, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let func = dev.get_or_load_func(&kernel_name::<T>("rmsnorm"), kernels::REDUCE)?;
-                // SAFETY: Set later by running the kernel.
-                let dst = unsafe { dev.alloc::<T>(el) }.w()?;
-                let params = (&src, &dst, &alpha, n_cols as i32, self.eps);
-                // SAFETY: ffi.
-                unsafe { func.launch(cfg, params) }.w()?;
-                Ok(dst)
-            }
-        }
-
-        use candle::backend::BackendStorage;
-        let dev = s1.device();
-        let slice = S { eps: self.eps }.map(&s1.slice, l1, &s2.slice, l2, dev)?;
-        let dst = candle::cuda_backend::CudaStorage {
-            slice,
-            device: dev.clone(),
-        };
-        Ok((dst, l1.shape().clone()))
-    }
-
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle::MetalStorage,
-        l1: &Layout,
-        s2: &candle::MetalStorage,
-        l2: &Layout,
-    ) -> Result<(candle::MetalStorage, Shape)> {
-        use candle::backend::BackendStorage;
-        let device = s1.device();
-        let command_buffer = device.command_buffer()?;
-        let kernels = device.kernels();
-        let name = match (s1.dtype(), s2.dtype()) {
-            (DType::F32, DType::F32) => "rmsnorm_f32",
-            (DType::F16, DType::F16) => "rmsnorm_f16",
-            (DType::BF16, DType::BF16) => "rmsnorm_bf16",
-            (dt1, dt2) => candle::bail!("rmsnorm is not implemented for {dt1:?} {dt2:?}"),
-        };
-
-        if !(l1.is_contiguous() && l2.is_contiguous()) {
-            candle::bail!("Non contiguous rmsnorm is not implemented");
-        }
-
-        let last_dim = l1.dims()[l1.shape().rank() - 1];
-        let elem_count = l1.shape().elem_count();
-        let output = device.new_buffer(elem_count, s1.dtype(), "rmsnorm")?;
-        candle_metal_kernels::call_rms_norm(
-            device.metal_device(),
-            &command_buffer,
-            kernels,
-            name,
-            elem_count,
-            last_dim,
-            self.eps,
-            s1.buffer(),
-            l1.start_offset() * s1.dtype().size_in_bytes(),
-            s2.buffer(),
-            l2.start_offset() * s2.dtype().size_in_bytes(),
-            &output,
-        )
-        .map_err(candle::Error::wrap)?;
-        let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
-        Ok((newstorage, l1.shape().clone()))
-    }
-}
-
 #[cfg(not(feature = "cuda"))]
 pub fn rms_norm(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
     let x_dtype = x.dtype();
@@ -763,6 +578,7 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         query: &Tensor,
         key: &Tensor,
         cos_sin: &Tensor,
+        index_pos: i32,
         num_tokens: i32,
         q_head_size: i32,
         k_head_size: i32,
@@ -772,6 +588,7 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
     ) -> Result<Tensor> {
         use candle::gcu_backend::Rope;
         let op = Rope {
+            index_pos,
             num_tokens,
             q_head_size,
             k_head_size,
@@ -787,16 +604,14 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
         let (_, k_head_size, _, _) = key.dims4()?;
         //cost_sin must be type of float32
-        let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
+        let _ = fused_rope(&query, &key, &cos_sin, index_pos as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
         Ok((query.contiguous()?, key.contiguous()?))
     } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
         //(b_sz, q_len, num_kv_heads, head_dim)
         let (seq_len_0, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
         //cost_sin must be type of float32
-        let cos_sin = cos_sin.narrow(0, index_pos, if gpt_neox {seq_len} else { seq_len_0 })?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(&query, &key, &cos_sin, index_pos as i32, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.to_owned(), key.to_owned()))
     }
 
@@ -879,24 +694,6 @@ pub fn kvconcat(
     concat_dim: i32,
 ) -> Result<Tensor> {
     Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
-}
-
-/// RmsNorm is a specialized version of the LayerNorm module.
-#[derive(Clone, Debug)]
-pub struct LayerRmsNorm(LayerNorm);
-
-impl LayerRmsNorm {
-    pub fn new(rms: bool, weight: Tensor, eps: f64) -> Self {
-        if rms {
-            Self(LayerNorm::rms_norm(weight, eps))
-        } else {
-            Self(LayerNorm::new_no_bias(weight, eps))
-        }
-    }
-
-    pub fn into_inner(self) -> LayerNorm {
-        self.0
-    }
 }
 
 #[cfg(feature = "gcu")]

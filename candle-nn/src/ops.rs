@@ -578,6 +578,7 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         query: &Tensor,
         key: &Tensor,
         cos_sin: &Tensor,
+        cos_sin_stride: i32,
         index_pos: i32,
         num_tokens: i32,
         q_head_size: i32,
@@ -588,6 +589,7 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
     ) -> Result<Tensor> {
         use candle::gcu_backend::Rope;
         let op = Rope {
+            cos_sin_stride,
             index_pos,
             num_tokens,
             q_head_size,
@@ -598,20 +600,19 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         };
         query.apply_op3(key, cos_sin, op)
     }
-
+    let cos_sin_dims = cos_sin.shape().dims();
+    let cos_sin_stride = cos_sin_dims[cos_sin_dims.len() - 1];
     if query_key_transposed {
         //(b_sz, q_len, num_kv_heads, head_dim)
         let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
         let (_, k_head_size, _, _) = key.dims4()?;
-        //cost_sin must be type of float32
-        let _ = fused_rope(&query, &key, &cos_sin, index_pos as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
+        let _ = fused_rope(&query, &key, &cos_sin, cos_sin_stride as i32, index_pos as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
         Ok((query.contiguous()?, key.contiguous()?))
     } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
         //(b_sz, q_len, num_kv_heads, head_dim)
         let (seq_len_0, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
-        //cost_sin must be type of float32
-        let _ = fused_rope(&query, &key, &cos_sin, index_pos as i32, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(&query, &key, &cos_sin, cos_sin_stride as i32, index_pos as i32, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.to_owned(), key.to_owned()))
     }
 

@@ -2259,7 +2259,7 @@ impl crate::CustomOp3 for Rope {
         let shape = query_l.shape();
 
         match (&query.slice, &key.slice, &cos_sin.slice) { 
-            (GcuStorageSlice::BF16(query_), GcuStorageSlice::BF16(key_), GcuStorageSlice::F32(cos_sin_)) => { 
+            (GcuStorageSlice::BF16(query_), GcuStorageSlice::BF16(key_), GcuStorageSlice::BF16(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_bf16", ubridge::UNARY)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
@@ -2271,7 +2271,7 @@ impl crate::CustomOp3 for Rope {
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
                 unsafe { func.launch(&cfg, params) }.w()?;
             }
-            (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F32(cos_sin_)) => {
+            (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F16(cos_sin_)) => {
                 let func = dev.get_or_load_func("rope_f16", ubridge::UNARY)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);

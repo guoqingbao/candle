@@ -380,7 +380,7 @@ fn main() -> Result<()> {
                 };
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: PhiConfig = serde_json::from_str(&config)?;
-                let phi = Phi::new(&config, DType::F16, vb)?;
+                let phi = Phi::new(&config, dtype, vb)?;
                 Model::Phi(phi)
             }
             WhichModel::V3 => {

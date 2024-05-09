@@ -116,17 +116,17 @@ impl Cache {
             .step_by(2)
             .map(|i| 1f32 / config.rope_theta.powf(i as f32 / n_elem as f32))
             .collect();
-        let theta = Tensor::new(theta.as_slice(), device)?;
+        let theta = Tensor::new(theta.as_slice(), device)?.to_dtype(dtype)?;
         let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
-            .to_dtype(DType::F32)?
+            .to_dtype(dtype)?
             .reshape((MAX_SEQ_LEN, 1))?
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
-        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous float32 tensor;
+        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
-        let cos = idx_theta.cos()?.to_dtype(dtype)?;
-        let sin = idx_theta.sin()?.to_dtype(dtype)?;
+        let cos = idx_theta.cos()?;
+        let sin = idx_theta.sin()?;
         Ok(Self {
             masks: HashMap::new(),
             use_kv_cache,

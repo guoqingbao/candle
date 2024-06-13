@@ -209,17 +209,26 @@ impl CausalSelfAttention {
         let q = self.q_proj.forward(x)?;
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
-
-        let q = q
-            .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let mut v = v
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
+        let (q, k, mut v) = if seq_len == 1 { //no need transpose for seq_len == 1, change reshape dim
+            let q = q
+                .reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
+            let k = k
+                .reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+            let v = v
+                .reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = q
+                .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = k
+                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = v
+                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
 
         let (q, mut k) = candle_nn::apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&cache.cos_sin} else {&cache.cos}, &cache.sin, index_pos, 0, true, true)?;
 
@@ -268,7 +277,7 @@ impl CausalSelfAttention {
             };
             let att = candle_nn::ops::softmax_last_dim(&att)?;
             // Convert to contiguous as matmul doesn't support strided vs for now.
-            att.matmul(&v.contiguous()?)?.to_dtype(in_dtype)?
+            att.matmul(&v)?.to_dtype(in_dtype)?
         };
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])?;
         let y = self.o_proj.forward(&y)?;

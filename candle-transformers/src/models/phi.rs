@@ -197,16 +197,28 @@ impl Attention {
             Some(ln) => key_states.apply(ln)?,
         };
 
-        let query_states = query_states
-            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let key_states = key_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let value_states = value_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
+        let (query_states, key_states, value_states) = if seq_len == 1 { 
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = query_states
+                .reshape((b_size, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states
+                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states
+                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = query_states
+                .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = key_states
+                .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = value_states
+                .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
+        
         // Rotary embeddings.
         let seqlen_offset = match &self.kv_cache {
             None => 0,
@@ -233,12 +245,12 @@ impl Attention {
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
         // Repeat kv.
-        let key_states = self.repeat_kv(key_states)?.contiguous()?;
-        let value_states = self.repeat_kv(value_states)?.contiguous()?;
+        let key_states = self.repeat_kv(key_states)?;//.contiguous()?;
+        let value_states = self.repeat_kv(value_states)?;//.contiguous()?;
 
         let attn_weights = (query_states
             .to_dtype(DType::F32)?
-            .contiguous()?
+            // .contiguous()?
             .matmul(&key_states.to_dtype(DType::F32)?.t()?)?
             * self.softmax_scale)?;
         let attn_weights = match mask {

@@ -115,7 +115,7 @@ impl Attention {
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        let (b_sz, q_len, _) = xs.dims3()?;
+        let (b_sz, seq_len, _) = xs.dims3()?;
 
         let qkv = self.qkv_proj.forward(xs)?;
         let query_pos = self.num_heads * self.head_dim;
@@ -127,16 +127,28 @@ impl Attention {
             self.num_kv_heads * self.head_dim,
         )?;
 
-        let query_states = query_states
-            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let key_states = key_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let value_states = value_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
+        let (query_states, key_states, value_states) = if seq_len == 1 { 
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = query_states
+                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states
+                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states
+                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = query_states
+                .reshape((b_sz, seq_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = key_states
+                .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = value_states
+                .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
+        
         let (query_states, key_states) =
             self.rotary_emb
                 .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
@@ -151,9 +163,9 @@ impl Attention {
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?.contiguous()?;
+        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?;//.contiguous()?;
         let value_states =
-            crate::utils::repeat_kv(value_states, self.num_kv_groups)?.contiguous()?;
+            crate::utils::repeat_kv(value_states, self.num_kv_groups)?;//.contiguous()?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
@@ -168,7 +180,7 @@ impl Attention {
         };
         attn_output
             .transpose(1, 2)?
-            .reshape((b_sz, q_len, ()))?
+            .reshape((b_sz, seq_len, ()))?
             .apply(&self.o_proj)
     }
 

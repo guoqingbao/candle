@@ -487,12 +487,12 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
     Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)
 }
 
-pub fn rope_slow(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+pub fn rope_slow(x: &Tensor, cos: &Tensor, sin: &Tensor, index_pos: usize) -> Result<Tensor> {
     let (_b_sz, _h, seq_len, _n_embd) = x.dims4()?;
     let cos = Tensor::cat(&[cos, cos], D::Minus1)?;
     let sin = Tensor::cat(&[sin, sin], D::Minus1)?;
-    let cos = cos.narrow(0, 0, seq_len)?;
-    let sin = sin.narrow(0, 0, seq_len)?;
+    let cos = cos.narrow(0, index_pos, seq_len)?;
+    let sin = sin.narrow(0, index_pos, seq_len)?;
     let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
     let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
     x.broadcast_mul(&cos)? + rotate_half(x)?.broadcast_mul(&sin)?

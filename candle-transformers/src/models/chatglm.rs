@@ -294,8 +294,8 @@ impl SelfAttention {
             Some((prev_k, prev_v)) => {
                 // let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
                 // let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
-                let k = candle_nn::ops::kvconcat(&prev_k, &key_layer, 0)?; //kv concat on dim0
-                let v = candle_nn::ops::kvconcat(&prev_v, &value_layer, 0)?;
+                let k = candle_nn::ops::kvconcat(prev_k, &key_layer, 0)?; //kv concat on dim0
+                let v = candle_nn::ops::kvconcat(prev_v, &value_layer, 0)?;
                 (k, v)
             }
         };

@@ -53,8 +53,8 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), &dev)?.to_dtype(dtype)?;
-        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, &dev)?
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, dev)?
             .to_dtype(dtype)?
             .reshape((cfg.max_position_embeddings, 1))?;
         let freqs = t.matmul(&inv_freq)?;
@@ -76,7 +76,7 @@ impl RotaryEmbedding {
         let (xs1, xs2) = (&xs12[0], &xs12[1]);
         let c = self.cos.narrow(0, seqlen_offset, seq_len)?;
         let s = self.sin.narrow(0, seqlen_offset, seq_len)?;
-        let rotate_half = Tensor::cat(&[&xs2.neg()?, &xs1], D::Minus1)?;
+        let rotate_half = Tensor::cat(&[&xs2.neg()?, xs1], D::Minus1)?;
         let xs_rot = (xs_rot.broadcast_mul(&c)? + rotate_half.broadcast_mul(&s)?)?;
         Tensor::cat(&[&xs_rot, &xs_pass], D::Minus1)
     }
@@ -237,8 +237,8 @@ impl Attention {
             Some((prev_k, prev_v)) => {
                 // let k = Tensor::cat(&[prev_k, &key_states], 2)?;
                 // let v = Tensor::cat(&[prev_v, &value_states], 2)?;
-                let k = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
-                let v = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
+                let k = candle_nn::kvconcat(prev_k, &key_states, 2)?;
+                let v = candle_nn::kvconcat(prev_v, &value_states, 2)?;
                 (k, v)
             }
         };

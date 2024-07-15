@@ -252,8 +252,8 @@ impl CausalSelfAttention {
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
                 if k.device().is_gcu() {
                     //inputs for kvconcat must be contiguous tensors
-                    k = kvconcat(&cache_k, &k, 2)?;
-                    v = kvconcat(&cache_v, &v, 2)?;
+                    k = kvconcat(cache_k, &k, 2)?;
+                    v = kvconcat(cache_v, &v, 2)?;
                 } else {
                     k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
                     v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;

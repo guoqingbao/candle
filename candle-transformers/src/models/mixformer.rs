@@ -278,7 +278,7 @@ impl MHA {
             Ok((q, k, v))
             
         } else {
-            self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)
+            self.rotary_emb.apply_rotary_emb_qkv(qkv, seqlen_offset)
         }
     }
 
@@ -298,8 +298,8 @@ impl MHA {
         let (k, v) = match &self.kv_cache {
             None => (k, v),
             Some((prev_k, prev_v)) => {
-                let k = candle_nn::kvconcat(&prev_k, &k, 1)?;
-                let v = candle_nn::kvconcat(&prev_v, &v, 1)?;
+                let k = candle_nn::kvconcat(prev_k, &k, 1)?;
+                let v = candle_nn::kvconcat(prev_v, &v, 1)?;
                 (k, v)
             }
         };

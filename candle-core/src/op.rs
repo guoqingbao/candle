@@ -1,5 +1,5 @@
 #![allow(clippy::redundant_closure_call)]
-use crate::{CpuStorage, CudaStorage, GcuStorage, Layout, MetalStorage, Result, Shape, Tensor};
+use crate::Tensor;
 use half::{bf16, f16};
 use num_traits::float::Float;
 

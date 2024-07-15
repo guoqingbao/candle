@@ -144,13 +144,13 @@ impl Module for LayerNorm {
           
             if x.is_contiguous() {
                 match &self.bias {
-                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
+                    Some(bias) => x.apply_op3(&self.weight, bias, op),
                     None => x.apply_op3(&self.weight, &self.weight, op),
                 }
             } else {
                 let x = x.contiguous()?;
                 match &self.bias {
-                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
+                    Some(bias) => x.apply_op3(&self.weight, bias, op),
                     None => x.apply_op3(&self.weight, &self.weight, op),
                 }
             }

@@ -66,7 +66,7 @@ impl RotaryEmbedding {
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         if q.device().is_gcu() {
-            candle_nn::apply_rotary_emb_qkv(&q, &k, &self.cos_sin, &self.sin, seqlen_offset, 0, true, true)
+            candle_nn::apply_rotary_emb_qkv(q, k, &self.cos_sin, &self.sin, seqlen_offset, 0, true, true)
         } else {
             let cos = self.cos.narrow(0, seqlen_offset, seq_len)?;
             let sin = self.sin.narrow(0, seqlen_offset, seq_len)?;

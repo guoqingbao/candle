@@ -1957,7 +1957,7 @@ impl Tensor {
                 }
                 (Storage::Cpu(storage), Device::Cpu) => Storage::Cpu(storage.clone()),
                 (Storage::Cpu(storage), Device::Gcu(gcu)) => {
-                    Storage::Gcu(gcu.storage_from_cpu_storage(&storage)?)
+                    Storage::Gcu(gcu.storage_from_cpu_storage(storage)?)
                 }
                 (Storage::Gcu(storage), Device::Gcu(gcu)) => {
                     let cpu_storage = storage.to_cpu_storage()?;

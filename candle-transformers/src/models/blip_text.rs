@@ -124,8 +124,8 @@ impl TextSelfAttention {
                     Some((prev_key, prev_value)) => {
                         // let key = Tensor::cat(&[prev_key, &key], 2)?;
                         // let value = Tensor::cat(&[prev_value, &value], 2)?;
-                        let key = candle_nn::kvconcat(&prev_key, &key, 2)?;
-                        let value = candle_nn::kvconcat(&prev_value, &value, 2)?;
+                        let key = candle_nn::kvconcat(prev_key, &key, 2)?;
+                        let value = candle_nn::kvconcat(prev_value, &value, 2)?;
                         (key, value)
                     }
                 };

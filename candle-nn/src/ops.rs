@@ -1,7 +1,6 @@
 use candle::{CpuStorage, GcuStorage, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
-use crate::{layer_norm, LayerNorm, LayerNormConfig, VarBuilder};
 use candle::DType;
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
 /// a slice of fixed index on dimension `dim` are between 0 and 1 and sum to 1.
@@ -606,13 +605,13 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         //(b_sz, num_heads, seq_len, hidden_size)
         let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
         let (_, k_head_size, _, _) = key.dims4()?;
-        let _ = fused_rope(&query, &key, &cos_sin, cos_sin_stride as i32, index_pos as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.contiguous()?, key.contiguous()?))
     } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
         //(b_sz, seq_len, num_heads, hidden_size)
         let (seq_len_0, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
-        let _ = fused_rope(&query, &key, &cos_sin, cos_sin_stride as i32, index_pos as i32, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.clone(), key.clone()))
     }
 
@@ -675,12 +674,12 @@ pub fn kvconcat(
     };
     //inputs for kvconcat must be contiguous tensors
     if ltensor.is_contiguous() && rtensor.is_contiguous() {
-        ltensor.apply_op2(&rtensor, op)
+        ltensor.apply_op2(rtensor, op)
     } else if ltensor.is_contiguous() {
         ltensor.apply_op2(&rtensor.contiguous()?, op)
     } else if rtensor.is_contiguous() {
         let ltensor = ltensor.contiguous()?;
-        ltensor.apply_op2(&rtensor, op)
+        ltensor.apply_op2(rtensor, op)
     } else {
         let ltensor = ltensor.contiguous()?;
         let rtensor = rtensor.contiguous()?;

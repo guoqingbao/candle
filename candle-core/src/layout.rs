@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 use crate::{Error, Result, Shape};
 
@@ -137,9 +136,9 @@ impl Layout {
             shape: Shape::from(dims),
             stride: self.stride.clone(),
             start_offset: self.start_offset + self.stride[dim] * start,
-            transform_ops: transform_ops,
+            transform_ops,
             transpose_dims: None,
-            backup: backup,
+            backup,
         })
     }
 
@@ -167,9 +166,9 @@ impl Layout {
             shape: Shape::from(dims),
             stride,
             start_offset: self.start_offset,
-            transform_ops: transform_ops,
+            transform_ops,
             transpose_dims: Some(vec![dim1, dim2]),
-            backup: backup,
+            backup,
         })
     }
 
@@ -201,9 +200,9 @@ impl Layout {
             shape: Shape::from(perm_dims),
             stride: perm_stride,
             start_offset: self.start_offset,
-            transform_ops: transform_ops,
+            transform_ops,
             transpose_dims: None,
-            backup: backup,
+            backup,
         })
     }
 
@@ -245,9 +244,9 @@ impl Layout {
             shape,
             stride,
             start_offset: self.start_offset,
-            transform_ops: transform_ops,
+            transform_ops,
             transpose_dims: None,
-            backup: backup,
+            backup,
         })
     }
 

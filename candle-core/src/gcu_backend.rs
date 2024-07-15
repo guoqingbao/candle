@@ -33,13 +33,12 @@ use crate::cpu_backend::CpuStorageRef;
 use half::{bf16, f16};
 use ubridge::prelude::DevicePtr;
 use uhal::memory::DevicePointerTrait;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 pub use cust_core::_hidden::{DeviceCopy};
 use uhal::error::{DeviceError};
 use ubridge::gcu_device::GcuDevice as RawDevice;
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::gcu_launch::{GcuLaunchConfig, GcuLaunchAsync};
-use ubridge::{*};
 pub use ubridge;
 
 #[derive(Debug, Clone)]
@@ -337,12 +336,12 @@ impl BackendDevice for GcuDevice {
                 ?
             }
             DType::F32 => {
-                let mut data = self.device.alloc::<f32>(elem_count).w()?;
+                let data = self.device.alloc::<f32>(elem_count).w()?;
                 // curand.0.fill_with_uniform(&mut data)?;
                 GcuStorageSlice::F32(data)
             }
             DType::F64 => {
-                let mut data = self.device.alloc::<f64>(elem_count).w()?;
+                let data = self.device.alloc::<f64>(elem_count).w()?;
                 // curand.0.fill_with_uniform(&mut data)?;
                 GcuStorageSlice::F64(data)
             }
@@ -351,7 +350,7 @@ impl BackendDevice for GcuDevice {
             slice
         } else {
             let layout = Layout::contiguous(shape);
-            Affine(up - lo, lo).map(&slice, &self, &layout)?
+            Affine(up - lo, lo).map(&slice, self, &layout)?
         };
         Ok(GcuStorage {
             slice,
@@ -373,7 +372,7 @@ impl BackendDevice for GcuDevice {
                 ?
             }
             DType::F32 => {
-                let mut data = self.device.alloc::<f32>(elem_count).w()?;
+                let data = self.device.alloc::<f32>(elem_count).w()?;
                 // curand
                 //     .0
                 //     .fill_with_normal(&mut data, mean as f32, std as f32)
@@ -381,7 +380,7 @@ impl BackendDevice for GcuDevice {
                 GcuStorageSlice::F32(data)
             }
             DType::F64 => {
-                let mut data = self.device.alloc::<f64>(elem_count).w()?;
+                let data = self.device.alloc::<f64>(elem_count).w()?;
                 // curand.0.fill_with_normal(&mut data, mean, std)?;
                 GcuStorageSlice::F64(data)
             }
@@ -1592,7 +1591,7 @@ impl BackendStorage for GcuStorage {
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
         if layout.is_contiguous() {
-            self.to_dtype_impl(&self, layout, dtype)
+            self.to_dtype_impl(self, layout, dtype)
         } else {
             //cast op does not support non-contiguous operand 
             let device = self.device().clone();
@@ -1788,12 +1787,12 @@ impl BackendStorage for GcuStorage {
             f.copy_strided_src(&mut src_f, 0, f_l)?; //convert to contiguous
             if layout.is_contiguous() {
                 let slice = WhereCond(self, layout).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
-                return Ok(Self { slice, device });
+                Ok(Self { slice, device })
             } else {
                 let mut src = unsafe { device.alloc_uninit(layout.shape(), self.dtype())? };
                 self.copy_strided_src(&mut src, 0, layout)?; //convert to contiguous
                 let slice = WhereCond(&src, &Layout::contiguous(layout.shape())).map(&src_t.slice, &Layout::contiguous(t_l.shape()), &src_f.slice, &Layout::contiguous(f_l.shape()), &device)?;
-                return Ok(Self { slice, device });
+                Ok(Self { slice, device })
             }
         } else if !t_l.is_contiguous() {
             let mut src_t = unsafe { device.alloc_uninit(t_l.shape(), t.dtype())? };
@@ -2116,7 +2115,7 @@ impl BackendStorage for GcuStorage {
         let src_shape = src_l.shape();
         let dims = src_shape.dims();
         let el_count = src_shape.elem_count();
-        let origin_l = if src_l.backup.len() > 0 {&src_l.backup[0]} else {&src_l};
+        let origin_l = if !src_l.backup.is_empty() {&src_l.backup[0]} else {src_l};
         let origin_shape = origin_l.shape();
         let origin_el_count = origin_shape.elem_count();
         let dev = &self.device;
@@ -2255,7 +2254,7 @@ impl crate::CustomOp3 for Rope {
         let dev = &query.device;
         let cfg = &dev.launch_cfg;
         
-        let query_l = if query_l.backup.len() > 0 {&query_l.backup[0]} else {&query_l};
+        let query_l = if !query_l.backup.is_empty() {&query_l.backup[0]} else {query_l};
         let shape = query_l.shape();
 
         match (&query.slice, &key.slice, &cos_sin.slice) { 
@@ -2263,19 +2262,19 @@ impl crate::CustomOp3 for Rope {
                 let func = dev.get_or_load_func("rope_bf16", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
             }
             (GcuStorageSlice::F32(query_), GcuStorageSlice::F32(key_), GcuStorageSlice::F32(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_f32", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
             }
             (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F16(cos_sin_)) => {
                 let func = dev.get_or_load_func("rope_f16", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
                                 self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
             }
             _=> Err(GcuError::InternalError(
                 "dtype mismatch in rope op",
@@ -2329,35 +2328,35 @@ impl crate::CustomOp2 for KVConcat {
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_bf16", ubridge::KCCONCAT)?;
                 let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F32(left_), GcuStorageSlice::F32(right_)) => { 
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f32", ubridge::KCCONCAT)?;
                 let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F16(left_), GcuStorageSlice::F16(right_)) => {
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f16", ubridge::KCCONCAT)?;
                 let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }
             (GcuStorageSlice::F64(left_), GcuStorageSlice::F64(right_)) => {
                 let out = dev.alloc::<f64>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_f64", ubridge::KCCONCAT)?;
                 let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F64(out)
             }
             (GcuStorageSlice::U8(left_), GcuStorageSlice::U8(right_)) => {
                 let out = dev.alloc::<u8>(elem_count).w()?;
                 let func = dev.get_or_load_func("kvconcat_u8", ubridge::KCCONCAT)?;
                 let params = (left_.device_ptr(), right_.device_ptr(), out.device_ptr(), ds.device_ptr(), dims, self.concat_dim);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::U8(out)
             }
             _=> Err(GcuError::InternalError(
@@ -2370,16 +2369,14 @@ impl crate::CustomOp2 for KVConcat {
             lshape[0] += rtensor_l.shape().dims()[0];      
         } else if self.concat_dim == 1 {
             lshape[1] += rtensor_l.shape().dims()[1];      
+        } else if dims > 3 {
+            lshape[2] += rtensor_l.shape().dims()[2];
         } else {
-            if dims > 3 {
-                lshape[2] += rtensor_l.shape().dims()[2];
-            } else {
-                lshape[1] += rtensor_l.shape().dims()[1];      
-            }
+            lshape[1] += rtensor_l.shape().dims()[1];      
         }
 
         let device = dev.clone();
-        Ok((GcuStorage { slice: slice, device }, lshape.into()))
+        Ok((GcuStorage { slice, device }, lshape.into()))
 
 
     }
@@ -2434,21 +2431,21 @@ impl crate::CustomOp3 for LayerNorm {
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_bf16", ubridge::REDUCE)?;
                 let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F32(x_), GcuStorageSlice::F32(w_), GcuStorageSlice::F32(b_)) => { 
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_f32", ubridge::REDUCE)?;
                 let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F16(x_), GcuStorageSlice::F16(w_), GcuStorageSlice::F16(b_)) => {
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_f16", ubridge::REDUCE)?;
                 let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
-                unsafe { func.launch(&cfg, params) }.w()?;
+                unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }
             _=> Err(GcuError::InternalError(
@@ -2457,7 +2454,7 @@ impl crate::CustomOp3 for LayerNorm {
         };
 
         let device = dev.clone();
-        Ok((GcuStorage { slice: slice, device }, x_l.shape().into()))
+        Ok((GcuStorage { slice, device }, x_l.shape().into()))
     }
 }
 
@@ -2507,11 +2504,11 @@ impl crate::CustomOp1 for Activation {
                 match self {
                     Activation::Elu(v) => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     } 
                     _ => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr());
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     }
                 };
                 GcuStorageSlice::BF16(out)
@@ -2521,11 +2518,11 @@ impl crate::CustomOp1 for Activation {
                 match self {
                     Activation::Elu(v) => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     } 
                     _ => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr());
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     }
                 };
                 GcuStorageSlice::F16(out)
@@ -2535,11 +2532,11 @@ impl crate::CustomOp1 for Activation {
                 match self {
                     Activation::Elu(v) => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr(), *v as f32);
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     } 
                     _ => {
                         let params = (elem_count, slice.device_ptr(), out.device_ptr());
-                        unsafe { func.launch(&cfg, params) }.w()?;
+                        unsafe { func.launch(cfg, params) }.w()?;
                     }
                 };
                 GcuStorageSlice::F32(out)
@@ -2550,6 +2547,6 @@ impl crate::CustomOp1 for Activation {
         };
 
         let device = dev.clone();
-        Ok((GcuStorage { slice: slice, device }, l.shape().into()))
+        Ok((GcuStorage { slice, device }, l.shape().into()))
     }
 }

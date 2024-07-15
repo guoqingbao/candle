@@ -30,7 +30,7 @@ pub fn device(cpu: bool) -> Result<Device> {
             #[cfg(feature = "gcu")]
             println!("Cuda not available, Running on GCU!");
             #[cfg(feature = "gcu")]
-            return Ok(Device::new_gcu(0)?);
+            return Device::new_gcu(0);
         }
         Ok(Device::Cpu)
     }

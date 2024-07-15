@@ -358,7 +358,7 @@ impl BackendDevice for GcuDevice {
         })
     }
 
-    fn rand_normal(&self, shape: &Shape, dtype: DType, mean: f64, std: f64) -> Result<GcuStorage> {
+    fn rand_normal(&self, shape: &Shape, dtype: DType, _mean: f64, _std: f64) -> Result<GcuStorage> {
         // TODO: Add support for F16 and BF16 though this is likely to require some upstream
         // Gcurc changes.
         let elem_count = shape.elem_count();
@@ -761,7 +761,7 @@ impl Map1 for Powf {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), ubridge::UNARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el) }.w()?;
+        let out = dev.alloc::<T>(el).w()?;
         let params = (el, dims.len(), &ds, T::from_f64(self.0), src, &out);
         // SAFETY: ffi.
         unsafe { func.launch(&cfg, params) }.w()?;
@@ -2052,63 +2052,15 @@ impl BackendStorage for GcuStorage {
 
     fn copy2d(
         &self,
-        dst: &mut Self,
-        d1: usize,
-        d2: usize,
-        src_s: usize,
-        dst_s: usize,
-        src_o: usize,
-        dst_o: usize,
+        _dst: &mut Self,
+        _d1: usize,
+        _d2: usize,
+        _src_s: usize,
+        _dst_s: usize,
+        _src_o: usize,
+        _dst_o: usize,
     ) -> Result<()> {
-        panic!("not implemented!");
-        // let dev = &self.device;
-        // let d1 = d1 as u32;
-        // let d2 = d2 as u32;
-        // let dst_s = dst_s as u32;
-        // let src_s = src_s as u32;
-        // let cfg = &dev.launch_cfg;
-        // let (src, dst, kname) = match (&self.slice, &mut dst.slice) {
-        //     (S::U8(s), S::U8(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_u8",
-        //     ),
-        //     (S::U32(s), S::U32(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_u32",
-        //     ),
-        //     (S::I64(s), S::I64(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_i64",
-        //     ),
-        //     (S::BF16(s), S::BF16(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_bf16",
-        //     ),
-        //     (S::F16(s), S::F16(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_f16",
-        //     ),
-        //     (S::F32(s), S::F32(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_f32",
-        //     ),
-        //     (S::F64(s), S::F64(d)) => (
-        //         s.slice(src_o..).device_ptr(),
-        //         d.slice(dst_o..).device_ptr(),
-        //         "copy2d_f64",
-        //     ),
-        //     _ => Err(GcuError::InternalError("dtype mismatch in copy2d"))?,
-        // };
-        // let func = dev.get_or_load_func(kname, ubridge::FILLCOPY)?;
-        // let params = (src, dst, d1, d2, src_s, dst_s);
-        // unsafe { func.launch(cfg, params) }.w()?;
-        Ok(())
+        todo!()
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
@@ -2247,9 +2199,9 @@ impl crate::CustomOp3 for Rope {
         query: &GcuStorage,
         query_l: &Layout,
         key: &GcuStorage,
-        key_l: &Layout,
+        _key_l: &Layout,
         cos_sin: &GcuStorage,
-        cos_sin_l: &Layout,
+        _cos_sin_l: &Layout,
     ) -> Result<(GcuStorage, Shape)> {
         let dev = &query.device;
         let cfg = &dev.launch_cfg;
@@ -2415,9 +2367,9 @@ impl crate::CustomOp3 for LayerNorm {
         x: &GcuStorage,
         x_l: &Layout,
         weight: &GcuStorage,
-        weight_l: &Layout,
+        _weight_l: &Layout,
         bias: &GcuStorage,
-        bias_l: &Layout,
+        _bias_l: &Layout,
     ) -> Result<(GcuStorage, Shape)> {
         let dev = &x.device;
         let cfg = &dev.launch_cfg;

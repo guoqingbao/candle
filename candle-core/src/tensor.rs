@@ -1967,9 +1967,6 @@ impl Tensor {
                     let cpu_storage = storage.to_cpu_storage()?;
                     Storage::Cpu(cpu_storage)
                 }
-                _=> {
-                    panic!("Not supported!")
-                }
                 _ => {
                     bail!("not implemented yet")
                 }

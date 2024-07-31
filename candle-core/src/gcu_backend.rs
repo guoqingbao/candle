@@ -2166,6 +2166,7 @@ impl BackendStorage for GcuStorage {
 pub struct Rope {
     pub cos_sin_stride: i32,
     pub index_pos: i32,
+    pub batch: i32,
     pub num_tokens: i32,
     pub q_head_size: i32,
     pub k_head_size: i32,
@@ -2213,19 +2214,19 @@ impl crate::CustomOp3 for Rope {
             (GcuStorageSlice::BF16(query_), GcuStorageSlice::BF16(key_), GcuStorageSlice::BF16(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_bf16", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                                self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
+                                self.cos_sin_stride, self.index_pos, self.batch, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
                 unsafe { func.launch(cfg, params) }.w()?;
             }
             (GcuStorageSlice::F32(query_), GcuStorageSlice::F32(key_), GcuStorageSlice::F32(cos_sin_)) => { 
                 let func = dev.get_or_load_func("rope_f32", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                                self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
+                                self.cos_sin_stride, self.index_pos, self.batch, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
                 unsafe { func.launch(cfg, params) }.w()?;
             }
             (GcuStorageSlice::F16(query_), GcuStorageSlice::F16(key_), GcuStorageSlice::F16(cos_sin_)) => {
                 let func = dev.get_or_load_func("rope_f16", ubridge::EMBEDDING)?;
                 let params = (query_.device_ptr(), key_.device_ptr(), cos_sin_.device_ptr(), 
-                                self.cos_sin_stride, self.index_pos, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
+                                self.cos_sin_stride, self.index_pos, self.batch, self.num_tokens, self.q_head_size, self.k_head_size, self.hidden_size, self.split_dim, self.gpt_neox);
                 unsafe { func.launch(cfg, params) }.w()?;
             }
             _=> Err(GcuError::InternalError(
@@ -2356,7 +2357,7 @@ impl crate::CustomOp3 for LayerNorm {
         _: &CpuStorage,
         _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        crate::bail!("no cpu support for rope")
+        crate::bail!("no cpu support for layernorm")
     }
 
 

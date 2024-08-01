@@ -2377,27 +2377,27 @@ impl crate::CustomOp3 for LayerNorm {
         let elem_count = x_l.shape().elem_count();
         let dims = x_l.shape().dims();
         let dim_m1 = dims[dims.len() - 1];
-        let (n_rows, n_cols) = (elem_count / dim_m1, dim_m1);
+        let (batch, chunks, last_dim_size) = if dims.len() == 1 { (1, 1, dim_m1) } else { (dims[0], elem_count / dims[0] / dim_m1, dim_m1) };
 
         let slice = match (&x.slice, &weight.slice, &bias.slice) { 
             (GcuStorageSlice::BF16(x_), GcuStorageSlice::BF16(w_), GcuStorageSlice::BF16(b_)) => { 
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_bf16", ubridge::REDUCE)?;
-                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32, self.eps, self.remove_mean as i32, self.affine as i32);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
             (GcuStorageSlice::F32(x_), GcuStorageSlice::F32(w_), GcuStorageSlice::F32(b_)) => { 
                 let out = dev.alloc::<f32>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_f32", ubridge::REDUCE)?;
-                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32, self.eps, self.remove_mean as i32, self.affine as i32);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F32(out)
             }
             (GcuStorageSlice::F16(x_), GcuStorageSlice::F16(w_), GcuStorageSlice::F16(b_)) => {
                 let out = dev.alloc::<f16>(elem_count).w()?;
                 let func = dev.get_or_load_func("layernorm_f16", ubridge::REDUCE)?;
-                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), n_rows, n_cols, self.eps, self.remove_mean as i32, self.affine as i32);
+                let params = (x_.device_ptr(), out.device_ptr(), w_.device_ptr(), b_.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32, self.eps, self.remove_mean as i32, self.affine as i32);
                 unsafe { func.launch(cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)
             }

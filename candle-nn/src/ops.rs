@@ -280,13 +280,13 @@ impl candle::CustomOp1 for SoftmaxLastDim {
                 // println!("dims: {:?}", dims);
 
                 let dim_m1 = dims[dims.len() - 1];
-                let (n_rows, n_cols) = (el / dim_m1, dim_m1);
+                let (batch, chunks, last_dim_size) = if dims.len() == 1 { (1, 1, dim_m1) } else { (dims[0], el / dims[0] / dim_m1, dim_m1) };
                 // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
                 let cfg = dev.launch_cfg;
                 let src = &src.slice(layout.start_offset()..);
                 let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
                 let dst = dev.alloc::<T>(el).w()?;
-                let params = (src.device_ptr(), dst.device_ptr(), n_rows, n_cols);
+                let params = (src.device_ptr(), dst.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 Ok(dst)
             }

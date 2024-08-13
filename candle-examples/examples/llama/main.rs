@@ -17,7 +17,7 @@ use clap::{Parser, ValueEnum};
 
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::generation::LogitsProcessor;
+use candle_transformers::generation::{LogitsProcessor, Sampling};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::io::Write;
 
@@ -32,7 +32,9 @@ enum Which {
     V1,
     V2,
     V3,
+    V31,
     V3Instruct,
+    V31Instruct,
     #[value(name = "solar-10.7b")]
     Solar10_7B,
     #[value(name = "tiny-llama-1.1b-chat")]
@@ -54,12 +56,16 @@ struct Args {
     #[arg(long)]
     top_p: Option<f64>,
 
+    /// Only sample among the top K samples.
+    #[arg(long)]
+    top_k: Option<usize>,
+
     /// The seed to use when generating random samples.
     #[arg(long, default_value_t = 299792458)]
     seed: u64,
 
     /// The length of the sample to generate (in tokens).
-    #[arg(long, default_value_t = 10000)]
+    #[arg(short = 'n', long, default_value_t = 10000)]
     sample_len: usize,
 
     /// Disable the key-value cache.
@@ -136,6 +142,8 @@ fn main() -> Result<()> {
             Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
             Which::V3 => "meta-llama/Meta-Llama-3-8B".to_string(),
             Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct".to_string(),
+            Which::V31 => "meta-llama/Meta-Llama-3.1-8B".to_string(),
+            Which::V31Instruct => "meta-llama/Meta-Llama-3.1-8B-Instruct".to_string(),
             Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0".to_string(),
             Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
         });
@@ -155,7 +163,7 @@ fn main() -> Result<()> {
         let config = config.into_config(args.use_flash_attn);
 
         let filenames = match args.which {
-            Which::V1 | Which::V2 | Which::V3 | Which::V3Instruct | Which::Solar10_7B => {
+            Which::V1 | Which::V2 | Which::V3 | Which::V3Instruct | Which::V31 | Which::V31Instruct | Which::Solar10_7B => {
                 match &args.local_weights {
                     Some(path) => {
                         candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
@@ -186,9 +194,11 @@ fn main() -> Result<()> {
         (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
     };
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
-    let eos_token_id = config
-        .eos_token_id
-        .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
+    let eos_token_id = config.eos_token_id.or_else(|| {
+        tokenizer
+            .token_to_id(EOS_TOKEN)
+            .map(model::LlamaEosToks::Single)
+    });
     let prompt = args.prompt.as_ref().map_or(DEFAULT_PROMPT, |p| p.as_str());
     let mut tokens = tokenizer
         .encode(prompt, true)
@@ -199,7 +209,21 @@ fn main() -> Result<()> {
 
     println!("starting the inference loop");
     print!("{prompt}");
-    let mut logits_processor = LogitsProcessor::new(args.seed, args.temperature, args.top_p);
+    let mut logits_processor = {
+        let temperature = args.temperature;
+        let sampling = if temperature <= 0. {
+            Sampling::ArgMax
+        } else {
+            match (args.top_k, args.top_p) {
+                (None, None) => Sampling::All { temperature },
+                (Some(k), None) => Sampling::TopK { k, temperature },
+                (None, Some(p)) => Sampling::TopP { p, temperature },
+                (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
+            }
+        };
+        LogitsProcessor::from_sampling(args.seed, sampling)
+    };
+
     let mut start_gen = std::time::Instant::now();
     let mut index_pos = 0;
     let mut token_generated = 0;
@@ -240,8 +264,14 @@ fn main() -> Result<()> {
         token_generated += 1;
         tokens.push(next_token);
 
-        if Some(next_token) == eos_token_id {
-            break;
+        match eos_token_id {
+            Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
+                break;
+            }
+            Some(model::LlamaEosToks::Multiple(ref eos_ids)) if eos_ids.contains(&next_token) => {
+                break;
+            }
+            _ => (),
         }
         if let Some(t) = tokenizer.next_token(next_token)? {
             print!("{t}");

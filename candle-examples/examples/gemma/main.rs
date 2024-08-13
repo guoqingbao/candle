@@ -207,6 +207,9 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    
+    #[arg(long)]
+    use_flash_attn: bool,
 }
 
 fn main() -> Result<()> {
@@ -284,7 +287,7 @@ fn main() -> Result<()> {
         DType::F32
     };
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
-    let model = Model::new(&config, vb)?;
+    let model = Model::new(args.use_flash_attn, &config, vb)?;
 
     println!("loaded the model in {:?}", start.elapsed());
 

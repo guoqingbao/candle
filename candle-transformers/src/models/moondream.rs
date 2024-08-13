@@ -2,6 +2,7 @@ use crate::models::mixformer::{Config as PhiConfig, MixFormerSequentialForCausal
 use candle::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::{layer_norm, linear_b, Linear, Module, VarBuilder};
 
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
     pub phi_config: PhiConfig,
     pub vision_config: VisionConfig,

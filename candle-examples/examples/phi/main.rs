@@ -126,6 +126,10 @@ impl TextGeneration {
             tokens.push(next_token);
             generated_tokens += 1;
             if next_token == eos_token {
+                if let Some(t) = self.tokenizer.decode_rest()? {
+                    print!("{t}");
+                    std::io::stdout().flush()?;
+                }
                 break;
             }
             if let Some(t) = self.tokenizer.next_token(next_token)? {
@@ -154,6 +158,8 @@ enum WhichModel {
     V2,
     #[value(name = "3")]
     V3,
+    #[value(name = "3-medium")]
+    V3Medium,
     #[value(name = "2-old")]
     V2Old,
     PuffinPhiV2,
@@ -227,6 +233,10 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+
+    /// The dtype to be used for running the model, e.g. f32, bf16, or f16.
+    #[arg(long)]
+    dtype: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -268,6 +278,7 @@ fn main() -> Result<()> {
                     WhichModel::V1_5 => "microsoft/phi-1_5".to_string(),
                     WhichModel::V2 | WhichModel::V2Old => "microsoft/phi-2".to_string(),
                     WhichModel::V3 => "microsoft/Phi-3-mini-4k-instruct".to_string(),
+                    WhichModel::V3Medium => "microsoft/Phi-3-medium-4k-instruct".to_string(),
                     WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
                         "lmz/candle-quantized-phi".to_string()
                     }
@@ -287,6 +298,7 @@ fn main() -> Result<()> {
                     WhichModel::V2Old => "834565c23f9b28b96ccbeabe614dd906b6db551a".to_string(),
                     WhichModel::V2
                     | WhichModel::V3
+                    | WhichModel::V3Medium
                     | WhichModel::PuffinPhiV2
                     | WhichModel::PhiHermes => "main".to_string(),
                 }
@@ -301,7 +313,8 @@ fn main() -> Result<()> {
             | WhichModel::V1_5
             | WhichModel::V2
             | WhichModel::V2Old
-            | WhichModel::V3 => repo.get("tokenizer.json")?,
+            | WhichModel::V3
+            | WhichModel::V3Medium => repo.get("tokenizer.json")?,
             WhichModel::PuffinPhiV2 | WhichModel::PhiHermes => {
                 repo.get("tokenizer-puffin-phi-v2.json")?
             }
@@ -320,14 +333,14 @@ fn main() -> Result<()> {
                     WhichModel::V2 | WhichModel::V2Old => vec![repo.get("model-v2-q4k.gguf")?],
                     WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2-q4k.gguf")?],
                     WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B-q4k.gguf")?],
-                    WhichModel::V3 => anyhow::bail!(
+                    WhichModel::V3 | WhichModel::V3Medium => anyhow::bail!(
                         "use the quantized or quantized-phi examples for quantized phi-v3"
                     ),
                 }
             } else {
                 match args.model {
                     WhichModel::V1 | WhichModel::V1_5 => vec![repo.get("model.safetensors")?],
-                    WhichModel::V2 | WhichModel::V2Old | WhichModel::V3 => {
+                    WhichModel::V2 | WhichModel::V2Old | WhichModel::V3 | WhichModel::V3Medium => {
                         candle_examples::hub_load_safetensors(
                             &repo,
                             "model.safetensors.index.json",
@@ -349,7 +362,7 @@ fn main() -> Result<()> {
         WhichModel::V2 | WhichModel::V2Old => Config::v2(),
         WhichModel::PuffinPhiV2 => Config::puffin_phi_v2(),
         WhichModel::PhiHermes => Config::phi_hermes_1_3b(),
-        WhichModel::V3 => {
+        WhichModel::V3 | WhichModel::V3Medium => {
             panic!("use the quantized or quantized-phi examples for quantized phi-v3")
         }
     };
@@ -366,7 +379,7 @@ fn main() -> Result<()> {
         };
         Model::Quantized(model)
     } else {
-        let dtype = if (args.model == WhichModel::V3 && device.is_cuda()) || device.is_gcu() {
+        let dtype = if ((args.model == WhichModel::V3 || args.model == WhichModel::V3Medium) && device.is_cuda()) || device.is_gcu() {
             DType::BF16
         } else {
             DType::F32
@@ -383,7 +396,7 @@ fn main() -> Result<()> {
                 let phi = Phi::new(&config, DType::F16, vb)?;
                 Model::Phi(phi)
             }
-            WhichModel::V3 => {
+            WhichModel::V3 | WhichModel::V3Medium => {
                 let config_filename = repo.get("config.json")?;
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: Phi3Config = serde_json::from_str(&config)?;

@@ -36,7 +36,7 @@ pub fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
             .expand((b_sz, n_kv_head, n_rep, seq_len, head_dim))?
             .reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))
         } else {
-            Tensor::cat(&vec![&xs; n_rep], 2)?.reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))?.contiguous()
+            Tensor::cat(&vec![&xs; n_rep], 2)?.reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))
         }
     }
 }

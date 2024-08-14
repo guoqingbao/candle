@@ -146,18 +146,10 @@ impl Module for LayerNorm {
                 remove_mean: self.remove_mean,
                 affine: self.bias.is_some(),
             };
-          
-            if x.is_contiguous() {
-                match &self.bias {
-                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
-                    None => x.apply_op3(&self.weight, &self.weight, op),
-                }
-            } else {
-                let x = x.contiguous()?;
-                match &self.bias {
-                    Some(bias) => x.apply_op3(&self.weight, &bias, op),
-                    None => x.apply_op3(&self.weight, &self.weight, op),
-                }
+            let x = if x.is_contiguous() { x } else { &x.contiguous()? };
+            match &self.bias {
+                Some(bias) => x.apply_op3(&self.weight, bias, op),
+                None => x.apply_op3(&self.weight, &self.weight, op),
             }
 
         } else {

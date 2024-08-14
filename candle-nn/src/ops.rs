@@ -1,7 +1,6 @@
 use candle::{CpuStorage, GcuStorage, Layout, Result, Shape, Tensor, D};
 use rayon::prelude::*;
 
-use crate::{layer_norm, LayerNorm, LayerNormConfig, VarBuilder};
 use candle::DType;
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
 /// a slice of fixed index on dimension `dim` are between 0 and 1 and sum to 1.
@@ -467,13 +466,13 @@ impl candle::CustomOp1 for SoftmaxLastDim {
                 // println!("dims: {:?}", dims);
 
                 let dim_m1 = dims[dims.len() - 1];
-                let (n_rows, n_cols) = (el / dim_m1, dim_m1);
+                let (batch, chunks, last_dim_size) = if dims.len() == 1 { (1, 1, dim_m1) } else { (dims[0], el / dims[0] / dim_m1, dim_m1) };
                 // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
                 let cfg = dev.launch_cfg;
                 let src = &src.slice(layout.start_offset()..);
                 let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
                 let dst = dev.alloc::<T>(el).w()?;
-                let params = (src.device_ptr(), dst.device_ptr(), n_rows, n_cols);
+                let params = (src.device_ptr(), dst.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32);
                 unsafe { func.launch(&cfg, params) }.w()?;
                 Ok(dst)
             }
@@ -493,13 +492,39 @@ pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
         xs.apply_op1_no_bwd(&SoftmaxLastDim)
 }
 
+#[cfg(not(feature = "cuda"))]
+pub fn rms_norm(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+    let x_dtype = x.dtype();
+    let internal_dtype = match x_dtype {
+        DType::F16 | DType::BF16 => DType::F32,
+        d => d,
+    };
+    let hidden_size = x.dim(candle::D::Minus1)?;
+    let x = x.to_dtype(internal_dtype)?;
+    let norm_x = (x.sqr()?.sum_keepdim(candle::D::Minus1)? / hidden_size as f64)?;
+    let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+    x_normed.to_dtype(x_dtype)?.broadcast_mul(alpha)
+}
+
 #[cfg(feature = "cuda")]
+pub fn rms_norm(xs: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+    let hidden_size_xs = xs.dim(candle::D::Minus1)?;
+    let hidden_size_alpha = alpha.dims1()?;
+    if hidden_size_xs != hidden_size_alpha {
+        candle::bail!(
+            "shape mismatch in rms-norm {:?} {:?}",
+            xs.shape(),
+            alpha.shape()
+        )
+    }
+    xs.apply_op2_no_bwd(alpha, &RmsNorm { eps })
+}
+
 #[derive(Debug, Clone)]
 struct RmsNorm {
     eps: f32,
 }
 
-#[cfg(feature = "cuda")]
 impl candle::CustomOp2 for RmsNorm {
     fn name(&self) -> &'static str {
         "rms-norm"
@@ -678,8 +703,7 @@ impl candle::CustomOp2 for RmsNorm {
     }
 }
 
-#[cfg(not(feature = "cuda"))]
-pub fn rms_norm(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+pub fn rms_norm_slow(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
     let x_dtype = x.dtype();
     let internal_dtype = match x_dtype {
         DType::F16 | DType::BF16 => DType::F32,
@@ -1004,6 +1028,9 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         query: &Tensor,
         key: &Tensor,
         cos_sin: &Tensor,
+        cos_sin_stride: i32,
+        index_pos: i32,
+        batch: i32,
         num_tokens: i32,
         q_head_size: i32,
         k_head_size: i32,
@@ -1013,6 +1040,9 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
     ) -> Result<Tensor> {
         use candle::gcu_backend::Rope;
         let op = Rope {
+            cos_sin_stride,
+            index_pos,
+            batch,
             num_tokens,
             q_head_size,
             k_head_size,
@@ -1022,23 +1052,20 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         };
         query.apply_op3(key, cos_sin, op)
     }
-
+    let cos_sin_dims = cos_sin.shape().dims();
+    let cos_sin_stride = cos_sin_dims[cos_sin_dims.len() - 1];
     if query_key_transposed {
-        //(b_sz, q_len, num_kv_heads, head_dim)
-        let (_, q_head_size, seq_len, hidden_size) = query.dims4()?;
+        //(b_sz, num_heads, seq_len, hidden_size)
+        let (b_sz, q_head_size, seq_len, hidden_size) = query.dims4()?;
         let (_, k_head_size, _, _) = key.dims4()?;
-        //cost_sin must be type of float32
-        let cos_sin = cos_sin.narrow(0, index_pos, seq_len)?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, 1)?;
+        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, b_sz as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
         Ok((query.contiguous()?, key.contiguous()?))
     } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
-        //(b_sz, q_len, num_kv_heads, head_dim)
-        let (seq_len_0, seq_len, q_head_size, hidden_size) = query.dims4()?;
+        //(b_sz, seq_len, num_heads, hidden_size)
+        let (b_sz, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
-        //cost_sin must be type of float32
-        let cos_sin = cos_sin.narrow(0, index_pos, if gpt_neox {seq_len} else { seq_len_0 })?;
-        let _ = fused_rope(&query, &key, &cos_sin.contiguous()?, if gpt_neox {seq_len} else { seq_len_0 } as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
-        Ok((query.to_owned(), key.to_owned()))
+        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, b_sz as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        Ok((query.clone(), key.clone()))
     }
 
 }
@@ -1100,12 +1127,12 @@ pub fn kvconcat(
     };
     //inputs for kvconcat must be contiguous tensors
     if ltensor.is_contiguous() && rtensor.is_contiguous() {
-        ltensor.apply_op2(&rtensor, op)
+        ltensor.apply_op2(rtensor, op)
     } else if ltensor.is_contiguous() {
         ltensor.apply_op2(&rtensor.contiguous()?, op)
     } else if rtensor.is_contiguous() {
         let ltensor = ltensor.contiguous()?;
-        ltensor.apply_op2(&rtensor, op)
+        ltensor.apply_op2(rtensor, op)
     } else {
         let ltensor = ltensor.contiguous()?;
         let rtensor = rtensor.contiguous()?;
@@ -1120,24 +1147,6 @@ pub fn kvconcat(
     concat_dim: i32,
 ) -> Result<Tensor> {
     Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
-}
-
-/// RmsNorm is a specialized version of the LayerNorm module.
-#[derive(Clone, Debug)]
-pub struct LayerRmsNorm(LayerNorm);
-
-impl LayerRmsNorm {
-    pub fn new(rms: bool, weight: Tensor, eps: f64) -> Self {
-        if rms {
-            Self(LayerNorm::rms_norm(weight, eps))
-        } else {
-            Self(LayerNorm::new_no_bias(weight, eps))
-        }
-    }
-
-    pub fn into_inner(self) -> LayerNorm {
-        self.0
-    }
 }
 
 #[cfg(feature = "gcu")]

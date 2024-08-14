@@ -281,7 +281,7 @@ impl Module for VisionEncoder {
         //TODO: resolve problem of reshape+permute+reshape on GCU
         xs.to_device(&Device::Cpu)?.reshape((b, c, h, p1, h, p2))?
             .permute((0, 2, 4, 1, 3, 5))?
-            .reshape((b, h * w, c * p1 * p2))?.to_device(&xs.device())?
+            .reshape((b, h * w, c * p1 * p2))?.to_device(xs.device())?
             .apply(&self.encoder)?
             .apply(&self.projection)
     }

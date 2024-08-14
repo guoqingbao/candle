@@ -66,13 +66,12 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / 10_000f64.powf(i as f64 / n_elem as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
         let t = Tensor::arange(0u32, cfg.seq_length as u32, dev)?
-            .to_dtype(DType::F32)?
+            .to_dtype(dtype)?
             .reshape((cfg.seq_length, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
-        let freqs = freqs.to_dtype(dtype)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         let cache = Tensor::stack(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?;
         Ok(Self { cache, cos_sin })
     }
@@ -295,8 +294,8 @@ impl SelfAttention {
             Some((prev_k, prev_v)) => {
                 // let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
                 // let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
-                let k = candle_nn::ops::kvconcat(&prev_k, &key_layer, 0)?; //kv concat on dim0
-                let v = candle_nn::ops::kvconcat(&prev_v, &value_layer, 0)?;
+                let k = candle_nn::ops::kvconcat(prev_k, &key_layer, 0)?; //kv concat on dim0
+                let v = candle_nn::ops::kvconcat(prev_v, &value_layer, 0)?;
                 (k, v)
             }
         };

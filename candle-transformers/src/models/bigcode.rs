@@ -182,7 +182,7 @@ impl Attention {
         } else {
             attn_weights.matmul(&value)?
         };
-        Ok(attn_output.to_dtype(dtype)?)
+        attn_output.to_dtype(dtype)
     }
 
     fn forward(&mut self, hidden_states: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
@@ -207,7 +207,7 @@ impl Attention {
                 // TODO: we could trim the tensors to MAX_SEQ_LEN so that this would work for
                 // arbitrarily large sizes.
                 // key_value = Tensor::cat(&[kv_cache, &key_value], D::Minus2)?.contiguous()?;
-                key_value = candle_nn::kvconcat(&kv_cache, &key_value, 2)?;
+                key_value = candle_nn::kvconcat(kv_cache, &key_value, 2)?;
             }
             self.kv_cache = Some(key_value.clone())
         }

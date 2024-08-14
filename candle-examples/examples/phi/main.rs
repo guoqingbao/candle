@@ -17,7 +17,6 @@ use candle::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::Api, Repo, RepoType};
-use safetensors::Dtype;
 use tokenizers::Tokenizer;
 
 enum Model {
@@ -393,7 +392,7 @@ fn main() -> Result<()> {
                 };
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: PhiConfig = serde_json::from_str(&config)?;
-                let phi = Phi::new(&config, DType::F16, vb)?;
+                let phi = Phi::new(&config, dtype, vb)?;
                 Model::Phi(phi)
             }
             WhichModel::V3 | WhichModel::V3Medium => {

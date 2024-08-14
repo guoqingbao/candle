@@ -83,13 +83,13 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f64 / dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(DType::F32)?
+            .to_dtype(dtype)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
-        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
+        let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
@@ -227,22 +227,34 @@ impl Attention {
         seqlen_offset: usize,
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
-        let (b_sz, q_len, _) = xs.dims3()?;
+        let (b_sz, seq_len, _) = xs.dims3()?;
 
         let query_states = self.q_proj.forward(xs)?;
         let key_states = self.k_proj.forward(xs)?;
         let value_states = self.v_proj.forward(xs)?;
 
-        let query_states = query_states
-            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let key_states = key_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let value_states = value_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
+        let (query_states, key_states, value_states) = if seq_len == 1 { 
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = query_states
+                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states
+                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states
+                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = query_states
+                .reshape((b_sz, seq_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = key_states
+                .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = value_states
+                .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
+        
     
         #[cfg(not(feature = "gcu"))]
         let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_ndims, true)?;
@@ -255,8 +267,8 @@ impl Attention {
             Some((prev_k, prev_v)) => {
                 // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
                 // let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
-                let key_states = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
-                let value_states = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
+                let key_states = candle_nn::kvconcat(prev_k, &key_states, 2)?;
+                let value_states = candle_nn::kvconcat(prev_v, &value_states, 2)?;
                 (key_states, value_states)
             }
         };
@@ -264,15 +276,9 @@ impl Attention {
             self.kv_cache = Some((key_states.clone(), value_states.clone()));
         }
 
-        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?.contiguous()?;
+        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?;//.contiguous()?;
         let value_states =
-            crate::utils::repeat_kv(value_states, self.num_kv_groups)?.contiguous()?;
-
-        let dtype = query_states.dtype();
-
-        let query_states = query_states.to_dtype(DType::F32)?;
-        let key_states = key_states.to_dtype(DType::F32)?;
-        let value_states = value_states.to_dtype(DType::F32)?;
+            crate::utils::repeat_kv(value_states, self.num_kv_groups)?;//.contiguous()?;
 
         let attn_output = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
@@ -280,7 +286,7 @@ impl Attention {
             let k = key_states.transpose(1, 2)?;
             let v = value_states.transpose(1, 2)?;
             let softmax_scale = 1f32 / (self.head_dim as f32).sqrt();
-            flash_attn(&q, &k, &v, softmax_scale, q_len > 1)?.transpose(1, 2)?
+            flash_attn(&q, &k, &v, softmax_scale, seq_len > 1)?.transpose(1, 2)?
         } else {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
             let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
@@ -292,9 +298,9 @@ impl Attention {
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
         };
-        attn_output.to_dtype(dtype)?
+        attn_output
             .transpose(1, 2)?
-            .reshape((b_sz, q_len, self.hidden_size))?
+            .reshape((b_sz, seq_len, self.hidden_size))?
             .apply(&self.o_proj)
     }
 }
@@ -402,8 +408,7 @@ impl Model {
             mask
         };
         mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
-            // .to_dtype(self.dtype)
-            .to_dtype(DType::F32)
+            .to_dtype(self.dtype)
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

@@ -147,15 +147,15 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(DType::F32)?
+            .to_dtype(dtype)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         Ok(Self {
-            sin: freqs.sin()?.to_dtype(dtype)?,
-            cos: freqs.cos()?.to_dtype(dtype)?,
+            sin: freqs.sin()?,
+            cos: freqs.cos()?,
             cos_sin,
         })
     }
@@ -278,7 +278,7 @@ impl MHA {
             Ok((q, k, v))
             
         } else {
-            self.rotary_emb.apply_rotary_emb_qkv(&qkv, seqlen_offset)
+            self.rotary_emb.apply_rotary_emb_qkv(qkv, seqlen_offset)
         }
     }
 
@@ -298,8 +298,8 @@ impl MHA {
         let (k, v) = match &self.kv_cache {
             None => (k, v),
             Some((prev_k, prev_v)) => {
-                let k = candle_nn::kvconcat(&prev_k, &k, 1)?;
-                let v = candle_nn::kvconcat(&prev_v, &v, 1)?;
+                let k = candle_nn::kvconcat(prev_k, &k, 1)?;
+                let v = candle_nn::kvconcat(prev_v, &v, 1)?;
                 (k, v)
             }
         };

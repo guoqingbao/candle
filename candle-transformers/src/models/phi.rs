@@ -53,13 +53,13 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / cfg.rope_theta.powf(i as f32 / dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), &dev)?.to_dtype(DType::F32)?;
-        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, &dev)?
-            .to_dtype(DType::F32)?
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, dev)?
+            .to_dtype(dtype)?
             .reshape((cfg.max_position_embeddings, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?; //must be float32;
-        let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.to_dtype(dtype)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
+        let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?;
         Ok(Self {
             dim,
             sin: emb.sin()?,
@@ -194,16 +194,28 @@ impl Attention {
             Some(ln) => key_states.apply(ln)?,
         };
 
-        let query_states = query_states
-            .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let key_states = key_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let value_states = value_states
-            .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
+        let (query_states, key_states, value_states) = if seq_len == 1 { 
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = query_states
+                .reshape((b_size, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states
+                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states
+                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = query_states
+                .reshape((b_size, seq_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = key_states
+                .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = value_states
+                .reshape((b_size, seq_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
+        
         // Rotary embeddings.
         let seqlen_offset = match &self.kv_cache {
             None => 0,
@@ -222,20 +234,20 @@ impl Attention {
             Some((prev_k, prev_v)) => {
                 // let k = Tensor::cat(&[prev_k, &key_states], 2)?;
                 // let v = Tensor::cat(&[prev_v, &value_states], 2)?;
-                let k = candle_nn::kvconcat(&prev_k, &key_states, 2)?;
-                let v = candle_nn::kvconcat(&prev_v, &value_states, 2)?;
+                let k = candle_nn::kvconcat(prev_k, &key_states, 2)?;
+                let v = candle_nn::kvconcat(prev_v, &value_states, 2)?;
                 (k, v)
             }
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
         // Repeat kv.
-        let key_states = self.repeat_kv(key_states)?.contiguous()?;
-        let value_states = self.repeat_kv(value_states)?.contiguous()?;
+        let key_states = self.repeat_kv(key_states)?;//.contiguous()?;
+        let value_states = self.repeat_kv(value_states)?;//.contiguous()?;
 
         let attn_weights = (query_states
             .to_dtype(DType::F32)?
-            .contiguous()?
+            // .contiguous()?
             .matmul(&key_states.to_dtype(DType::F32)?.t()?)?
             * self.softmax_scale)?;
         let attn_weights = match mask {

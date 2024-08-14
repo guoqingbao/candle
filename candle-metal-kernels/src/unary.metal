@@ -73,6 +73,8 @@ template <typename T> METAL_FUNC T sigmoid(T in) {
 
 #define TILE_SIZE 2
 
+#define TILE_SIZE 2
+
 #define UNARY(FN, TYPENAME, FN_NAME, FN_NAME_STRIDED) \
 kernel void FN_NAME( \
     constant size_t &dim, \

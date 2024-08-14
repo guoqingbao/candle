@@ -123,7 +123,7 @@ impl Cache {
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
-        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?; //must be float32
+        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous float32 tensor;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
         let cos = idx_theta.cos()?.to_dtype(dtype)?;
         let sin = idx_theta.sin()?.to_dtype(dtype)?;
@@ -252,8 +252,8 @@ impl CausalSelfAttention {
             if let Some((cache_k, cache_v)) = &cache[block_idx] {
                 if k.device().is_gcu() {
                     //inputs for kvconcat must be contiguous tensors
-                    k = kvconcat(&cache_k, &k, 2)?;
-                    v = kvconcat(&cache_v, &v, 2)?;
+                    k = kvconcat(cache_k, &k, 2)?;
+                    v = kvconcat(cache_v, &v, 2)?;
                 } else {
                     k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
                     v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;

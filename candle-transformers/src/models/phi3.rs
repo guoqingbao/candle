@@ -66,7 +66,16 @@ impl RotaryEmbedding {
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         if q.device().is_gcu() {
-            candle_nn::apply_rotary_emb_qkv(q, k, &self.cos_sin, &self.sin, seqlen_offset, 0, true, true)
+            candle_nn::apply_rotary_emb_qkv(
+                q,
+                k,
+                &self.cos_sin,
+                &self.sin,
+                seqlen_offset,
+                0,
+                true,
+                true,
+            )
         } else {
             let cos = self.cos.narrow(0, seqlen_offset, seq_len)?;
             let sin = self.sin.narrow(0, seqlen_offset, seq_len)?;
@@ -127,14 +136,11 @@ impl Attention {
             self.num_kv_heads * self.head_dim,
         )?;
 
-        let (query_states, key_states, value_states) = if seq_len == 1 { 
+        let (query_states, key_states, value_states) = if seq_len == 1 {
             //no need transpose for seq_len == 1, change reshape dim
-            let q = query_states
-                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
-            let k = key_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            let v = value_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let q = query_states.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = query_states
@@ -148,7 +154,7 @@ impl Attention {
                 .transpose(1, 2)?;
             (q, k, v.contiguous()?)
         };
-        
+
         let (query_states, key_states) =
             self.rotary_emb
                 .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
@@ -163,9 +169,8 @@ impl Attention {
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?;//.contiguous()?;
-        let value_states =
-            crate::utils::repeat_kv(value_states, self.num_kv_groups)?;//.contiguous()?;
+        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?; //.contiguous()?;
+        let value_states = crate::utils::repeat_kv(value_states, self.num_kv_groups)?; //.contiguous()?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);

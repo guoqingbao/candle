@@ -89,12 +89,18 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
             let logits = self.model.forward(&input, start_pos)?;
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             // let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
             // let logits = self.model.forward(&input, start_pos)?;
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
@@ -188,7 +194,7 @@ struct Args {
     /// The model size to use.
     #[arg(long, default_value = "6b")]
     which: Which,
-    
+
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
 }

@@ -102,7 +102,9 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
@@ -110,7 +112,11 @@ impl TextGeneration {
                 start_gen = std::time::Instant::now()
             }
             let logits = self.model.forward(&input, start_pos)?;
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -207,7 +213,7 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
-    
+
     #[arg(long)]
     use_flash_attn: bool,
 }
@@ -281,7 +287,7 @@ fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
     let device = candle_examples::device(args.cpu)?;
-    let dtype = if device.is_cuda() || device.is_gcu(){
+    let dtype = if device.is_cuda() || device.is_gcu() {
         DType::BF16
     } else {
         DType::F32

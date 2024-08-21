@@ -8,7 +8,6 @@ use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use serde::Deserialize;
 
-
 // https://huggingface.co/microsoft/phi-2/blob/main/configuration_phi.py
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
@@ -64,7 +63,7 @@ impl RotaryEmbedding {
             dim,
             sin: emb.sin()?,
             cos: emb.cos()?,
-            cos_sin
+            cos_sin,
         })
     }
 
@@ -194,14 +193,11 @@ impl Attention {
             Some(ln) => key_states.apply(ln)?,
         };
 
-        let (query_states, key_states, value_states) = if seq_len == 1 { 
+        let (query_states, key_states, value_states) = if seq_len == 1 {
             //no need transpose for seq_len == 1, change reshape dim
-            let q = query_states
-                .reshape((b_size, self.num_heads, seq_len, self.head_dim))?;
-            let k = key_states
-                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
-            let v = value_states
-                .reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            let q = query_states.reshape((b_size, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states.reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states.reshape((b_size, self.num_kv_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = query_states
@@ -215,7 +211,7 @@ impl Attention {
                 .transpose(1, 2)?;
             (q, k, v.contiguous()?)
         };
-        
+
         // Rotary embeddings.
         let seqlen_offset = match &self.kv_cache {
             None => 0,
@@ -223,10 +219,27 @@ impl Attention {
         };
 
         #[cfg(not(feature = "gcu"))]
-        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true)?;
+        let (query_states, key_states) = candle_nn::ops::partial_rotary_emb_qkv(
+            &query_states,
+            &key_states,
+            &self.rotary_emb.cos,
+            &self.rotary_emb.sin,
+            seqlen_offset,
+            self.rotary_emb.dim,
+            true,
+        )?;
 
         #[cfg(feature = "gcu")]
-        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, self.rotary_emb.dim, true, true)?;
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
+            &query_states,
+            &key_states,
+            &self.rotary_emb.cos_sin,
+            &self.rotary_emb.sin,
+            seqlen_offset,
+            self.rotary_emb.dim,
+            true,
+            true,
+        )?;
 
         // KV cache.
         let (key_states, value_states) = match &self.kv_cache {
@@ -242,8 +255,8 @@ impl Attention {
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
         // Repeat kv.
-        let key_states = self.repeat_kv(key_states)?;//.contiguous()?;
-        let value_states = self.repeat_kv(value_states)?;//.contiguous()?;
+        let key_states = self.repeat_kv(key_states)?; //.contiguous()?;
+        let value_states = self.repeat_kv(value_states)?; //.contiguous()?;
 
         let attn_weights = (query_states
             .to_dtype(DType::F32)?

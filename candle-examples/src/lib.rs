@@ -26,7 +26,7 @@ pub fn device(cpu: bool) -> Result<Device> {
         {
             #[cfg(not(feature = "gcu"))]
             println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
-            
+
             #[cfg(feature = "gcu")]
             println!("Cuda not available, Running on GCU!");
             #[cfg(feature = "gcu")]
@@ -154,12 +154,12 @@ pub fn hub_load_safetensors(
     Ok(safetensors_files)
 }
 
-pub fn hub_load_local_safetensors(path: &String,
+pub fn hub_load_local_safetensors(
+    path: &String,
     json_file: &str,
 ) -> Result<Vec<std::path::PathBuf>> {
     let jsfile = std::fs::File::open(path.to_owned() + json_file)?;
-    let json: serde_json::Value =
-        serde_json::from_reader(&jsfile).map_err(candle::Error::wrap)?;
+    let json: serde_json::Value = serde_json::from_reader(&jsfile).map_err(candle::Error::wrap)?;
     let weight_map = match json.get("weight_map") {
         None => candle::bail!("no weight map in {json_file:?}"),
         Some(serde_json::Value::Object(map)) => map,

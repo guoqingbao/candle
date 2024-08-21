@@ -98,7 +98,12 @@ impl Module for VisionEmbeddings {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let target_dtype = xs.dtype();
         let b_size = xs.dim(0)?;
-        let patch_embeds = xs.to_device(&candle::Device::Cpu)?.apply(&self.patch_embedding)?.flatten_from(2)?.t()?.to_device(xs.device())?;
+        let patch_embeds = xs
+            .to_device(&candle::Device::Cpu)?
+            .apply(&self.patch_embedding)?
+            .flatten_from(2)?
+            .t()?
+            .to_device(xs.device())?;
         let d = self.class_embedding.dim(D::Minus1)?;
         let class_embeds = self
             .class_embedding
@@ -284,7 +289,11 @@ pub struct BlipForConditionalGeneration {
 
 impl BlipForConditionalGeneration {
     pub fn new(cfg: &Config, vb: VarBuilder, vbcpu: VarBuilder) -> Result<Self> {
-        let vision_model = VisionModel::new(&cfg.vision_config, vb.pp("vision_model"), vbcpu.pp("vision_model"))?;
+        let vision_model = VisionModel::new(
+            &cfg.vision_config,
+            vb.pp("vision_model"),
+            vbcpu.pp("vision_model"),
+        )?;
         let text_decoder =
             blip_text::TextLMHeadModel::new(&cfg.text_config, vb.pp("text_decoder"))?;
         Ok(Self {

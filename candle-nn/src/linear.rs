@@ -28,7 +28,15 @@ pub struct Linear {
 
 impl Linear {
     pub fn new(weight: Tensor, bias: Option<Tensor>, weight_transpose: bool) -> Self {
-        Self { weight: if weight_transpose {weight.t().unwrap().contiguous().unwrap()} else {weight}, bias, weight_transpose}
+        Self {
+            weight: if weight_transpose {
+                weight.t().unwrap().contiguous().unwrap()
+            } else {
+                weight
+            },
+            bias,
+            weight_transpose,
+        }
     }
 
     pub fn weight(&self) -> &Tensor {
@@ -51,14 +59,14 @@ impl super::Module for Linear {
                 }
             }
             [bsize, _, _] => {
-                if self.weight_transpose { 
+                if self.weight_transpose {
                     x.matmul(&self.weight.broadcast_left(bsize)?)?
                 } else {
-                    x.matmul(&self.weight.broadcast_left(bsize)?.t()? )?
+                    x.matmul(&self.weight.broadcast_left(bsize)?.t()?)?
                 }
             }
             _ => {
-                if self.weight_transpose { 
+                if self.weight_transpose {
                     x.matmul(&self.weight)?
                 } else {
                     x.matmul(&self.weight.t()?)?

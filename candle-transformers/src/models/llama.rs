@@ -193,7 +193,8 @@ impl Cache {
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
-        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
+        let cos_sin =
+            Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
         let cos = idx_theta.cos()?;
         let sin = idx_theta.sin()?;
@@ -280,13 +281,11 @@ impl CausalSelfAttention {
         let q = self.q_proj.forward(x)?;
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
-        let (q, k, mut v) = if seq_len == 1 { //no need transpose for seq_len == 1, change reshape dim
-            let q = q
-                .reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
-            let k = k
-                .reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
-            let v = v
-                .reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+        let (q, k, mut v) = if seq_len == 1 {
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = q.reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
+            let k = k.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+            let v = v.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = q
@@ -301,7 +300,20 @@ impl CausalSelfAttention {
             (q, k, v.contiguous()?)
         };
 
-        let (q, mut k) = candle_nn::apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&cache.cos_sin} else {&cache.cos}, &cache.sin, index_pos, 0, true, true)?;
+        let (q, mut k) = candle_nn::apply_rotary_emb_qkv(
+            &q,
+            &k,
+            if q.device().is_gcu() {
+                &cache.cos_sin
+            } else {
+                &cache.cos
+            },
+            &cache.sin,
+            index_pos,
+            0,
+            true,
+            true,
+        )?;
 
         if cache.use_kv_cache {
             if let Some((cache_k, cache_v)) = &cache.kvs[block_idx] {

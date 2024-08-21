@@ -152,14 +152,11 @@ impl Attention {
         let key_states = self.k_proj.forward(xs)?;
         let value_states = self.v_proj.forward(xs)?;
 
-        let (query_states, key_states, value_states) = if seq_len == 1 { 
+        let (query_states, key_states, value_states) = if seq_len == 1 {
             //no need transpose for seq_len == 1, change reshape dim
-            let q = query_states
-                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
-            let k = key_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            let v = value_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let q = query_states.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = query_states
@@ -173,8 +170,21 @@ impl Attention {
                 .transpose(1, 2)?;
             (q, k, v.contiguous()?)
         };
-        
-        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
+
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
+            &query_states,
+            &key_states,
+            if query_states.device().is_gcu() {
+                &self.rotary_emb.cos_sin
+            } else {
+                &self.rotary_emb.cos
+            },
+            &self.rotary_emb.sin,
+            seqlen_offset,
+            0,
+            true,
+            true,
+        )?;
 
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
@@ -188,9 +198,8 @@ impl Attention {
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?;//.contiguous()?;
-        let value_states =
-            crate::utils::repeat_kv(value_states, self.num_kv_groups)?;//.contiguous()?;
+        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?; //.contiguous()?;
+        let value_states = crate::utils::repeat_kv(value_states, self.num_kv_groups)?; //.contiguous()?;
 
         let attn_output = {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
@@ -377,15 +386,20 @@ pub struct ModelForCausalLM {
 impl ModelForCausalLM {
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let base_model = Model::new(cfg, vb.clone())?;
-        let lm_head = if vb.contains_tensor("lm_head") {
-            linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
-        } else {
-            Linear::from_weights(base_model.embed_tokens.embeddings().clone(), None)
-        };
-        Ok(Self {
-            base_model,
-            lm_head,
-        })
+        let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"));
+        match lm_head {
+            Ok(hd) => Ok(Self {
+                base_model,
+                lm_head: hd,
+            }),
+            _ => {
+                let hd = Linear::from_weights(base_model.embed_tokens.embeddings().clone(), None);
+                Ok(Self {
+                    base_model,
+                    lm_head: hd,
+                })
+            }
+        }
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

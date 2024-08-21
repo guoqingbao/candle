@@ -44,8 +44,6 @@ pub mod cpu_backend;
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 
-#[cfg(feature = "gcu")]
-pub mod gcu_backend;
 mod custom_op;
 mod device;
 pub mod display;
@@ -54,6 +52,8 @@ pub mod dummy_cuda_backend;
 mod dummy_gcu_backend;
 mod dummy_metal_backend;
 pub mod error;
+#[cfg(feature = "gcu")]
+pub mod gcu_backend;
 mod indexer;
 pub mod layout;
 #[cfg(feature = "metal")]

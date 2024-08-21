@@ -443,11 +443,11 @@ impl candle::CustomOp1 for SoftmaxLastDim {
     ) -> Result<(candle::GcuStorage, Shape)> {
         use candle::gcu_backend::ubridge;
         use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
-        use candle::gcu_backend::ubridge::gcu_slice::GcuSlice;
         use candle::gcu_backend::ubridge::gcu_launch::GcuLaunchAsync;
+        use candle::gcu_backend::ubridge::gcu_slice::GcuSlice;
         use candle::gcu_backend::{kernel_name, Map1, WrapErr};
-        use candle::{GcuDevice, WithDType};
         use candle::{backend::BackendStorage, gcu_backend::DeviceCopy};
+        use candle::{GcuDevice, WithDType};
 
         struct S;
         impl Map1 for S {
@@ -466,13 +466,23 @@ impl candle::CustomOp1 for SoftmaxLastDim {
                 // println!("dims: {:?}", dims);
 
                 let dim_m1 = dims[dims.len() - 1];
-                let (batch, chunks, last_dim_size) = if dims.len() == 1 { (1, 1, dim_m1) } else { (dims[0], el / dims[0] / dim_m1, dim_m1) };
+                let (batch, chunks, last_dim_size) = if dims.len() == 1 {
+                    (1, 1, dim_m1)
+                } else {
+                    (dims[0], el / dims[0] / dim_m1, dim_m1)
+                };
                 // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
                 let cfg = dev.launch_cfg;
                 let src = &src.slice(layout.start_offset()..);
                 let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
                 let dst = dev.alloc::<T>(el).w()?;
-                let params = (src.device_ptr(), dst.device_ptr(), batch as i32, chunks as i32, last_dim_size as i32);
+                let params = (
+                    src.device_ptr(),
+                    dst.device_ptr(),
+                    batch as i32,
+                    chunks as i32,
+                    last_dim_size as i32,
+                );
                 unsafe { func.launch(&cfg, params) }.w()?;
                 Ok(dst)
             }
@@ -489,7 +499,7 @@ impl candle::CustomOp1 for SoftmaxLastDim {
 }
 
 pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
-        xs.apply_op1_no_bwd(&SoftmaxLastDim)
+    xs.apply_op1_no_bwd(&SoftmaxLastDim)
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1022,8 +1032,16 @@ pub fn replication_pad2d(xs: &Tensor, pad: usize) -> Result<Tensor> {
 
 //gcu apply_rotary_emb_qkv supports both rope and partial rope
 #[cfg(feature = "gcu")]
-pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &Tensor, 
-        index_pos: usize, split_dim: usize, query_key_transposed: bool, gpt_neox: bool) -> Result<(Tensor, Tensor)> {
+pub fn apply_rotary_emb_qkv(
+    query: &Tensor,
+    key: &Tensor,
+    cos_sin: &Tensor,
+    _: &Tensor,
+    index_pos: usize,
+    split_dim: usize,
+    query_key_transposed: bool,
+    gpt_neox: bool,
+) -> Result<(Tensor, Tensor)> {
     pub fn fused_rope(
         query: &Tensor,
         key: &Tensor,
@@ -1048,7 +1066,7 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
             k_head_size,
             hidden_size,
             split_dim,
-            gpt_neox
+            gpt_neox,
         };
         query.apply_op3(key, cos_sin, op)
     }
@@ -1058,16 +1076,42 @@ pub fn apply_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, _: &
         //(b_sz, num_heads, seq_len, hidden_size)
         let (b_sz, q_head_size, seq_len, hidden_size) = query.dims4()?;
         let (_, k_head_size, _, _) = key.dims4()?;
-        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, b_sz as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(
+            query,
+            key,
+            cos_sin,
+            cos_sin_stride as i32,
+            index_pos as i32,
+            b_sz as i32,
+            seq_len as i32,
+            q_head_size as i32,
+            k_head_size as i32,
+            hidden_size as i32,
+            split_dim as i32,
+            if gpt_neox { 1 } else { 0 },
+        )?;
         Ok((query.contiguous()?, key.contiguous()?))
-    } else { //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
+    } else {
+        //NOTE: gpt_neox not for ChatGLM, seq_len in dim1 not for ChatGLM
         //(b_sz, seq_len, num_heads, hidden_size)
         let (b_sz, seq_len, q_head_size, hidden_size) = query.dims4()?;
         let (_, _, k_head_size, _) = key.dims4()?;
-        let _ = fused_rope(query, key, cos_sin, cos_sin_stride as i32, index_pos as i32, b_sz as i32, seq_len as i32, q_head_size as i32, k_head_size as i32, hidden_size as i32, split_dim as i32, if gpt_neox { 1 } else { 0 })?;
+        let _ = fused_rope(
+            query,
+            key,
+            cos_sin,
+            cos_sin_stride as i32,
+            index_pos as i32,
+            b_sz as i32,
+            seq_len as i32,
+            q_head_size as i32,
+            k_head_size as i32,
+            hidden_size as i32,
+            split_dim as i32,
+            if gpt_neox { 1 } else { 0 },
+        )?;
         Ok((query.clone(), key.clone()))
     }
-
 }
 
 #[cfg(not(feature = "gcu"))]
@@ -1077,7 +1121,9 @@ pub fn apply_rotary_emb_qkv(
     cos: &Tensor,
     sin: &Tensor,
     index_pos: usize,
-    split_dim: usize, query_key_transposed: bool, gpt_neox: bool
+    split_dim: usize,
+    query_key_transposed: bool,
+    gpt_neox: bool,
 ) -> Result<(Tensor, Tensor)> {
     if !gpt_neox {
         panic!("Not supported non-gpt-neox in apply_rotary_emb_qkv!");
@@ -1100,7 +1146,15 @@ pub fn apply_rotary_emb_qkv(
 }
 
 #[cfg(not(feature = "gcu"))]
-pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, sin: &Tensor, index_pos: usize, split_dim: usize, query_key_transposed: bool) -> Result<(Tensor, Tensor)> {
+pub fn partial_rotary_emb_qkv(
+    query: &Tensor,
+    key: &Tensor,
+    cos_sin: &Tensor,
+    sin: &Tensor,
+    index_pos: usize,
+    split_dim: usize,
+    query_key_transposed: bool,
+) -> Result<(Tensor, Tensor)> {
     let (_b_size, _num_heads, _seq_len, _headdim) = query.dims4()?; //must be this type of inputs
     use candle::D;
     let (rot_ndims, pass_ndims) = (split_dim, _headdim - split_dim);
@@ -1108,23 +1162,25 @@ pub fn partial_rotary_emb_qkv(query: &Tensor, key: &Tensor, cos_sin: &Tensor, si
     let query_pass = query.narrow(D::Minus1, rot_ndims, pass_ndims)?;
     let key_rot = key.narrow(D::Minus1, 0, rot_ndims)?;
     let key_pass = key.narrow(D::Minus1, rot_ndims, pass_ndims)?;
-    let (query_rot, key_rot) =
-        apply_rotary_emb_qkv(&query_rot, &key_rot, &cos_sin, &sin, index_pos, 0, query_key_transposed, true)?;
+    let (query_rot, key_rot) = apply_rotary_emb_qkv(
+        &query_rot,
+        &key_rot,
+        &cos_sin,
+        &sin,
+        index_pos,
+        0,
+        query_key_transposed,
+        true,
+    )?;
     let query_states = Tensor::cat(&[query_rot, query_pass], D::Minus1)?.contiguous()?;
     let key_states = Tensor::cat(&[key_rot, key_pass], D::Minus1)?.contiguous()?;
     Ok((query_states, key_states))
 }
 
 #[cfg(feature = "gcu")]
-pub fn kvconcat(
-    ltensor: &Tensor,
-    rtensor: &Tensor,
-    concat_dim: i32,
-) -> Result<Tensor> {
+pub fn kvconcat(ltensor: &Tensor, rtensor: &Tensor, concat_dim: i32) -> Result<Tensor> {
     use candle::gcu_backend::KVConcat;
-    let op = KVConcat {
-        concat_dim
-    };
+    let op = KVConcat { concat_dim };
     //inputs for kvconcat must be contiguous tensors
     if ltensor.is_contiguous() && rtensor.is_contiguous() {
         ltensor.apply_op2(rtensor, op)
@@ -1141,18 +1197,14 @@ pub fn kvconcat(
 }
 
 #[cfg(not(feature = "gcu"))]
-pub fn kvconcat(
-    ltensor: &Tensor,
-    rtensor: &Tensor,
-    concat_dim: i32,
-) -> Result<Tensor> {
+pub fn kvconcat(ltensor: &Tensor, rtensor: &Tensor, concat_dim: i32) -> Result<Tensor> {
     Tensor::cat(&[ltensor, &rtensor], concat_dim as usize)?.contiguous()
 }
 
 #[cfg(feature = "gcu")]
 pub fn silu(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::Silu; 
+    let op = Activation::Silu;
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {
@@ -1163,7 +1215,7 @@ pub fn silu(xs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "gcu")]
 pub fn relu(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::ReLU; 
+    let op = Activation::ReLU;
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {
@@ -1174,7 +1226,7 @@ pub fn relu(xs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "gcu")]
 pub fn gelu(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::GeLU; 
+    let op = Activation::GeLU;
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {
@@ -1185,7 +1237,7 @@ pub fn gelu(xs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "gcu")]
 pub fn tanh(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::Tanh; 
+    let op = Activation::Tanh;
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {
@@ -1196,7 +1248,7 @@ pub fn tanh(xs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "gcu")]
 pub fn sigmoid(xs: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::Sigmoid; 
+    let op = Activation::Sigmoid;
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {
@@ -1207,7 +1259,7 @@ pub fn sigmoid(xs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "gcu")]
 pub fn elu(xs: &Tensor, alpha: f64) -> Result<Tensor> {
     use candle::gcu_backend::Activation;
-    let op = Activation::Elu(alpha); 
+    let op = Activation::Elu(alpha);
     if xs.is_contiguous() {
         xs.apply_op1(op)
     } else {

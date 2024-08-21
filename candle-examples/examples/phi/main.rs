@@ -97,7 +97,9 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
@@ -108,7 +110,11 @@ impl TextGeneration {
                 Model::Quantized(m) => m.forward(&input)?,
                 Model::Phi3(m) => m.forward(&input, pos)?.i((.., 0, ..))?,
             };
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -378,7 +384,10 @@ fn main() -> Result<()> {
         };
         Model::Quantized(model)
     } else {
-        let dtype = if ((args.model == WhichModel::V3 || args.model == WhichModel::V3Medium) && device.is_cuda()) || device.is_gcu() {
+        let dtype = if ((args.model == WhichModel::V3 || args.model == WhichModel::V3Medium)
+            && device.is_cuda())
+            || device.is_gcu()
+        {
             DType::BF16
         } else {
             DType::F32
@@ -388,7 +397,7 @@ fn main() -> Result<()> {
             WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 => {
                 let config_filename = match args.config {
                     Some(file) => std::path::PathBuf::from(file),
-                    _ => repo.get("config.json")?
+                    _ => repo.get("config.json")?,
                 };
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: PhiConfig = serde_json::from_str(&config)?;

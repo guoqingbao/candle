@@ -102,7 +102,9 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
@@ -110,7 +112,11 @@ impl TextGeneration {
                 Model::Mistral(m) => m.forward(&input, start_pos)?,
                 Model::Quantized(m) => m.forward(&input, start_pos)?,
             };
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -235,7 +241,7 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
-    
+
     /// Use the slower dmmv cuda kernel.
     #[arg(long)]
     force_dmmv: bool,

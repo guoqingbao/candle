@@ -96,12 +96,18 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
             let logits = self.model.forward(&input, start_pos)?;
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -310,10 +316,10 @@ fn main() -> Result<()> {
     let start = std::time::Instant::now();
     let config_file = match args.config {
         Some(file) => std::path::PathBuf::from(file),
-        _ => repo.get("config.json")?
+        _ => repo.get("config.json")?,
     };
     let device = candle_examples::device(args.cpu)?;
-    let dtype = if device.is_cuda() || device.is_gcu(){
+    let dtype = if device.is_cuda() || device.is_gcu() {
         DType::BF16
     } else {
         DType::F32

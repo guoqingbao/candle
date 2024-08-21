@@ -1,4 +1,3 @@
-
 use crate::{Error, Result, Shape};
 
 #[derive(Debug, Copy, PartialEq, Eq, Clone)]

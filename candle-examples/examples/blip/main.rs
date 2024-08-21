@@ -120,10 +120,12 @@ pub fn main() -> anyhow::Result<()> {
         let image = load_image(args.image)?.to_device(&device)?;
         println!("loaded image {image:?}");
 
-        let vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file.clone()], DType::F32, &device)? };
-        let vbcpu =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &Device::Cpu)? }; //TODO: vision model on gcu
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_file.clone()], DType::F32, &device)?
+        };
+        let vbcpu = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &Device::Cpu)?
+        }; //TODO: vision model on gcu
         let model = blip::BlipForConditionalGeneration::new(&config, vb, vbcpu)?;
         let image_embeds = image.unsqueeze(0)?.apply(model.vision_model())?;
         (image_embeds, device, Model::M(model))

@@ -1,5 +1,5 @@
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module, VarBuilder, apply_rotary_emb_qkv, kvconcat};
+use candle_nn::{apply_rotary_emb_qkv, kvconcat, Embedding, Module, VarBuilder};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -123,7 +123,8 @@ impl Cache {
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
-        let cos_sin = Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous float32 tensor;
+        let cos_sin =
+            Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous float32 tensor;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
         let cos = idx_theta.cos()?.to_dtype(dtype)?;
         let sin = idx_theta.sin()?.to_dtype(dtype)?;
@@ -134,7 +135,7 @@ impl Cache {
             device: device.clone(),
             cos,
             sin,
-            cos_sin
+            cos_sin,
         })
     }
 
@@ -152,7 +153,6 @@ impl Cache {
         }
     }
 }
-
 
 pub fn linear(size1: usize, size2: usize, vb: VarBuilder) -> Result<Linear> {
     let span = tracing::span!(tracing::Level::TRACE, "linear");
@@ -227,7 +227,7 @@ impl CausalSelfAttention {
         let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
         Ok(rope)
     }
-   
+
     pub fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
         let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
@@ -245,8 +245,21 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let (q, mut k) = apply_rotary_emb_qkv(&q, &k, if q.device().is_gcu() {&self.cache.cos_sin} else {&self.cache.cos}, &self.cache.sin, index_pos, 0, true, true)?;
-        
+        let (q, mut k) = apply_rotary_emb_qkv(
+            &q,
+            &k,
+            if q.device().is_gcu() {
+                &self.cache.cos_sin
+            } else {
+                &self.cache.cos
+            },
+            &self.cache.sin,
+            index_pos,
+            0,
+            true,
+            true,
+        )?;
+
         if self.cache.use_kv_cache {
             let mut cache = self.cache.kvs.lock().unwrap();
             if let Some((cache_k, cache_v)) = &cache[block_idx] {

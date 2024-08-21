@@ -1,6 +1,8 @@
 use crate::backend::BackendStorage;
 use crate::op::{self, CmpOp, ReduceOp};
-use crate::{CpuStorage, CudaStorage, GcuStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
+use crate::{
+    CpuStorage, CudaStorage, DType, Device, Error, GcuStorage, Layout, MetalStorage, Result, Shape,
+};
 use crate::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
 
 // We do not want to implement Clone on Storage as cloning may fail because of
@@ -239,7 +241,6 @@ impl Storage {
             Self::Gcu(storage) => {
                 let (storage, shape) = c.gcu_fwd(storage, l)?;
                 Ok((Self::Gcu(storage), shape))
-
             }
             Self::Metal(storage) => {
                 let (storage, shape) = c.metal_fwd(storage, l)?;

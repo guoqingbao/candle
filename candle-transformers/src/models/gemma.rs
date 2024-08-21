@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{kvconcat, apply_rotary_emb_qkv, linear_b as linear, RmsNorm, Linear, VarBuilder};
 use candle_nn::Activation;
+use candle_nn::{apply_rotary_emb_qkv, kvconcat, linear_b as linear, Linear, RmsNorm, VarBuilder};
 
 fn default_max_position_embeddings() -> usize {
     4096
@@ -180,14 +180,11 @@ impl Attention {
         let key_states = self.k_proj.forward(xs)?;
         let value_states = self.v_proj.forward(xs)?;
 
-        let (query_states, key_states, value_states) = if seq_len == 1 { 
+        let (query_states, key_states, value_states) = if seq_len == 1 {
             //no need transpose for seq_len == 1, change reshape dim
-            let q = query_states
-                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
-            let k = key_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            let v = value_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let q = query_states.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = query_states
@@ -205,9 +202,22 @@ impl Attention {
         // let (query_states, key_states) =
         //     self.rotary_emb
         //         .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
-        let (query_states, key_states) = apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
+        let (query_states, key_states) = apply_rotary_emb_qkv(
+            &query_states,
+            &key_states,
+            if query_states.device().is_gcu() {
+                &self.rotary_emb.cos_sin
+            } else {
+                &self.rotary_emb.cos
+            },
+            &self.rotary_emb.sin,
+            seqlen_offset,
+            0,
+            true,
+            true,
+        )?;
 
-        let (key_states, value_states) = match &self.kv_cache { 
+        let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {
                 // let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
@@ -219,9 +229,8 @@ impl Attention {
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?;//.contiguous()?;
-        let value_states =
-            crate::utils::repeat_kv(value_states, self.num_kv_groups)?;//.contiguous()?;
+        let key_states = crate::utils::repeat_kv(key_states, self.num_kv_groups)?; //.contiguous()?;
+        let value_states = crate::utils::repeat_kv(value_states, self.num_kv_groups)?; //.contiguous()?;
 
         let attn_output = if self.use_flash_attn {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
@@ -290,7 +299,7 @@ impl DecoderLayer {
         let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            vb.pp("post_attention_layernorm")
+            vb.pp("post_attention_layernorm"),
         )?;
         Ok(Self {
             self_attn,

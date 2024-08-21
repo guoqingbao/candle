@@ -64,16 +64,22 @@ impl TextGeneration {
                 start_gen = std::time::Instant::now()
             }
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            
+
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
             let logits = self.model.forward(&input, past_len)?;
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
 
             let next_token = self.logits_processor.sample(&logits)?;

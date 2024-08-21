@@ -61,7 +61,7 @@ impl Tensor {
         // let all_contiguous = args.iter().all(|v| v.as_ref().is_contiguous());
         // if all_contiguous {
         //     Self::cat_contiguous(args, dim)
-        // } else 
+        // } else
         if dim == 0 {
             Self::cat0(args)
         } else {

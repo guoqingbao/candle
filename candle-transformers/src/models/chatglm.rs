@@ -54,7 +54,7 @@ impl Config {
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     pub cache: Tensor,
-    pub cos_sin: Tensor
+    pub cos_sin: Tensor,
 }
 
 impl RotaryEmbedding {
@@ -164,7 +164,8 @@ impl CoreAttention {
             )?,
             None => matmul_result,
         };
-        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(dtype)?;
+        let attention_probs =
+            candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(dtype)?;
 
         let output_size = (
             value_layer.dim(1)?,
@@ -176,7 +177,10 @@ impl CoreAttention {
             value_layer.reshape((value_layer.dim(0)?, output_size.0 * output_size.1, ()))?;
         let attention_probs =
             attention_probs.reshape((output_size.0 * output_size.1, output_size.2, ()))?;
-        let context_layer = Tensor::matmul(&attention_probs, &value_layer.transpose(0, 1)?.contiguous()?)?; //Transposed weight supported on GCU, but not dim0 <-> dim1
+        let context_layer = Tensor::matmul(
+            &attention_probs,
+            &value_layer.transpose(0, 1)?.contiguous()?,
+        )?; //Transposed weight supported on GCU, but not dim0 <-> dim1
         let context_layer = context_layer.reshape(output_size)?;
         let context_layer = context_layer.permute((2, 0, 1, 3))?.contiguous()?;
         context_layer.flatten_from(D::Minus2)
@@ -284,9 +288,18 @@ impl SelfAttention {
         // let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
         // let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
 
-        let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2; 
+        let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2;
         #[cfg(feature = "gcu")]
-        let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(&query_layer, &key_layer, &rotary_emb.cos_sin, &rotary_emb.cache, seqlen_offset, rot_dim, false, false)?;
+        let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(
+            &query_layer,
+            &key_layer,
+            &rotary_emb.cos_sin,
+            &rotary_emb.cache,
+            seqlen_offset,
+            rot_dim,
+            false,
+            false,
+        )?;
 
         // KV cache.
         let (key_layer, value_layer) = match &self.kv_cache {

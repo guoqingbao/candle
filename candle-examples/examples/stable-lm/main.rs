@@ -87,7 +87,9 @@ impl TextGeneration {
             let input = Tensor::new(ctxt, &self.device)?;
             let input = if batch_size > 1 {
                 let dims = input.layout().dims();
-                input.broadcast_as((batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+                input
+                    .broadcast_as((batch_size, if dims.len() > 1 { dims[1] } else { dims[0] }))?
+                    .contiguous()?
             } else {
                 input.unsqueeze(0)?
             };
@@ -95,7 +97,11 @@ impl TextGeneration {
                 Model::StableLM(m) => m.forward(&input, start_pos)?,
                 Model::Quantized(m) => m.forward(&input, start_pos)?,
             };
-            let logits = if batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+            let logits = if batch_size > 1 {
+                logits.narrow(0, 0, 1)?
+            } else {
+                logits
+            };
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let logits = if self.repeat_penalty == 1. {
                 logits
@@ -298,7 +304,7 @@ fn main() -> Result<()> {
         Which::V1 | Which::V1Zephyr | Which::V2 | Which::V2Zephyr | Which::Code => {
             let config_filename = match args.config {
                 Some(file) => std::path::PathBuf::from(file),
-                _ => repo.get("config.json")?
+                _ => repo.get("config.json")?,
             };
             // let config_filename = repo.get("config.json")?;
             let config = std::fs::read_to_string(config_filename)?;

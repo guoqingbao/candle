@@ -109,7 +109,8 @@ impl RotaryEmbedding {
             .collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
-        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?.to_dtype(dtype)?
+        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
+            .to_dtype(dtype)?
             .reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
         let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
@@ -239,14 +240,11 @@ impl Attention {
         let key_states = self.k_proj.forward(xs)?;
         let value_states = self.v_proj.forward(xs)?;
 
-        let (query_states, key_states, value_states) = if seq_len == 1 { 
+        let (query_states, key_states, value_states) = if seq_len == 1 {
             //no need transpose for seq_len == 1, change reshape dim
-            let q = query_states
-                .reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
-            let k = key_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            let v = value_states
-                .reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let q = query_states.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
+            let k = key_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
+            let v = value_states.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             (q, k, v)
         } else {
             let q = query_states
@@ -261,9 +259,21 @@ impl Attention {
             (q, k, v.contiguous()?)
         };
 
-        let (query_states, key_states) = 
-            candle_nn::apply_rotary_emb_qkv(&query_states, &key_states, if query_states.device().is_gcu() {&self.rotary_emb.cos_sin} else {&self.rotary_emb.cos}, &self.rotary_emb.sin, seqlen_offset, 0, true, true)?;
-        
+        let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
+            &query_states,
+            &key_states,
+            if query_states.device().is_gcu() {
+                &self.rotary_emb.cos_sin
+            } else {
+                &self.rotary_emb.cos
+            },
+            &self.rotary_emb.sin,
+            seqlen_offset,
+            0,
+            true,
+            true,
+        )?;
+
         let (key_states, value_states) = match &self.kv_cache {
             None => (key_states, value_states),
             Some((prev_k, prev_v)) => {

@@ -233,7 +233,7 @@ impl crate::backend::BackendDevice for GcuDevice {
     fn rand_normal(&self, _: &Shape, _: DType, _: f64, _: f64) -> Result<Self::Storage> {
         Err(Error::NotCompiledWithGcuSupport)
     }
-    
+
     fn synchronize(&self) -> Result<()> {
         Ok(())
     }

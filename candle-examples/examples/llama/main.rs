@@ -163,30 +163,31 @@ fn main() -> Result<()> {
         let config = config.into_config(args.use_flash_attn);
 
         let filenames = match args.which {
-            Which::V1 | Which::V2 | Which::V3 | Which::V3Instruct | Which::V31 | Which::V31Instruct | Which::Solar10_7B => {
-                match &args.local_weights {
-                    Some(path) => {
-                        candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
-                    }
-                    _ => {
-                        candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?
-                    }
+            Which::V1
+            | Which::V2
+            | Which::V3
+            | Which::V3Instruct
+            | Which::V31
+            | Which::V31Instruct
+            | Which::Solar10_7B => match &args.local_weights {
+                Some(path) => candle_examples::hub_load_local_safetensors(
+                    path,
+                    "model.safetensors.index.json",
+                )?,
+                _ => candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?,
+            },
+            Which::TinyLlama1_1BChat => match &args.local_weights {
+                Some(path) => {
+                    let mut filenames = vec![];
+                    filenames.push((path.to_owned() + "model.safetensors").into());
+                    filenames
                 }
-            }
-            Which::TinyLlama1_1BChat => {
-                match &args.local_weights {
-                    Some(path) => {
-                        let mut filenames = vec![];
-                        filenames.push((path.to_owned() + "model.safetensors").into());
-                        filenames
-                    }
-                    _ => { 
-                        vec![api.get("model.safetensors")?]
-                    }
+                _ => {
+                    vec![api.get("model.safetensors")?]
                 }
-            }
+            },
         };
-       
+
         println!("building the model");
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
@@ -240,12 +241,21 @@ fn main() -> Result<()> {
         let input = Tensor::new(ctxt, &device)?;
         let input = if args.batch_size > 1 {
             let dims = input.layout().dims();
-            input.broadcast_as((args.batch_size, if dims.len() > 1 {dims[1]} else {dims[0]}))?.contiguous()?
+            input
+                .broadcast_as((
+                    args.batch_size,
+                    if dims.len() > 1 { dims[1] } else { dims[0] },
+                ))?
+                .contiguous()?
         } else {
             input.unsqueeze(0)?
         };
         let logits = llama.forward(&input, context_index, &mut cache)?;
-        let logits = if args.batch_size > 1 { logits.narrow(0, 0, 1)? } else { logits };
+        let logits = if args.batch_size > 1 {
+            logits.narrow(0, 0, 1)?
+        } else {
+            logits
+        };
 
         let logits = logits.squeeze(0)?;
         let logits = if args.repeat_penalty == 1. {

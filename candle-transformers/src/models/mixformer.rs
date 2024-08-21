@@ -266,7 +266,11 @@ impl MHA {
             span: tracing::span!(tracing::Level::TRACE, "mha"),
         })
     }
-    fn rotary_emb_qkv(&self, qkv: &Tensor, seqlen_offset: usize) -> Result<(Tensor, Tensor, Tensor)> {
+    fn rotary_emb_qkv(
+        &self,
+        qkv: &Tensor,
+        seqlen_offset: usize,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
         if qkv.device().is_gcu() {
             let q = qkv.i((.., .., 0))?;
             let k = qkv.i((.., .., 1))?;
@@ -274,9 +278,17 @@ impl MHA {
             let (_, rotary_dim) = self.rotary_emb.cos.dims2()?;
             let rotary_dim = rotary_dim * 2;
             #[cfg(feature = "gcu")]
-            let (q, k) = candle_nn::apply_rotary_emb_qkv(&q, &k, &self.rotary_emb.cos_sin, &self.rotary_emb.sin, seqlen_offset, rotary_dim, false, true)?;
+            let (q, k) = candle_nn::apply_rotary_emb_qkv(
+                &q,
+                &k,
+                &self.rotary_emb.cos_sin,
+                &self.rotary_emb.sin,
+                seqlen_offset,
+                rotary_dim,
+                false,
+                true,
+            )?;
             Ok((q, k, v))
-            
         } else {
             self.rotary_emb.apply_rotary_emb_qkv(qkv, seqlen_offset)
         }
@@ -314,13 +326,9 @@ impl MHA {
         // scores = scores + causal_mask.to(dtype=scores.dtype)
         let attn_weights = match mask {
             None => attn_weights,
-            Some(mask) => {
-                attn_weights.broadcast_add(mask)?
-            }
+            Some(mask) => attn_weights.broadcast_add(mask)?,
         };
-        let attn_weights = {
-            candle_nn::ops::softmax_last_dim(&attn_weights)?
-        };
+        let attn_weights = { candle_nn::ops::softmax_last_dim(&attn_weights)? };
 
         // output = torch.einsum('bhts,bshd->bthd', attention_drop, v)
         // attn_weights: b*h,t,s, v: b*h,s,d

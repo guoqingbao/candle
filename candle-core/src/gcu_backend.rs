@@ -35,7 +35,7 @@ use half::{bf16, f16};
 use std::sync::Arc;
 pub use ubridge;
 use ubridge::gcu_device::GcuDevice as RawDevice;
-use ubridge::gcu_launch::{GcuLaunchAsync, GcuLaunchConfig};
+use ubridge::gcu_launch::GcuLaunchAsync;
 use ubridge::gcu_slice::{GcuSlice, GcuView, GcuViewMut};
 use ubridge::prelude::DevicePtr;
 use uhal::error::DeviceError;
@@ -754,7 +754,7 @@ impl Map1 for Powf {
         let shape = layout.shape();
         let dims = shape.dims();
         let el = shape.elem_count();
-        let cfg = GcuLaunchConfig::for_threds(12);
+        let cfg = &dev.launch_cfg;
         let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), ubridge::UNARY)?;
@@ -2325,7 +2325,7 @@ impl BackendStorage for GcuStorage {
             .htod_copy([dims, src_l.stride(), &dst_layout, origin_shape.dims()].concat())
             .w()?;
 
-        let cfg = GcuLaunchConfig::for_ucopy();
+        let cfg = &dev.launch_cfg;
         match (&self.slice, &mut dst.slice) {
             (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {
                 let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);

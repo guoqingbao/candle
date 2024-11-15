@@ -64,6 +64,7 @@ impl crate::CustomOp1 for ArgSort {
     ) -> Result<(crate::CpuStorage, crate::Shape)> {
         let sort_indexes = match storage {
             crate::CpuStorage::U8(vs) => self.asort(vs, layout),
+            crate::CpuStorage::I8(vs) => self.asort(vs, layout),
             crate::CpuStorage::U32(vs) => self.asort(vs, layout),
             crate::CpuStorage::I64(vs) => self.asort(vs, layout),
             crate::CpuStorage::BF16(vs) => self.asort(vs, layout),

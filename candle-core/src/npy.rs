@@ -88,6 +88,7 @@ impl Header {
             DType::I64 => "i8",
             DType::U32 => "u4",
             DType::U8 => "u1",
+            DType::I8 => "i1",
         };
         if !shape.is_empty() {
             shape.push(',')
@@ -225,6 +226,11 @@ impl Tensor {
                 Tensor::from_vec(data_t, shape, &Device::Cpu)
             }
             DType::U8 => {
+                let mut data_t = vec![0u8; elem_count];
+                reader.read_exact(&mut data_t)?;
+                Tensor::from_vec(data_t, shape, &Device::Cpu)
+            }
+            DType::I8 => {
                 let mut data_t = vec![0u8; elem_count];
                 reader.read_exact(&mut data_t)?;
                 Tensor::from_vec(data_t, shape, &Device::Cpu)

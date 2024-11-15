@@ -95,6 +95,7 @@ from_tensor!(bf16);
 from_tensor!(i64);
 from_tensor!(u32);
 from_tensor!(u8);
+from_tensor!(i8);
 
 impl Tensor {
     pub fn write_bytes<W: std::io::Write>(&self, f: &mut W) -> crate::Result<()> {
@@ -138,6 +139,11 @@ impl Tensor {
             DType::U8 => {
                 let vs = vs.to_vec1::<u8>()?;
                 f.write_all(&vs)?;
+            }
+            DType::I8 => {
+                for v in vs.to_vec1::<i8>()? {
+                    f.write_i8(v)?
+                }
             }
         }
         Ok(())

@@ -9,6 +9,7 @@ pub trait Map1 {
     fn map(&self, vs: &C, layout: &Layout) -> Result<C> {
         match vs {
             C::U8(vs) => Ok(C::U8(self.f(vs, layout)?)),
+            C::I8(vs) => Ok(C::I8(self.f(vs, layout)?)),
             C::U32(vs) => Ok(C::U32(self.f(vs, layout)?)),
             C::I64(vs) => Ok(C::I64(self.f(vs, layout)?)),
             C::BF16(vs) => Ok(C::BF16(self.f(vs, layout)?)),
@@ -25,6 +26,7 @@ pub trait Map1Any {
     fn map(&self, vs: &C, layout: &Layout) -> Result<C> {
         match vs {
             C::U8(vs) => Ok(self.f(vs, layout, C::U8)?),
+            C::I8(vs) => Ok(self.f(vs, layout, C::I8)?),
             C::U32(vs) => Ok(self.f(vs, layout, C::U32)?),
             C::I64(vs) => Ok(self.f(vs, layout, C::I64)?),
             C::BF16(vs) => Ok(self.f(vs, layout, C::BF16)?),

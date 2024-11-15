@@ -1287,3 +1287,33 @@ impl crate::Module for Identity {
         Ok(xs.clone())
     }
 }
+
+#[cfg(feature = "gcu")]
+pub fn gptq_matmul(
+    x: &Tensor,
+    qweight: &Tensor,
+    scale: &Tensor,
+    qzeros: &Option<Tensor>,
+    g_idx: &Option<Tensor>,
+    _perm: &Option<Tensor>,
+    workspace: &Option<Tensor>,
+    bits: i32,
+) -> Result<Tensor> {
+    use candle::gcu_backend::GPTQMatMul;
+    let op = GPTQMatMul {
+        qzeros: qzeros.to_owned(),
+        g_idx: g_idx.to_owned(),
+        workspace: workspace.to_owned(),
+        bits,
+    };
+    x.apply_op3(qweight, scale, op)
+}
+
+#[cfg(feature = "gcu")]
+pub fn gptq_weight_repack(qweight: &Tensor) -> Result<Tensor> {
+    use candle::gcu_backend::GPTQRepack;
+    let op = GPTQRepack {
+        bits: 4,
+    };
+    qweight.apply_op1(op)
+}

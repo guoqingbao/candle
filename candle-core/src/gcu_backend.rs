@@ -2512,7 +2512,7 @@ impl BackendStorage for GcuStorage {
 
 pub struct Rope {
     pub cos_sin_stride: i32,
-    pub index_pos: i32,
+    pub index_positions: Vec<i32>,
     pub batch: i32,
     pub num_tokens: i32,
     pub q_head_size: i32,
@@ -2560,6 +2560,10 @@ impl crate::CustomOp3 for Rope {
         };
         let shape = query_l.shape();
 
+        let positions = dev
+            .htod_copy(self.index_positions.to_vec())
+            .w()?;
+
         match (&query.slice, &key.slice, &cos_sin.slice) {
             (
                 GcuStorageSlice::BF16(query_),
@@ -2572,7 +2576,7 @@ impl crate::CustomOp3 for Rope {
                     key_.device_ptr(),
                     cos_sin_.device_ptr(),
                     self.cos_sin_stride,
-                    self.index_pos,
+                    positions.device_ptr(),
                     self.batch,
                     self.num_tokens,
                     self.q_head_size,
@@ -2594,7 +2598,7 @@ impl crate::CustomOp3 for Rope {
                     key_.device_ptr(),
                     cos_sin_.device_ptr(),
                     self.cos_sin_stride,
-                    self.index_pos,
+                    positions.device_ptr(),
                     self.batch,
                     self.num_tokens,
                     self.q_head_size,
@@ -2616,7 +2620,7 @@ impl crate::CustomOp3 for Rope {
                     key_.device_ptr(),
                     cos_sin_.device_ptr(),
                     self.cos_sin_stride,
-                    self.index_pos,
+                    positions.device_ptr(),
                     self.batch,
                     self.num_tokens,
                     self.q_head_size,

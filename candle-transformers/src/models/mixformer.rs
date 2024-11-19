@@ -277,13 +277,15 @@ impl MHA {
             let v = qkv.i((.., .., 2))?;
             let (_, rotary_dim) = self.rotary_emb.cos.dims2()?;
             let rotary_dim = rotary_dim * 2;
+            let mut input_positions = Vec::<i32>::new();
+            input_positions.push(seqlen_offset as i32);
             #[cfg(feature = "gcu")]
             let (q, k) = candle_nn::apply_rotary_emb_qkv(
                 &q,
                 &k,
                 &self.rotary_emb.cos_sin,
                 &self.rotary_emb.sin,
-                seqlen_offset,
+                &input_positions,
                 rotary_dim,
                 false,
                 true,

@@ -299,7 +299,8 @@ impl CausalSelfAttention {
                 .transpose(1, 2)?;
             (q, k, v.contiguous()?)
         };
-
+        let mut input_positions = Vec::<i32>::new();
+        input_positions.push(index_pos as i32);
         let (q, mut k) = candle_nn::apply_rotary_emb_qkv(
             &q,
             &k,
@@ -309,7 +310,7 @@ impl CausalSelfAttention {
                 &cache.cos
             },
             &cache.sin,
-            index_pos,
+            &input_positions,
             0,
             true,
             true,

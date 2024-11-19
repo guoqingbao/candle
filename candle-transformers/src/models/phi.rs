@@ -229,13 +229,16 @@ impl Attention {
             true,
         )?;
 
+        let mut input_positions = Vec::<i32>::new();
+        input_positions.push(seqlen_offset as i32);
+
         #[cfg(feature = "gcu")]
         let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
             &query_states,
             &key_states,
             &self.rotary_emb.cos_sin,
             &self.rotary_emb.sin,
-            seqlen_offset,
+            &input_positions,
             self.rotary_emb.dim,
             true,
             true,

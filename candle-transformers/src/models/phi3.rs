@@ -66,12 +66,14 @@ impl RotaryEmbedding {
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         if q.device().is_gcu() {
+            let mut input_positions = Vec::<i32>::new();
+            input_positions.push(seqlen_offset as i32);
             candle_nn::apply_rotary_emb_qkv(
                 q,
                 k,
                 &self.cos_sin,
                 &self.sin,
-                seqlen_offset,
+                &input_positions,
                 0,
                 true,
                 true,

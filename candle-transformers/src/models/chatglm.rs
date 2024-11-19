@@ -289,13 +289,15 @@ impl SelfAttention {
         // let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
 
         let rot_dim = rotary_emb.cache.dim(D::Minus2)? * 2;
+        let mut input_positions = Vec::<i32>::new();
+        input_positions.push(seqlen_offset as i32);
         #[cfg(feature = "gcu")]
         let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(
             &query_layer,
             &key_layer,
             &rotary_emb.cos_sin,
             &rotary_emb.cache,
-            seqlen_offset,
+            &input_positions,
             rot_dim,
             false,
             false,

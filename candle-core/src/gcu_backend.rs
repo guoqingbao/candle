@@ -3009,7 +3009,7 @@ impl GPTQMatMul {
         let mut out_shape: Vec<usize> = x_shape.to_vec();
         out_shape[x_shape.len() - 1] = size_n;
         let oshape: Shape = out_shape.into();
-        let (b, m) = if x_shape.len() > 3 { (x_shape[0], x_shape[1]) } else { (1, x_shape[0]) };
+        let (b, m) = if x_shape.len() > 3 { (x_shape[0], x_shape[1] * x_shape[2]) } else { (1, x_shape[0] * x_shape[1]) };
 
         let elem_count = oshape.elem_count();
         let mut lhs_transpose = 0;

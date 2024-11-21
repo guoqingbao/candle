@@ -1295,7 +1295,6 @@ pub fn gptq_matmul(
     scale: &Tensor,
     qzeros: &Option<Tensor>,
     g_idx: &Option<Tensor>,
-    _perm: &Option<Tensor>,
     workspace: &Option<Tensor>,
     bits: i32,
 ) -> Result<Tensor> {

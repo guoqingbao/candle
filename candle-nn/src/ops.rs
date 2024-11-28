@@ -1297,6 +1297,7 @@ pub fn gptq_matmul(
     g_idx: &Option<Tensor>,
     workspace: &Option<Tensor>,
     bits: i32,
+    group_size: i32,
 ) -> Result<Tensor> {
     use candle::gcu_backend::GPTQMatMul;
     let op = GPTQMatMul {
@@ -1304,6 +1305,7 @@ pub fn gptq_matmul(
         g_idx: g_idx.to_owned(),
         workspace: workspace.to_owned(),
         bits,
+        group_size,
     };
     x.apply_op3(qweight, scale, op)
 }

@@ -2447,6 +2447,25 @@ impl BackendStorage for GcuStorage {
                     unsafe { func.launch(&cfg, params) }.w()?
                 }
             }
+            (GcuStorageSlice::I8(src), GcuStorageSlice::I8(dst)) => {
+                let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
+                if src_l.is_contiguous() && origin_el_count == el_count {
+                    dev.dtod_copy(&src, &mut dst).w()?
+                } else {
+                    let func = dev.get_or_load_func("ucopy_i8", ubridge::UNARY)?;
+                    let params = (
+                        origin_el_count,
+                        el_count,
+                        dims.len(),
+                        origin_shape.dims().len(),
+                        ds.device_ptr(),
+                        src.device_ptr(),
+                        dst.device_ptr(),
+                        op_type,
+                    );
+                    unsafe { func.launch(&cfg, params) }.w()?
+                }
+            }
             (GcuStorageSlice::U32(src), GcuStorageSlice::U32(dst)) => {
                 let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);
                 if src_l.is_contiguous() && origin_el_count == el_count {
@@ -2977,6 +2996,7 @@ pub struct GPTQMatMul {
     pub g_idx: Option<crate::Tensor>,
     pub workspace: Option<crate::Tensor>,
     pub bits: i32,
+    pub group_size: i32, 
 }
 
 impl GPTQMatMul {
@@ -2995,7 +3015,7 @@ impl GPTQMatMul {
         let x_shape = x_l.dims();
         let weight_shape = qweight_l.dims();
         // let zero_shape = self.qzeros.shape().dims();
-        let scale_shape = scale_l.dims();
+        // let scale_shape = scale_l.dims();
 
         // let pack_factor: usize = 32 / self.bits as usize;
         let pack_factor = 1;
@@ -3009,7 +3029,7 @@ impl GPTQMatMul {
         let mut out_shape: Vec<usize> = x_shape.to_vec();
         out_shape[x_shape.len() - 1] = size_n;
         let oshape: Shape = out_shape.into();
-        let (b, m) = if x_shape.len() > 3 { (x_shape[0], x_shape[1] * x_shape[2]) } else { (1, x_shape[0] * x_shape[1]) };
+        let (b, m) = if x_shape.len() > 2 { (x_shape[0], x_shape[1]) } else { (1, x_shape[0]) };
 
         let elem_count = oshape.elem_count();
         let mut lhs_transpose = 0;
@@ -3034,11 +3054,6 @@ impl GPTQMatMul {
             }
         }
 
-        let groupsize: i32 = if scale_shape[0] == 1 {
-            -1i32
-        } else {
-            (size_k / scale_shape[0]) as i32
-        };
         let slice = match (&x.slice, &qweight.slice, &scale.slice) {
             (GcuStorageSlice::BF16(lhs), GcuStorageSlice::I8(rhs), GcuStorageSlice::BF16(sc)) => {
                 let lhs = &lhs.slice(x_l.start_offset()..);
@@ -3093,7 +3108,7 @@ impl GPTQMatMul {
                     param.sip_k,
                     param.sip_n,
                     broadcasted_weight,
-                    groupsize,
+                    self.group_size,
                 );
                 unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
@@ -3150,7 +3165,7 @@ impl GPTQMatMul {
                     param.sip_k,
                     param.sip_n,
                     broadcasted_weight,
-                    groupsize,
+                    self.group_size,
                 );
                 unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
                 GcuStorageSlice::F16(out)

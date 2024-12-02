@@ -2168,10 +2168,12 @@ impl BackendStorage for GcuStorage {
                 // let bias = dev.alloc::<bf16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataBf16,
+                    ubridge::DATATYPE::DataBf16,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     k,
                     n,
+                    rhs_transpose,
                 );
                 let kernel_name = "matmul_bf16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
@@ -2207,10 +2209,12 @@ impl BackendStorage for GcuStorage {
                 // let bias = dev.alloc::<f16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataFp16,
+                    ubridge::DATATYPE::DataFp16,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     k,
                     n,
+                    rhs_transpose,
                 );
                 let kernel_name = "matmul_f16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
@@ -2249,10 +2253,12 @@ impl BackendStorage for GcuStorage {
                 // let bias = dev.alloc::<f32>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataFp32,
+                    ubridge::DATATYPE::DataFp32,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     k,
                     n,
+                    rhs_transpose,
                 );
 
                 let kernel_name = "matmul_f32".to_string();
@@ -2291,10 +2297,12 @@ impl BackendStorage for GcuStorage {
                 // let bias = dev.alloc::<f64>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataF64,
+                    ubridge::DATATYPE::DataF64,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     k,
                     n,
+                    rhs_transpose,
                 );
                 let kernel_name = "matmul_f64".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
@@ -3078,10 +3086,12 @@ impl GPTQMatMul {
                 // let bias = dev.alloc::<bf16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataBf16,
+                    ubridge::DATATYPE::DataI8,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     size_k,
                     size_n,
+                    rhs_transpose,
                 );
                 let kernel_name = if self.bits == 8 { "matmul_bf16_8bit".to_string() } else { "matmul_bf16_4bit".to_string() };
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
@@ -3135,10 +3145,12 @@ impl GPTQMatMul {
                 // let bias = dev.alloc::<bf16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataFp16,
+                    ubridge::DATATYPE::DataI8,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     size_k,
                     size_n,
+                    rhs_transpose,
                 );
                 let kernel_name = if self.bits == 8 { "matmul_f16_8bit".to_string() } else { "matmul_f16_4bit".to_string() };
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;

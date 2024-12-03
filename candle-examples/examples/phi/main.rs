@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::{Parser, ValueEnum};
-
+use std::path::Path;
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::models::mixformer::{Config, MixFormerSequentialForCausalLM as MixFormer};
 use candle_transformers::models::phi::{Config as PhiConfig, Model as Phi};
@@ -108,7 +108,7 @@ impl TextGeneration {
                 Model::MixFormer(m) => m.forward(&input)?,
                 Model::Phi(m) => m.forward(&input)?,
                 Model::Quantized(m) => m.forward(&input)?,
-                Model::Phi3(m) => m.forward(&input, pos)?.i((.., 0, ..))?,
+                Model::Phi3(m) => m.forward(&input, pos)?,
             };
             let logits = if batch_size > 1 {
                 logits.narrow(0, 0, 1)?
@@ -218,7 +218,7 @@ struct Args {
     revision: Option<String>,
 
     #[arg(long)]
-    weight_file: Option<String>,
+    weight_path: Option<String>,
 
     #[arg(long)]
     tokenizer: Option<String>,
@@ -226,8 +226,6 @@ struct Args {
     #[arg(long)]
     quantized: bool,
 
-    #[arg(long)]
-    config: Option<String>,
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
     repeat_penalty: f32,
@@ -311,8 +309,8 @@ fn main() -> Result<()> {
         }
     };
     let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-    let tokenizer_filename = match args.tokenizer {
-        Some(file) => std::path::PathBuf::from(file),
+    let tokenizer_filename = match &args.weight_path {
+        Some(path) => repo.get("tokenizer.json")?,
         None => match args.model {
             WhichModel::V1
             | WhichModel::V1_5
@@ -325,35 +323,40 @@ fn main() -> Result<()> {
             }
         },
     };
-    let filenames = match args.weight_file {
-        Some(files) => files
-            .split(',')
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
-        None => {
-            if args.quantized {
-                match args.model {
-                    WhichModel::V1 => vec![repo.get("model-v1-q4k.gguf")?],
-                    WhichModel::V1_5 => vec![repo.get("model-q4k.gguf")?],
-                    WhichModel::V2 | WhichModel::V2Old => vec![repo.get("model-v2-q4k.gguf")?],
-                    WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2-q4k.gguf")?],
-                    WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B-q4k.gguf")?],
-                    WhichModel::V3 | WhichModel::V3Medium => anyhow::bail!(
-                        "use the quantized or quantized-phi examples for quantized phi-v3"
-                    ),
+    let filenames = {
+        if args.quantized {
+            match args.model {
+                WhichModel::V1 => vec![repo.get("model-v1-q4k.gguf")?],
+                WhichModel::V1_5 => vec![repo.get("model-q4k.gguf")?],
+                WhichModel::V2 | WhichModel::V2Old => vec![repo.get("model-v2-q4k.gguf")?],
+                WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2-q4k.gguf")?],
+                WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B-q4k.gguf")?],
+                WhichModel::V3 | WhichModel::V3Medium => anyhow::bail!(
+                    "use the quantized or quantized-phi examples for quantized phi-v3"
+                ),
+            }
+        } else {
+            match args.model {
+                WhichModel::V1 | WhichModel::V1_5 => {
+                    match &args.weight_path {
+                        Some(path) =>  vec![Path::new(path).join("model.safetensors")],
+                        None => vec![repo.get("model.safetensors")?],
+                    }
                 }
-            } else {
-                match args.model {
-                    WhichModel::V1 | WhichModel::V1_5 => vec![repo.get("model.safetensors")?],
-                    WhichModel::V2 | WhichModel::V2Old | WhichModel::V3 | WhichModel::V3Medium => {
-                        candle_examples::hub_load_safetensors(
+                WhichModel::V2 | WhichModel::V2Old | WhichModel::V3 | WhichModel::V3Medium => {
+                    match &args.weight_path {
+                        Some(path) => candle_examples::hub_load_local_safetensors(
+                            path,
+                            "model.safetensors.index.json",
+                        )?,
+                        None => candle_examples::hub_load_safetensors(
                             &repo,
                             "model.safetensors.index.json",
                         )?
                     }
-                    WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2.safetensors")?],
-                    WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B.safetensors")?],
                 }
+                WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2.safetensors")?],
+                WhichModel::PhiHermes => vec![repo.get("model-phi-hermes-1_3B.safetensors")?],
             }
         }
     };
@@ -395,8 +398,8 @@ fn main() -> Result<()> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
         match args.model {
             WhichModel::V1 | WhichModel::V1_5 | WhichModel::V2 => {
-                let config_filename = match args.config {
-                    Some(file) => std::path::PathBuf::from(file),
+                let config_filename = match &args.weight_path {
+                    Some(path) => Path::new(path).join("config.json"),
                     _ => repo.get("config.json")?,
                 };
                 let config = std::fs::read_to_string(config_filename)?;
@@ -405,7 +408,10 @@ fn main() -> Result<()> {
                 Model::Phi(phi)
             }
             WhichModel::V3 | WhichModel::V3Medium => {
-                let config_filename = repo.get("config.json")?;
+                let config_filename = match &args.weight_path {
+                    Some(path) => Path::new(path).join("config.json"),
+                    _ => repo.get("config.json")?,
+                };
                 let config = std::fs::read_to_string(config_filename)?;
                 let config: Phi3Config = serde_json::from_str(&config)?;
                 let phi3 = Phi3::new(&config, vb)?;

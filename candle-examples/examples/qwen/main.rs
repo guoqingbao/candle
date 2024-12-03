@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::Parser;
-
+use std::path::Path;
 use candle_transformers::models::qwen2::{Config as ConfigBase, ModelForCausalLM as ModelBase};
 use candle_transformers::models::qwen2_moe::{Config as ConfigMoe, Model as ModelMoe};
 
@@ -211,10 +211,7 @@ struct Args {
     revision: String,
 
     #[arg(long)]
-    tokenizer_file: Option<String>,
-
-    #[arg(long)]
-    weight_files: Option<String>,
+    weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
@@ -229,9 +226,6 @@ struct Args {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
-
-    #[arg(long)]
-    config: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -286,36 +280,36 @@ fn main() -> Result<()> {
         RepoType::Model,
         args.revision,
     ));
-    let tokenizer_filename = match args.tokenizer_file {
-        Some(file) => std::path::PathBuf::from(file),
-        None => repo.get("tokenizer.json")?,
-    };
-    let filenames = match args.weight_files {
-        Some(files) => files
-            .split(',')
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
-        None => match args.model {
-            WhichModel::W0_5b | WhichModel::W2_0_5b | WhichModel::W2_1_5b | WhichModel::W1_8b => {
-                vec![repo.get("model.safetensors")?]
+    let tokenizer_filename = repo.get("tokenizer.json")?;
+    let filenames = match args.model {
+        WhichModel::W0_5b | WhichModel::W2_0_5b | WhichModel::W2_1_5b | WhichModel::W1_8b => {
+            match &args.weight_path {
+                Some(path) => Path::new(path).join("model.safetensors"),
+                None => vec![repo.get("model.safetensors")?]
             }
-            WhichModel::W4b
-            | WhichModel::W7b
-            | WhichModel::W2_7b
-            | WhichModel::W14b
-            | WhichModel::W72b
-            | WhichModel::W2_72b
-            | WhichModel::MoeA27b => {
-                candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?
+        }
+        WhichModel::W4b
+        | WhichModel::W7b
+        | WhichModel::W2_7b
+        | WhichModel::W14b
+        | WhichModel::W72b
+        | WhichModel::W2_72b
+        | WhichModel::MoeA27b => {
+            match &args.weight_path {
+                Some(path) => candle_examples::hub_load_local_safetensors(
+                    path,
+                    "model.safetensors.index.json",
+                )?,
+                None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?
             }
-        },
+        }
     };
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
     let start = std::time::Instant::now();
-    let config_file = match args.config {
-        Some(file) => std::path::PathBuf::from(file),
+    let config_file = match &args.weight_path {
+        Some(path) => Path::new(path).join("config.json"),
         _ => repo.get("config.json")?,
     };
     let device = candle_examples::device(args.cpu)?;

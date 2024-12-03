@@ -14,7 +14,7 @@ extern crate intel_mkl_src;
 
 use anyhow::{bail, Error as E, Result};
 use clap::{Parser, ValueEnum};
-
+use std::path::Path;
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
@@ -100,7 +100,7 @@ struct Args {
     /// The folder name that contains safetensor weights and json files
     /// (same structure as huggingface online)
     #[arg(long)]
-    local_weights: Option<String>,
+    weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.0)]
@@ -150,13 +150,13 @@ fn main() -> Result<()> {
         println!("loading the model weights from {model_id}");
         let revision = args.revision.unwrap_or("main".to_string());
         let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-        let tokenizer_filename = match &args.local_weights {
-            Some(path) => (path.to_owned() + "tokenizer.json").into(),
+        let tokenizer_filename = match &args.weight_path {
+            Some(path) => Path::new(path).join("tokenizer.json"),
             _ => api.get("tokenizer.json")?,
         };
 
-        let config_filename = match &args.local_weights {
-            Some(path) => (path.to_owned() + "config.json").into(),
+        let config_filename = match &args.weight_path {
+            Some(path) => Path::new(path).join("config.json"),
             _ => api.get("config.json")?,
         };
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
@@ -169,17 +169,17 @@ fn main() -> Result<()> {
             | Which::V3Instruct
             | Which::V31
             | Which::V31Instruct
-            | Which::Solar10_7B => match &args.local_weights {
+            | Which::Solar10_7B => match &args.weight_path {
                 Some(path) => candle_examples::hub_load_local_safetensors(
                     path,
                     "model.safetensors.index.json",
                 )?,
                 _ => candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?,
             },
-            Which::TinyLlama1_1BChat => match &args.local_weights {
+            Which::TinyLlama1_1BChat => match &args.weight_path {
                 Some(path) => {
                     let mut filenames = vec![];
-                    filenames.push((path.to_owned() + "model.safetensors").into());
+                    filenames.push(Path::new(path).join("model.safetensors"));
                     filenames
                 }
                 _ => {
@@ -211,7 +211,7 @@ fn main() -> Result<()> {
     println!("starting the inference loop");
     print!("{prompt}");
     let mut logits_processor = {
-        let temperature = args.temperature;
+        let temperature = args.temperature.unwrap_or(0.);
         let sampling = if temperature <= 0. {
             Sampling::ArgMax
         } else {

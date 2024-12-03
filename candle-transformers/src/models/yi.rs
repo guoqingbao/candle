@@ -1,6 +1,6 @@
 /// https://huggingface.co/01-ai/Yi-6B/blob/main/modeling_yi.py
 use crate::models::with_tracing::{linear_no_bias, Linear, RmsNorm};
-use candle::{DType, Device, Module, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
 
@@ -209,7 +209,9 @@ impl Attention {
             (q, k, v.contiguous()?)
         };
         let mut input_positions = Vec::<i32>::new();
-        input_positions.push(seqlen_offset as i32);
+        for _ in 0..b_sz {
+            input_positions.push(seqlen_offset as i32);
+        }
         let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
             &query_states,
             &key_states,
@@ -367,7 +369,7 @@ impl Model {
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
         }
-        xs.narrow(1, seq_len - 1, 1)?
+        xs.i((.., seq_len - 1, ..))?
             .apply(&self.norm)?
             .apply(&self.lm_head)
     }

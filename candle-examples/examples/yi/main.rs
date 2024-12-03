@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::{Parser, ValueEnum};
-
+use std::path::Path;
 use candle_transformers::models::yi::{Config, Model};
 
 use candle::{DType, Device, Tensor};
@@ -178,10 +178,7 @@ struct Args {
     revision: String,
 
     #[arg(long)]
-    tokenizer_file: Option<String>,
-
-    #[arg(long)]
-    weight_files: Option<String>,
+    weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
@@ -232,15 +229,12 @@ fn main() -> Result<()> {
         RepoType::Model,
         args.revision,
     ));
-    let tokenizer_filename = match args.tokenizer_file {
-        Some(file) => std::path::PathBuf::from(file),
-        None => repo.get("tokenizer.json")?,
-    };
-    let filenames = match args.weight_files {
-        Some(files) => files
-            .split(',')
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
+    let tokenizer_filename = repo.get("tokenizer.json")?;
+    let filenames = match &args.weight_path {
+        Some(path) => candle_examples::hub_load_local_safetensors(
+            path,
+            "model.safetensors.index.json",
+        )?,
         None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
     };
     println!("retrieved the files in {:?}", start.elapsed());

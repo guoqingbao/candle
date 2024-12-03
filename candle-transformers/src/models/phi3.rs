@@ -1,7 +1,7 @@
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
 use crate::models::with_tracing::{linear_no_bias as linear, Linear, RmsNorm};
-use candle::{DType, Device, Module, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::VarBuilder;
 use std::sync::Arc;
 
@@ -64,10 +64,12 @@ impl RotaryEmbedding {
         k: &Tensor,
         seqlen_offset: usize,
     ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
+        let (b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         if q.device().is_gcu() {
             let mut input_positions = Vec::<i32>::new();
-            input_positions.push(seqlen_offset as i32);
+            for _ in 0..b_sz {
+                input_positions.push(seqlen_offset as i32);
+            }
             candle_nn::apply_rotary_emb_qkv(
                 q,
                 k,
@@ -342,7 +344,7 @@ impl Model {
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
         }
-        xs.narrow(1, seq_len - 1, 1)?
+        xs.i((.., seq_len - 1, ..))?
             .apply(&self.norm)?
             .apply(&self.lm_head)
     }

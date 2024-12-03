@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::Parser;
-
+use std::path::Path;
 use candle_transformers::models::chatglm::{Config, Model};
 
 use candle::{DType, Device, Tensor};
@@ -152,10 +152,7 @@ struct Args {
     revision: Option<String>,
 
     #[arg(long)]
-    weight_file: Option<String>,
-
-    #[arg(long)]
-    tokenizer: Option<String>,
+    weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     #[arg(long, default_value_t = 1.1)]
@@ -205,17 +202,14 @@ fn main() -> Result<()> {
         None => "main".to_string(),
     };
     let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-    let tokenizer_filename = match args.tokenizer {
-        Some(file) => std::path::PathBuf::from(file),
-        None => api
-            .model("lmz/candle-chatglm".to_string())
-            .get("chatglm-tokenizer.json")?,
-    };
-    let filenames = match args.weight_file {
-        Some(files) => files
-            .split(',')
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
+    let tokenizer_filename = api
+        .model("lmz/candle-chatglm".to_string())
+        .get("chatglm-tokenizer.json")?;
+    let filenames = match &args.weight_path {
+        Some(path) => candle_examples::hub_load_local_safetensors(
+            path,
+            "model.safetensors.index.json",
+        )?,
         None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
     };
     println!("retrieved the files in {:?}", start.elapsed());

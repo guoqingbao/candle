@@ -271,6 +271,7 @@ impl MHA {
         qkv: &Tensor,
         seqlen_offset: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
+        let (b_sz, seq_len, _, _, _) = qkv.dims5()?;
         if qkv.device().is_gcu() {
             let q = qkv.i((.., .., 0))?;
             let k = qkv.i((.., .., 1))?;
@@ -278,7 +279,9 @@ impl MHA {
             let (_, rotary_dim) = self.rotary_emb.cos.dims2()?;
             let rotary_dim = rotary_dim * 2;
             let mut input_positions = Vec::<i32>::new();
-            input_positions.push(seqlen_offset as i32);
+            for _ in 0..b_sz {
+                input_positions.push(seqlen_offset as i32);
+            }
             #[cfg(feature = "gcu")]
             let (q, k) = candle_nn::apply_rotary_emb_qkv(
                 &q,
@@ -439,7 +442,7 @@ impl MixFormerSequentialForCausalLM {
         for block in self.blocks.iter_mut() {
             xs = block.forward(&xs, mask.as_ref())?
         }
-        xs.narrow(1, seq_len - 1, 1)?.apply(&self.head)?.squeeze(1)
+        xs.i((.., seq_len - 1, ..))?.apply(&self.head)?.squeeze(1)
     }
 
     pub fn forward_with_img(
@@ -460,7 +463,7 @@ impl MixFormerSequentialForCausalLM {
             xs = block.forward(&xs, mask.as_ref())?
         }
         let xs = xs
-            .narrow(1, seq_len - 1, 1)?
+            .i((.., seq_len - 1, ..))?
             .apply(&self.head)?
             .squeeze(1)?;
         Ok(xs)

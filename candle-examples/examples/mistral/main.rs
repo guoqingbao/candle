@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::Parser;
-
+use std::path::Path;
 use candle_transformers::models::mistral::{Config, Model as Mistral};
 use candle_transformers::models::quantized_mistral::Model as QMistral;
 
@@ -220,19 +220,13 @@ struct Args {
     revision: String,
 
     #[arg(long)]
-    tokenizer_file: Option<String>,
-
-    #[arg(long)]
-    config_file: Option<String>,
-
-    #[arg(long)]
-    weight_files: Option<String>,
+    weight_path: Option<String>,
 
     #[arg(long)]
     quantized: bool,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = 1.)]
     repeat_penalty: f32,
 
     /// The context size to consider for the repeat penalty.
@@ -305,15 +299,15 @@ fn main() -> Result<()> {
         RepoType::Model,
         args.revision,
     ));
-    let tokenizer_filename = match args.tokenizer_file {
-        Some(file) => std::path::PathBuf::from(file),
+    let tokenizer_filename = match &args.weight_path {
+        Some(path) => Path::new(path).join("tokenizer.json"),
         None => repo.get("tokenizer.json")?,
     };
-    let filenames = match args.weight_files {
-        Some(files) => files
-            .split(',')
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
+    let filenames = match &args.weight_path {
+        Some(path) => candle_examples::hub_load_local_safetensors(
+            path,
+            "model.safetensors.index.json",
+        )?,
         None => {
             if args.quantized {
                 vec![repo.get("model-q4k.gguf")?]
@@ -326,8 +320,11 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
     let start = std::time::Instant::now();
-    let config = match args.config_file {
-        Some(config_file) => serde_json::from_slice(&std::fs::read(config_file)?)?,
+    let config = match &args.weight_path {
+        Some(path) => {
+            let config_file = Path::new(path).join("config.json");
+            serde_json::from_slice(&std::fs::read(config_file)?)?
+        }
         None => {
             if args.quantized {
                 Config::config_7b_v0_1(args.use_flash_attn)

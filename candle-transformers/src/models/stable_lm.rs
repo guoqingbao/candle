@@ -1,5 +1,5 @@
 use crate::models::with_tracing::{linear, linear_no_bias, Linear};
-use candle::{DType, Device, Module, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, LayerNorm, VarBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -264,7 +264,9 @@ impl Attention {
         )?;
 
         let mut input_positions = Vec::<i32>::new();
-        input_positions.push(seqlen_offset as i32);
+        for _ in 0..b_sz {
+            input_positions.push(seqlen_offset as i32);
+        }
 
         #[cfg(feature = "gcu")]
         let (query_states, key_states) = candle_nn::apply_rotary_emb_qkv(
@@ -436,7 +438,7 @@ impl Model {
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
         }
-        xs.narrow(1, seq_len - 1, 1)?
+        xs.i((.., seq_len - 1, ..))?
             .apply(&self.norm)?
             .apply(&self.lm_head)
     }

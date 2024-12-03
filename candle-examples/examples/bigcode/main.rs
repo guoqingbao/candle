@@ -6,7 +6,7 @@ extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
 use clap::Parser;
-
+use std::path::Path;
 use candle_transformers::models::bigcode::{Config, GPTBigCode};
 
 use candle::{DType, Device, Tensor};
@@ -132,10 +132,7 @@ struct Args {
     revision: String,
 
     #[arg(long)]
-    tokenizer_file: Option<String>,
-
-    #[arg(long)]
-    weight_file: Option<String>,
+    weight_path: Option<String>,
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
@@ -151,15 +148,14 @@ fn main() -> Result<()> {
         RepoType::Model,
         args.revision,
     ));
-    // let tokenizer_filename = repo.get("tokenizer.json")?;
-    let tokenizer_filename = match args.tokenizer_file {
-        Some(file) => std::path::PathBuf::from(file),
+    let tokenizer_filename = match &args.weight_path {
+        Some(path) => Path::new(path).join("tokenizer.json"),
         None => repo.get("tokenizer.json")?,
     };
 
-    let filenames = match args.weight_file {
-        Some(weight_file) => vec![std::path::PathBuf::from(weight_file)],
-        None => ["model.safetensors"]
+    let filenames = match &args.weight_path {
+        Some(path) => vec![Path::new(path).join("model.safetensors")],
+        None => vec!["model.safetensors"]
             .iter()
             .map(|f| repo.get(f))
             .collect::<std::result::Result<Vec<_>, _>>()?,

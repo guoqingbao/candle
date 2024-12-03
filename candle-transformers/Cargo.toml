@@ -20,10 +20,11 @@ intel-mkl-src = { workspace = true, optional = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 serde_plain = { workspace = true }
 tracing = { workspace = true }
+either = { version = "1.13.0", features = ["serde"] }
+serde = { version = "1.0.190", features = ["serde_derive"] }
 
 [features]
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate"]

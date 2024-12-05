@@ -445,6 +445,7 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
         use candle::gcu_backend::ubridge::gcu_launch::GcuLaunchAsync;
         use candle::gcu_backend::ubridge::gcu_slice::GcuSlice;
+        use candle::gcu_backend::ubridge::prelude::DeviceSlice;
         use candle::gcu_backend::{kernel_name, Map1, WrapErr};
         use candle::{backend::BackendStorage, gcu_backend::DeviceCopy};
         use candle::{GcuDevice, WithDType};
@@ -472,7 +473,8 @@ impl candle::CustomOp1 for SoftmaxLastDim {
                     (dims[0], el / dims[0] / dim_m1, dim_m1)
                 };
                 // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
-                let cfg = dev.launch_cfg;
+                let mut cfg = dev.launch_cfg.clone();
+                cfg.set_shared_memory(src.num_bytes() as u32 + 512*1024);
                 let src = &src.slice(layout.start_offset()..);
                 let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
                 let dst = dev.alloc::<T>(el).w()?;

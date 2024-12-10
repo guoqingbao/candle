@@ -2182,13 +2182,9 @@ impl BackendStorage for GcuStorage {
                     n,
                     rhs_transpose,
                 );
-                let cfg = if param.sip_m % 32 != 0 {
-                    let mut cfg = dev.launch_cfg.clone();
-                    cfg.set_shared_memory((lhs_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 2);
-                    cfg
-                } else {
-                    dev.launch_cfg
-                };
+
+                let mut cfg = dev.launch_cfg.clone();
+                cfg.set_shared_memory((lhs_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 16);
                 let kernel_name = "matmul_bf16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 let params = (
@@ -2230,13 +2226,9 @@ impl BackendStorage for GcuStorage {
                     n,
                     rhs_transpose,
                 );
-                let cfg = if param.sip_m % 32 != 0 {
-                    let mut cfg = dev.launch_cfg.clone();
-                    cfg.set_shared_memory((lhs_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 2);
-                    cfg
-                } else {
-                    dev.launch_cfg
-                };
+                let mut cfg = dev.launch_cfg.clone();
+                cfg.set_shared_memory((lhs_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 4);
+
                 let kernel_name = "matmul_f16".to_string();
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
 
@@ -3119,13 +3111,32 @@ impl GPTQMatMul {
                     size_n,
                     rhs_transpose,
                 );
-                let cfg = if param.sip_m % 32 != 0 {
-                    let mut cfg = dev.launch_cfg.clone();
-                    cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 2);
-                    cfg
-                } else {
-                    dev.launch_cfg
-                };
+                let mut cfg = dev.launch_cfg.clone();
+                cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 12 * 2 * param.sip_k * param.sip_n) as u32 * 2);
+
+                // let mut cfg = dev.launch_cfg.clone();
+                // // cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 4);
+                // fn CeilDiv(a: i32, b: i32) -> i32 {
+                //     (a + b - 1) / b
+                // }
+                // let M_align = CeilDiv(param.input_m, param.sip_m) * param.sip_m;
+                // let K_align = CeilDiv(param.input_k, param.sip_k) * param.sip_k; 
+                // let LSIZE = M_align * K_align * 2; 
+                // let R_SIP_SIZE = param.sip_k * param.sip_n * 4;
+                // let OTHER_SIZE = M_align * param.sip_n * 2 * 2 + 32 * param.sip_n * 2;
+                // const VDMEM_VALID_SIZE: i32 = 0x180000 - 0x8000 - 0x800;
+                // if LSIZE + R_SIP_SIZE + OTHER_SIZE < VDMEM_VALID_SIZE {
+                //     let split_loop = if param.batch_multicore > 0 {
+                //         // Splitting B
+                //         if broadcasted_weight > 0 { 1i32 } else { b as i32 }
+                //       } else {
+                //         // Splitting N
+                //         CeilDiv(param.input_n, param.sip_n) 
+                //       };
+                //       let sip_loop = CeilDiv(split_loop, 2 * 12);
+                //       let dimBlocks = CeilDiv(split_loop, 2 * sip_loop);
+                //       cfg.block_dim = (dimBlocks as u32, 1, 1);
+                // }
                 let kernel_name = if self.bits == 8 { "matmul_bf16_8bit".to_string() } else { "matmul_bf16_4bit".to_string() };
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 let params = (
@@ -3185,13 +3196,8 @@ impl GPTQMatMul {
                     size_n,
                     rhs_transpose,
                 );
-                let cfg = if param.sip_m % 32 != 0 {
-                    let mut cfg = dev.launch_cfg.clone();
-                    cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 2);
-                    cfg
-                } else {
-                    dev.launch_cfg
-                };
+                let mut cfg = dev.launch_cfg.clone();
+                cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 12 * 2 * param.sip_k * param.sip_m) as u32 * 2);
                 let kernel_name = if self.bits == 8 { "matmul_f16_8bit".to_string() } else { "matmul_f16_4bit".to_string() };
                 let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 let params = (

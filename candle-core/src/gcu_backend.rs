@@ -3112,10 +3112,9 @@ impl GPTQMatMul {
                     rhs_transpose,
                 );
                 let mut cfg = dev.launch_cfg.clone();
-                cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 12 * 2 * param.sip_k * param.sip_n) as u32 * 2);
+                cfg.set_shared_memory((x_l.shape().elem_count() as i32 * 2  
+                        + 12 * 2 * param.sip_k * param.sip_n) as u32 * 4);
 
-                // let mut cfg = dev.launch_cfg.clone();
-                // // cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 2 * param.sip_k * param.sip_m) as u32 * 4);
                 // fn CeilDiv(a: i32, b: i32) -> i32 {
                 //     (a + b - 1) / b
                 // }
@@ -3123,7 +3122,7 @@ impl GPTQMatMul {
                 // let K_align = CeilDiv(param.input_k, param.sip_k) * param.sip_k; 
                 // let LSIZE = M_align * K_align * 2; 
                 // let R_SIP_SIZE = param.sip_k * param.sip_n * 4;
-                // let OTHER_SIZE = M_align * param.sip_n * 2 * 2 + 32 * param.sip_n * 2;
+                // let OTHER_SIZE = M_align * param.sip_n * 2 * 2 + 64 * param.sip_n * 2;
                 // const VDMEM_VALID_SIZE: i32 = 0x180000 - 0x8000 - 0x800;
                 // if LSIZE + R_SIP_SIZE + OTHER_SIZE < VDMEM_VALID_SIZE {
                 //     let split_loop = if param.batch_multicore > 0 {

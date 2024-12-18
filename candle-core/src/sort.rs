@@ -66,6 +66,7 @@ impl crate::CustomOp1 for ArgSort {
             crate::CpuStorage::U8(vs) => self.asort(vs, layout),
             crate::CpuStorage::I8(vs) => self.asort(vs, layout),
             crate::CpuStorage::U32(vs) => self.asort(vs, layout),
+            crate::CpuStorage::I32(vs) => self.asort(vs, layout),
             crate::CpuStorage::I64(vs) => self.asort(vs, layout),
             crate::CpuStorage::BF16(vs) => self.asort(vs, layout),
             crate::CpuStorage::F16(vs) => self.asort(vs, layout),

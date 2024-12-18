@@ -46,6 +46,7 @@ pub enum GcuStorageSlice {
     U8(GcuSlice<u8>),
     I8(GcuSlice<i8>),
     U32(GcuSlice<u32>),
+    I32(GcuSlice<i32>),
     I64(GcuSlice<i64>),
     BF16(GcuSlice<bf16>),
     F16(GcuSlice<f16>),
@@ -195,6 +196,14 @@ impl GcuDevice {
                 unsafe { func.launch(&self.launch_cfg, params).w()? };
                 GcuStorageSlice::U32(data)
             }
+            DType::I32 => {
+                // SAFETY: Set later by running the fill kernel.
+                let data = self.alloc::<i32>(elem_count).w()?;
+                let func = self.get_or_load_func("fill_i32", ubridge::FILL)?;
+                let params = (data.device_ptr(), v as i32, elem_count);
+                unsafe { func.launch(&self.launch_cfg, params).w()? };
+                GcuStorageSlice::I32(data)
+            }
             DType::I64 => {
                 // SAFETY: Set later by running the fill kernel.
                 let data = self.alloc::<i64>(elem_count).w()?;
@@ -300,6 +309,10 @@ impl BackendDevice for GcuDevice {
                 let data = self.alloc_zeros::<u32>(elem_count).w()?;
                 GcuStorageSlice::U32(data)
             }
+            DType::I32 => {
+                let data = self.alloc_zeros::<i32>(elem_count).w()?;
+                GcuStorageSlice::I32(data)
+            }
             DType::I64 => {
                 let data = self.alloc_zeros::<i64>(elem_count).w()?;
                 GcuStorageSlice::I64(data)
@@ -336,7 +349,7 @@ impl BackendDevice for GcuDevice {
         let slice = match dtype {
             // TODO: Add support for F16 and BF16 though this is likely to require some upstream
             // Gcurc changes.
-            DType::U8 | DType::I8 | DType::U32 | DType::I64 | DType::F16 | DType::BF16 => {
+            DType::U8 | DType::I8 | DType::U32 | DType::I32 | DType::I64 | DType::F16 | DType::BF16 => {
                 Err(GcuError::UnsupportedDtype {
                     dtype,
                     op: "rand_uniform",
@@ -377,7 +390,7 @@ impl BackendDevice for GcuDevice {
         let elem_count = shape.elem_count();
         // let curand = self.curand.lock().unwrap();
         let slice = match dtype {
-            DType::U8 | DType::I8 | DType::U32 | DType::I64 | DType::F16 | DType::BF16 => {
+            DType::U8 | DType::I8 | DType::U32 | DType::I32 | DType::I64 | DType::F16 | DType::BF16 => {
                 Err(GcuError::UnsupportedDtype {
                     dtype,
                     op: "rand_normal",
@@ -422,6 +435,10 @@ impl BackendDevice for GcuDevice {
                 let data = self.alloc::<u32>(elem_count).w()?;
                 GcuStorageSlice::U32(data)
             }
+            DType::I32 => {
+                let data = self.alloc::<i32>(elem_count).w()?;
+                GcuStorageSlice::I32(data)
+            }
             DType::I64 => {
                 let data = self.alloc::<i64>(elem_count).w()?;
                 GcuStorageSlice::I64(data)
@@ -462,6 +479,10 @@ impl BackendDevice for GcuDevice {
             CpuStorageRef::U32(storage) => {
                 let data = self.htod_sync_copy(storage).w()?;
                 GcuStorageSlice::U32(data)
+            }
+            CpuStorageRef::I32(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::I32(data)
             }
             CpuStorageRef::I64(storage) => {
                 let data = self.htod_sync_copy(storage).w()?;
@@ -504,6 +525,10 @@ impl BackendDevice for GcuDevice {
                 let data = self.htod_sync_copy(storage).w()?;
                 GcuStorageSlice::U32(data)
             }
+            CpuStorage::I32(storage) => {
+                let data = self.htod_sync_copy(storage).w()?;
+                GcuStorageSlice::I32(data)
+            }
             CpuStorage::I64(storage) => {
                 let data = self.htod_sync_copy(storage).w()?;
                 GcuStorageSlice::I64(data)
@@ -544,6 +569,10 @@ impl BackendDevice for GcuDevice {
             CpuStorage::U32(storage) => {
                 let data = self.htod_copy(storage).w()?;
                 GcuStorageSlice::U32(data)
+            }
+            CpuStorage::I32(storage) => {
+                let data = self.htod_copy(storage).w()?;
+                GcuStorageSlice::I32(data)
             }
             CpuStorage::I64(storage) => {
                 let data = self.htod_copy(storage).w()?;
@@ -592,6 +621,7 @@ pub trait Map1 {
             S::U8(s) => S::U8(self.f(s, d, l)?),
             S::I8(s) => S::I8(self.f(s, d, l)?),
             S::U32(s) => S::U32(self.f(s, d, l)?),
+            S::I32(s) => S::I32(self.f(s, d, l)?),
             S::I64(s) => S::I64(self.f(s, d, l)?),
             S::BF16(s) => S::BF16(self.f(s, d, l)?),
             S::F16(s) => S::F16(self.f(s, d, l)?),
@@ -617,6 +647,7 @@ trait Map2 {
         let out = match (s1, s2) {
             (S::U8(s1), S::U8(s2)) => S::U8(self.f(s1, l1, s2, l2, d)?),
             (S::U32(s1), S::U32(s2)) => S::U32(self.f(s1, l1, s2, l2, d)?),
+            (S::I32(s1), S::I32(s2)) => S::I32(self.f(s1, l1, s2, l2, d)?),
             (S::I64(s1), S::I64(s2)) => S::I64(self.f(s1, l1, s2, l2, d)?),
             (S::BF16(s1), S::BF16(s2)) => S::BF16(self.f(s1, l1, s2, l2, d)?),
             (S::F16(s1), S::F16(s2)) => S::F16(self.f(s1, l1, s2, l2, d)?),
@@ -650,6 +681,7 @@ trait Map2InPlace {
         match (dst, src) {
             (S::U8(dst), S::U8(src)) => self.f(dst, dst_s, src, src_l, d),
             (S::U32(dst), S::U32(src)) => self.f(dst, dst_s, src, src_l, d),
+            (S::I32(dst), S::I32(src)) => self.f(dst, dst_s, src, src_l, d),
             (S::I64(dst), S::I64(src)) => self.f(dst, dst_s, src, src_l, d),
             (S::BF16(dst), S::BF16(src)) => self.f(dst, dst_s, src, src_l, d),
             (S::F16(dst), S::F16(src)) => self.f(dst, dst_s, src, src_l, d),
@@ -674,6 +706,7 @@ trait Map1Any {
             S::U8(s) => self.f(s, d, l, S::U8)?,
             S::I8(s) => self.f(s, d, l, S::I8)?,
             S::U32(s) => self.f(s, d, l, S::U32)?,
+            S::I32(s) => self.f(s, d, l, S::I32)?,
             S::I64(s) => self.f(s, d, l, S::I64)?,
             S::BF16(s) => self.f(s, d, l, S::BF16)?,
             S::F16(s) => self.f(s, d, l, S::F16)?,
@@ -698,6 +731,7 @@ trait Map2Any {
         let out = match (s1, s2) {
             (S::U8(s1), S::U8(s2)) => self.f(s1, l1, s2, l2, d)?,
             (S::U32(s1), S::U32(s2)) => self.f(s1, l1, s2, l2, d)?,
+            (S::I32(s1), S::I32(s2)) => self.f(s1, l1, s2, l2, d)?,
             (S::I64(s1), S::I64(s2)) => self.f(s1, l1, s2, l2, d)?,
             (S::BF16(s1), S::BF16(s2)) => self.f(s1, l1, s2, l2, d)?,
             (S::F16(s1), S::F16(s2)) => self.f(s1, l1, s2, l2, d)?,
@@ -1633,6 +1667,7 @@ impl GcuStorage {
             GcuStorageSlice::U8(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::I8(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::U32(inp) => inp.slice(start_o..).device_ptr(),
+            GcuStorageSlice::I32(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::I64(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::BF16(inp) => inp.slice(start_o..).device_ptr(),
             GcuStorageSlice::F16(inp) => inp.slice(start_o..).device_ptr(),
@@ -1663,6 +1698,12 @@ impl GcuStorage {
                 let params = (el, *inp, out.device_ptr());
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::U32(out)
+            }
+            DType::I32 => {
+                let out = dev.alloc::<i32>(el).w()?;
+                let params = (el, *inp, out.device_ptr());
+                unsafe { func.launch(&cfg, params) }.w()?;
+                GcuStorageSlice::I32(out)
             }
             DType::I64 => {
                 let out = dev.alloc::<i64>(el).w()?;
@@ -1716,6 +1757,7 @@ impl BackendStorage for GcuStorage {
             GcuStorageSlice::U8(_) => DType::U8,
             GcuStorageSlice::I8(_) => DType::I8,
             GcuStorageSlice::U32(_) => DType::U32,
+            GcuStorageSlice::I32(_) => DType::I32,
             GcuStorageSlice::I64(_) => DType::I64,
             GcuStorageSlice::BF16(_) => DType::BF16,
             GcuStorageSlice::F16(_) => DType::F16,
@@ -1897,6 +1939,11 @@ impl BackendStorage for GcuStorage {
                 let dev = slice.device();
                 let cpu_storage = dev.dtoh_sync_copy(slice).w()?;
                 Ok(CpuStorage::U32(cpu_storage))
+            }
+            GcuStorageSlice::I32(slice) => {
+                let dev = slice.device();
+                let cpu_storage = dev.dtoh_sync_copy(slice).w()?;
+                Ok(CpuStorage::I32(cpu_storage))
             }
             GcuStorageSlice::I64(slice) => {
                 let dev = slice.device();
@@ -2607,17 +2654,26 @@ impl crate::CustomOp3 for Rope {
             .htod_copy(self.index_positions.to_vec())
             .w()?;
 
-        match (&query.slice, &key.slice, &cos_sin.slice) {
+        match (&query.slice, &key.slice) {
             (
                 GcuStorageSlice::BF16(query_),
                 GcuStorageSlice::BF16(key_),
-                GcuStorageSlice::BF16(cos_sin_),
             ) => {
-                let func = dev.get_or_load_func("rope_bf16", ubridge::EMBEDDING)?;
+                let (func, cos_sin_ptr) = match &cos_sin.slice {
+                    GcuStorageSlice::BF16(cos_sin_) => {
+                        (dev.get_or_load_func("rope_bf16", ubridge::EMBEDDING)?, cos_sin_.device_ptr())
+                    },
+                    GcuStorageSlice::F32(cos_sin_) => {
+                        (dev.get_or_load_func("rope_f32_bf16", ubridge::EMBEDDING)?, cos_sin_.device_ptr())
+                    }
+                    _=> {
+                        Err(GcuError::InternalError("dtype mismatch in rope op"))?
+                    }
+                };
                 let params = (
                     query_.device_ptr(),
                     key_.device_ptr(),
-                    cos_sin_.device_ptr(),
+                    cos_sin_ptr,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -2633,13 +2689,19 @@ impl crate::CustomOp3 for Rope {
             (
                 GcuStorageSlice::F32(query_),
                 GcuStorageSlice::F32(key_),
-                GcuStorageSlice::F32(cos_sin_),
             ) => {
-                let func = dev.get_or_load_func("rope_f32", ubridge::EMBEDDING)?;
+                let (func, cos_sin_ptr) = match &cos_sin.slice {
+                    GcuStorageSlice::F32(cos_sin_) => {
+                        (dev.get_or_load_func("rope_f32", ubridge::EMBEDDING)?, cos_sin_.device_ptr())
+                    }
+                    _=> {
+                        Err(GcuError::InternalError("dtype mismatch in rope op"))?
+                    }
+                };
                 let params = (
                     query_.device_ptr(),
                     key_.device_ptr(),
-                    cos_sin_.device_ptr(),
+                    cos_sin_ptr,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -2655,13 +2717,22 @@ impl crate::CustomOp3 for Rope {
             (
                 GcuStorageSlice::F16(query_),
                 GcuStorageSlice::F16(key_),
-                GcuStorageSlice::F16(cos_sin_),
             ) => {
-                let func = dev.get_or_load_func("rope_f16", ubridge::EMBEDDING)?;
+                let (func, cos_sin_ptr) = match &cos_sin.slice {
+                    GcuStorageSlice::F16(cos_sin_) => {
+                        (dev.get_or_load_func("rope_f16", ubridge::EMBEDDING)?, cos_sin_.device_ptr())
+                    },
+                    GcuStorageSlice::F32(cos_sin_) => {
+                        (dev.get_or_load_func("rope_f32_f16", ubridge::EMBEDDING)?, cos_sin_.device_ptr())
+                    }
+                    _=> {
+                        Err(GcuError::InternalError("dtype mismatch in rope op"))?
+                    }
+                };
                 let params = (
                     query_.device_ptr(),
                     key_.device_ptr(),
-                    cos_sin_.device_ptr(),
+                    cos_sin_ptr,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -3043,14 +3114,15 @@ impl GPTQMatMul {
         // let zero_shape = self.qzeros.shape().dims();
         // let scale_shape = scale_l.dims();
 
-        // let pack_factor: usize = 32 / self.bits as usize;
-        let pack_factor = 1;
+        // normally, for 4-bit quant, the pack factor is 8 (8 elements packed within an int32), 
+        // while, we repacked the weights to uint8 in gcu platform, therefore, the pack factor become 2 (2 elements packed within an uint8)
+        let pack_factor = if self.bits == 4 { 2 as usize } else { 1 as usize };
         let marlin_format = self.workspace.is_some();
         let size_k = weight_shape[weight_shape.len() - 2] * pack_factor * if marlin_format { 2 } else { 1 }; //marlin format
         let size_n = weight_shape[weight_shape.len() - 1] / if marlin_format { 2 } else { 1 }; //marlin format
 
-        if marlin_format {
-            panic!("marlin format is supported under GCU platform!");
+        if marlin_format && self.bits != 4 {
+            panic!("marlin format is only used for 4-bit quantization under GCU platform!");
         }
         let mut out_shape: Vec<usize> = x_shape.to_vec();
         out_shape[x_shape.len() - 1] = size_n;
@@ -3080,31 +3152,29 @@ impl GPTQMatMul {
             }
         }
 
-        let slice = match (&x.slice, &qweight.slice, &scale.slice) {
-            (GcuStorageSlice::BF16(lhs), GcuStorageSlice::I8(rhs), GcuStorageSlice::BF16(sc)) => {
-                let lhs = &lhs.slice(x_l.start_offset()..);
-                let rhs = &rhs.slice(qweight_l.start_offset()..);
-                let sc = &sc.slice(scale_l.start_offset()..);
-
-                let qzeros_ptr = if self.qzeros.is_some() {
-                    let (qzeros, qzeros_l) =
-                        self.qzeros.as_ref().unwrap().storage_and_layout();
-                    let qzeros = match &*qzeros {
-                        crate::Storage::Gcu(p) => p,
-                        _ => panic!("qzeros must be a gcu tensor"),
-                    };
-                    let qzeros_ = qzeros.as_Gcu_slice::<T>()?;
-                    let qzeros_ = qzeros_.slice(qzeros_l.start_offset()..);
-                    qzeros_.device_ptr()
-                } else {
-                    sc.device_ptr()
+        let slice = match (&x.slice, &scale.slice) {
+            (GcuStorageSlice::BF16(lhs), GcuStorageSlice::BF16(sc)) => {
+                let (func, rhs_ptr, wtype) = match &qweight.slice {
+                    GcuStorageSlice::I8(rhs) => {
+                        let kernel_name = "matmul_bf16_8bit".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                        let rhs = &rhs.slice(qweight_l.start_offset()..);
+                        (func, rhs.device_ptr(), ubridge::DATATYPE::DataI8)
+                    },
+                    GcuStorageSlice::U8(rhs) => {
+                        let kernel_name = "matmul_bf16_4bit".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                        let rhs = &rhs.slice(qweight_l.start_offset()..);
+                        (func, rhs.device_ptr(), ubridge::DATATYPE::DataI4)
+                    },
+                    _ => Err(GcuError::InternalError("dtype mismatch in qmatmul op"))?,
                 };
-
+                let lhs = &lhs.slice(x_l.start_offset()..);
+                let sc = &sc.slice(scale_l.start_offset()..);
                 let out = dev.alloc::<bf16>(elem_count).w()?;
-                // let bias = dev.alloc::<bf16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataBf16,
-                    ubridge::DATATYPE::DataI8,
+                    wtype,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     size_k,
@@ -3136,14 +3206,13 @@ impl GPTQMatMul {
                 //       let dimBlocks = CeilDiv(split_loop, 2 * sip_loop);
                 //       cfg.block_dim = (dimBlocks as u32, 1, 1);
                 // }
-                let kernel_name = if self.bits == 8 { "matmul_bf16_8bit".to_string() } else { "matmul_bf16_4bit".to_string() };
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+
                 let params = (
                     lhs.device_ptr(),
-                    rhs.device_ptr(),
-                    out.device_ptr(), //bias.device_ptr(),
+                    rhs_ptr,
+                    out.device_ptr(), 
                     sc.device_ptr(),
-                    qzeros_ptr,
+                    sc.device_ptr(), //no qzeros in w8a16
                     param.input_dtype,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
@@ -3166,9 +3235,23 @@ impl GPTQMatMul {
                 unsafe { func.launch(&cfg, params) }.w()?;
                 GcuStorageSlice::BF16(out)
             }
-            (GcuStorageSlice::F16(lhs), GcuStorageSlice::I8(rhs), GcuStorageSlice::F16(sc)) => {
+            (GcuStorageSlice::F16(lhs), GcuStorageSlice::F16(sc)) => {
+                let (func, rhs_ptr, wtype) = match &qweight.slice {
+                    GcuStorageSlice::I8(rhs) => {
+                        let kernel_name = "matmul_f16_8bit".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                        let rhs = &rhs.slice(qweight_l.start_offset()..);
+                        (func, rhs.device_ptr(), ubridge::DATATYPE::DataI8)
+                    },
+                    GcuStorageSlice::U8(rhs) => {
+                        let kernel_name = "matmul_f16_4bit".to_string();
+                        let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
+                        let rhs = &rhs.slice(qweight_l.start_offset()..);
+                        (func, rhs.device_ptr(), ubridge::DATATYPE::DataI4)
+                    },
+                    _ => Err(GcuError::InternalError("dtype mismatch in qmatmul op"))?,
+                };
                 let lhs = &lhs.slice(x_l.start_offset()..);
-                let rhs = &rhs.slice(qweight_l.start_offset()..);
                 let sc = &sc.slice(scale_l.start_offset()..);
                 let qzeros_ptr = if self.qzeros.is_some() {
                     let (qzeros, qzeros_l) =
@@ -3188,7 +3271,7 @@ impl GPTQMatMul {
                 // let bias = dev.alloc::<bf16>(n).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataFp16,
-                    ubridge::DATATYPE::DataI8,
+                    wtype,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },
                     size_k,
@@ -3197,12 +3280,10 @@ impl GPTQMatMul {
                 );
                 let mut cfg = dev.launch_cfg.clone();
                 cfg.set_shared_memory((x_l.shape().elem_count() as i32 + 12 * 2 * param.sip_k * param.sip_m) as u32 * 2);
-                let kernel_name = if self.bits == 8 { "matmul_f16_8bit".to_string() } else { "matmul_f16_4bit".to_string() };
-                let func = dev.get_or_load_func(&kernel_name, ubridge::MATMUL)?;
                 let params = (
                     lhs.device_ptr(),
-                    rhs.device_ptr(),
-                    out.device_ptr(), //bias.device_ptr(),
+                    rhs_ptr,
+                    out.device_ptr(), 
                     sc.device_ptr(),
                     qzeros_ptr,
                     param.input_dtype,

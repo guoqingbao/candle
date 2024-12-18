@@ -11,6 +11,7 @@ impl From<DType> for st::Dtype {
             DType::U8 => st::Dtype::U8,
             DType::I8 => st::Dtype::I8,
             DType::U32 => st::Dtype::U32,
+            DType::I32 => st::Dtype::I32,
             DType::I64 => st::Dtype::I64,
             DType::BF16 => st::Dtype::BF16,
             DType::F16 => st::Dtype::F16,
@@ -190,6 +191,7 @@ impl Tensor {
             DType::U8 => convert_slice::<u8>(data, shape, device),
             DType::I8 => convert_slice::<i8>(data, shape, device),
             DType::U32 => convert_slice::<u32>(data, shape, device),
+            DType::I32 => convert_slice::<i32>(data, shape, device),
             DType::I64 => convert_slice::<i64>(data, shape, device),
             DType::BF16 => convert_slice::<half::bf16>(data, shape, device),
             DType::F16 => convert_slice::<half::f16>(data, shape, device),
@@ -209,8 +211,9 @@ fn convert(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
         }
         st::Dtype::U32 => convert_::<u32>(view, device),
         st::Dtype::I32 => {
-            let conv = |x| Ok(i64::from(x));
-            convert_with_cast_::<i32, i64, _>(view, device, conv)
+            convert_::<i32>(view, device)
+            // let conv = |x| Ok(i64::from(x));
+            // convert_with_cast_::<i32, i64, _>(view, device, conv)
         }
         st::Dtype::I64 => convert_::<i64>(view, device),
         st::Dtype::BF16 => convert_::<half::bf16>(view, device),
@@ -228,6 +231,7 @@ fn convert_back(tensor: &Tensor) -> Result<Vec<u8>> {
         DType::U8 => Ok(convert_back_::<u8>(tensor.to_vec1()?)),
         DType::I8 => Ok(convert_back_::<i8>(tensor.to_vec1()?)),
         DType::U32 => Ok(convert_back_::<u32>(tensor.to_vec1()?)),
+        DType::I32 => Ok(convert_back_::<i32>(tensor.to_vec1()?)),
         DType::I64 => Ok(convert_back_::<i64>(tensor.to_vec1()?)),
         DType::F16 => Ok(convert_back_::<half::f16>(tensor.to_vec1()?)),
         DType::BF16 => Ok(convert_back_::<half::bf16>(tensor.to_vec1()?)),

@@ -1,3 +1,19 @@
+//! Qwen2 model implementation with quantization support.
+//!
+//! Qwen2 is a large language model from Alibaba optimized for efficiency.
+//! This implementation provides quantization for reduced memory and compute.
+//!
+//! Key characteristics:
+//! - Streaming decode support
+//! - Grouped query attention (GQA)
+//! - RMSNorm for layer normalization
+//! - Rotary positional embeddings (RoPE)
+//! - Support for 8-bit quantization
+//!
+//! References:
+//! - 🤗 [Qwen2 Model](https://huggingface.co/Qwen/Qwen2-7B)
+//!
+
 use crate::models::with_tracing::{linear, linear_no_bias, Linear, RmsNorm};
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
@@ -387,20 +403,15 @@ pub struct ModelForCausalLM {
 impl ModelForCausalLM {
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let base_model = Model::new(cfg, vb.clone())?;
-        let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"));
-        match lm_head {
-            Ok(hd) => Ok(Self {
-                base_model,
-                lm_head: hd,
-            }),
-            _ => {
-                let hd = Linear::from_weights(base_model.embed_tokens.embeddings().clone(), None);
-                Ok(Self {
-                    base_model,
-                    lm_head: hd,
-                })
-            }
-        }
+        let lm_head = if vb.contains_tensor("lm_head.weight") {
+            linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
+        } else {
+            Linear::from_weights(base_model.embed_tokens.embeddings().clone(), None)
+        };
+        Ok(Self {
+            base_model,
+            lm_head,
+        })
     }
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {

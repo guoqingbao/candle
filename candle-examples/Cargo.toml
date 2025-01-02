@@ -27,7 +27,7 @@ intel-mkl-src = { workspace = true, optional = true }
 num-traits = { workspace = true }
 palette = { version = "0.7.6", optional = true }
 enterpolation = { version = "0.2.1", optional = true}
-pyo3 = { version = "0.21.0", features = ["auto-initialize"], optional = true }
+pyo3 = { version = "0.22.0", features = ["auto-initialize", "abi3-py311"], optional = true }
 rayon = { workspace = true }
 rubato = { version = "0.15.0", optional = true }
 safetensors = { workspace = true }
@@ -36,7 +36,8 @@ serde_json = { workspace = true }
 symphonia = { version = "0.5.3", features = ["all"], optional = true }
 tokenizers = { workspace = true, features = ["onig"] }
 float_eq = "1"
-cpal= { version = "0.15.2", optional = true }
+cpal = { version = "0.15.2", optional = true }
+pdf2image = { version = "0.1.2" , optional = true}
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -59,7 +60,6 @@ bindgen_cuda = { version = "0.1.1", optional = true }
 [features]
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
 gcu = ["candle/gcu", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
-dorado = ["candle/gcu", "candle/dorado", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
 scorpio = ["candle/gcu", "candle/scorpio", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
 cudnn = ["candle/cudnn"]
@@ -73,6 +73,7 @@ microphone = ["cpal"]
 encodec = ["cpal", "symphonia", "rubato"]
 async = ["candle/async"]
 depth_anything_v2 = ["palette", "enterpolation"]
+mimi = ["cpal", "symphonia", "rubato"]
 
 [[example]]
 name = "llama_multiprocess"
@@ -107,9 +108,21 @@ name = "llama2-c"
 required-features = ["candle-datasets"]
 
 [[example]]
+name = "mimi"
+required-features = ["mimi"]
+
+[[example]]
 name = "encodec"
 required-features = ["encodec"]
 
 [[example]]
 name = "depth_anything_v2"
 required-features = ["depth_anything_v2"]
+
+[[example]]
+name = "silero-vad"
+required-features = ["onnx"]
+
+[[example]]
+name = "colpali"
+required-features = ["pdf2image"]

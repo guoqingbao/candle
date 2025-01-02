@@ -35,10 +35,26 @@ enum Which {
     V31,
     V3Instruct,
     V31Instruct,
+    V32_1b,
+    V32_1bInstruct,
+    V32_3b,
+    V32_3bInstruct,
     #[value(name = "solar-10.7b")]
     Solar10_7B,
     #[value(name = "tiny-llama-1.1b-chat")]
     TinyLlama1_1BChat,
+    #[value(name = "SmoLM2-1.7B")]
+    SmolLM2_1B,
+    #[value(name = "SmoLM2-1.7B-Instruct")]
+    SmolLM2_1BInstruct,
+    #[value(name = "SmoLM2-360M")]
+    SmolLM2_360M,
+    #[value(name = "SmoLM2-360M-Instruct")]
+    SmolLM2_360MInstruct,
+    #[value(name = "SmoLM2-135M")]
+    SmolLM2_135M,
+    #[value(name = "SmoLM2-135M-Instruct")]
+    SmolLM2_135MInstruct,
 }
 
 #[derive(Parser, Debug)]
@@ -49,8 +65,16 @@ struct Args {
     cpu: bool,
 
     /// The temperature used to generate samples.
+    #[arg(long, default_value_t = 0.8)]
+    temperature: f64,
+
+    /// Nucleus sampling probability cutoff.
     #[arg(long)]
-    temperature: Option<f64>,
+    top_p: Option<f64>,
+
+    /// Only sample among the top K samples.
+    #[arg(long)]
+    top_k: Option<usize>,
 
     /// Nucleus sampling probability cutoff.
     #[arg(long)]
@@ -103,11 +127,11 @@ struct Args {
     weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.1)]
     repeat_penalty: f32,
 
     /// The context size to consider for the repeat penalty.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 128)]
     repeat_last_n: usize,
 
     #[arg(long, default_value_t = 1)]
@@ -137,15 +161,28 @@ fn main() -> Result<()> {
     };
     let (llama, tokenizer_filename, mut cache, config) = {
         let api = Api::new()?;
-        let model_id = args.model_id.unwrap_or_else(|| match args.which {
-            Which::V1 => "Narsil/amall-7b".to_string(),
-            Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
-            Which::V3 => "meta-llama/Meta-Llama-3-8B".to_string(),
-            Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct".to_string(),
-            Which::V31 => "meta-llama/Meta-Llama-3.1-8B".to_string(),
-            Which::V31Instruct => "meta-llama/Meta-Llama-3.1-8B-Instruct".to_string(),
-            Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0".to_string(),
-            Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+        let model_id = args.model_id.unwrap_or_else(|| {
+            let str = match args.which {
+                Which::V1 => "Narsil/amall-7b",
+                Which::V2 => "meta-llama/Llama-2-7b-hf",
+                Which::V3 => "meta-llama/Meta-Llama-3-8B",
+                Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct",
+                Which::V31 => "meta-llama/Llama-3.1-8B",
+                Which::V31Instruct => "meta-llama/Llama-3.1-8B-Instruct",
+                Which::V32_1b => "meta-llama/Llama-3.2-1B",
+                Which::V32_1bInstruct => "meta-llama/Llama-3.2-1B-Instruct",
+                Which::V32_3b => "meta-llama/Llama-3.2-3B",
+                Which::V32_3bInstruct => "meta-llama/Llama-3.2-3B-Instruct",
+                Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0",
+                Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                Which::SmolLM2_135M => "HuggingFaceTB/SmolLM2-135M",
+                Which::SmolLM2_135MInstruct => "HuggingFaceTB/SmolLM2-135M-Instruct",
+                Which::SmolLM2_360M => "HuggingFaceTB/SmolLM2-360M",
+                Which::SmolLM2_360MInstruct => "HuggingFaceTB/SmolLM2-360M-Instruct",
+                Which::SmolLM2_1B => "HuggingFaceTB/SmolLM2-1.7B",
+                Which::SmolLM2_1BInstruct => "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+            };
+            str.to_string()
         });
         println!("loading the model weights from {model_id}");
         let revision = args.revision.unwrap_or("main".to_string());
@@ -169,6 +206,8 @@ fn main() -> Result<()> {
             | Which::V3Instruct
             | Which::V31
             | Which::V31Instruct
+            | Which::V32_3b
+            | Which::V32_3bInstruct
             | Which::Solar10_7B => match &args.weight_path {
                 Some(path) => candle_examples::hub_load_local_safetensors(
                     path,
@@ -176,7 +215,15 @@ fn main() -> Result<()> {
                 )?,
                 _ => candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?,
             },
-            Which::TinyLlama1_1BChat => match &args.weight_path {
+            Which::SmolLM2_360M
+            | Which::SmolLM2_360MInstruct
+            | Which::SmolLM2_135M
+            | Which::SmolLM2_135MInstruct
+            | Which::SmolLM2_1B
+            | Which::SmolLM2_1BInstruct
+            | Which::V32_1b
+            | Which::V32_1bInstruct
+            | Which::TinyLlama1_1BChat => match &args.weight_path {
                 Some(path) => {
                     let mut filenames = vec![];
                     filenames.push(Path::new(path).join("model.safetensors"));
@@ -187,8 +234,6 @@ fn main() -> Result<()> {
                 }
             },
         };
-
-        println!("building the model");
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };

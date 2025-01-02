@@ -1,8 +1,13 @@
+//! Gemma inference implementation.
+//!
+//! See ["Gemma: Open Models Based on Gemini Technology"](https://blog.google/technology/developers/gemma-open-ai-model/)
+//!
+//! Based on implementation from Google and PyTorch
+
 use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::Activation;
-use candle_nn::{apply_rotary_emb_qkv, kvconcat, linear_b as linear, Linear, RmsNorm, VarBuilder};
+use candle_nn::{apply_rotary_emb_qkv, kvconcat, linear_b as linear, Activation, Linear, RmsNorm, VarBuilder};
 
 fn default_max_position_embeddings() -> usize {
     4096
@@ -368,6 +373,10 @@ impl Model {
         })
     }
 
+    pub fn embed_tokens(&self) -> &candle_nn::Embedding {
+        &self.embed_tokens
+    }
+
     fn prepare_decoder_attention_mask(
         &self,
         b_size: usize,
@@ -404,6 +413,36 @@ impl Model {
         xs.narrow(1, seq_len - 1, 1)?
             .apply(&self.norm)?
             .apply(&self.lm_head)
+    }
+    pub fn forward_embeds(
+        &mut self,
+        xs: &Tensor,
+        attn_mask: Option<&Tensor>,
+        seqlen_offset: usize,
+    ) -> Result<Tensor> {
+        let (_, seq_len, _) = xs.dims3()?;
+        let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+        for layer in self.layers.iter_mut() {
+            xs = layer.forward(&xs, attn_mask, seqlen_offset)?
+        }
+        xs.narrow(1, seq_len - 1, 1)?
+            .apply(&self.norm)?
+            .apply(&self.lm_head)
+    }
+
+    // Forward the model and return the hidden states without the lm_head
+    pub fn forward_embeds_without_projection(
+        &mut self,
+        xs: &Tensor,
+        attn_mask: Option<&Tensor>,
+        seqlen_offset: usize,
+    ) -> Result<Tensor> {
+        let (_, _, _) = xs.dims3()?;
+        let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+        for layer in self.layers.iter_mut() {
+            xs = layer.forward(&xs, attn_mask, seqlen_offset)?
+        }
+        Ok(xs)
     }
 
     pub fn clear_kv_cache(&mut self) {

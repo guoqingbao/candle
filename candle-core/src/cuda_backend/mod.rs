@@ -1,3 +1,5 @@
+//! Implementation of Backend traits for CUDA device
+//!
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape, WithDType};
@@ -174,6 +176,7 @@ impl Map1 for Im2Col1D {
     }
 }
 
+#[allow(unused)]
 struct Im2Col {
     h_k: usize,
     w_k: usize,
@@ -183,6 +186,7 @@ struct Im2Col {
 }
 
 impl Im2Col {
+    #[allow(unused)]
     fn hw_out(&self, h: usize, w: usize) -> (usize, usize) {
         let h_out = (h + 2 * self.padding - self.dilation * (self.h_k - 1) - 1) / self.stride + 1;
         let w_out = (w + 2 * self.padding - self.dilation * (self.w_k - 1) - 1) / self.stride + 1;
@@ -251,7 +255,7 @@ impl Map1 for Powf {
 }
 
 struct FastReduce<'a>(&'a [usize], ReduceOp);
-impl<'a> Map1Any for FastReduce<'a> {
+impl Map1Any for FastReduce<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits, W: Fn(CudaSlice<T>) -> S>(
         &self,
         src: &CudaSlice<T>,
@@ -346,7 +350,7 @@ impl<U: UnaryOpT> Map1 for U {
 }
 
 struct IndexSelect<'a>(&'a CudaStorage, &'a Layout, usize);
-impl<'a> Map1 for IndexSelect<'a> {
+impl Map1 for IndexSelect<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src: &CudaSlice<T>,
@@ -406,7 +410,7 @@ impl<'a> Map1 for IndexSelect<'a> {
 }
 
 struct Gather<'a>(&'a CudaStorage, &'a Layout, usize);
-impl<'a> Map1 for Gather<'a> {
+impl Map1 for Gather<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src: &CudaSlice<T>,
@@ -457,7 +461,7 @@ impl<'a> Map1 for Gather<'a> {
 }
 
 struct IndexAdd<'a>(&'a CudaStorage, &'a Layout, usize);
-impl<'a> Map2InPlace for IndexAdd<'a> {
+impl Map2InPlace for IndexAdd<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         dst: &mut CudaSlice<T>,
@@ -505,7 +509,7 @@ impl<'a> Map2InPlace for IndexAdd<'a> {
 }
 
 struct ScatterAdd<'a>(&'a CudaStorage, &'a Layout, usize);
-impl<'a> Map2InPlace for ScatterAdd<'a> {
+impl Map2InPlace for ScatterAdd<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         dst: &mut CudaSlice<T>,
@@ -550,7 +554,7 @@ impl<'a> Map2InPlace for ScatterAdd<'a> {
 }
 
 struct Conv1D<'a>(&'a crate::conv::ParamsConv1D);
-impl<'a> Map2 for Conv1D<'a> {
+impl Map2 for Conv1D<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         inp: &CudaSlice<T>,
@@ -591,7 +595,7 @@ impl<'a> Map2 for Conv1D<'a> {
 }
 
 struct Conv2D<'a>(&'a crate::conv::ParamsConv2D);
-impl<'a> Map2 for Conv2D<'a> {
+impl Map2 for Conv2D<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         inp: &CudaSlice<T>,
@@ -656,7 +660,7 @@ impl Map1 for Col2Im1D {
 }
 
 struct ConvTranspose1D<'a>(&'a crate::conv::ParamsConvTranspose1D);
-impl<'a> Map2 for ConvTranspose1D<'a> {
+impl Map2 for ConvTranspose1D<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         inp: &CudaSlice<T>,
@@ -705,7 +709,7 @@ impl<'a> Map2 for ConvTranspose1D<'a> {
 }
 
 struct ConvTranspose2D<'a>(&'a crate::conv::ParamsConvTranspose2D);
-impl<'a> Map2 for ConvTranspose2D<'a> {
+impl Map2 for ConvTranspose2D<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         inp: &CudaSlice<T>,
@@ -846,7 +850,7 @@ impl Map1 for UpsampleNearest2D {
 }
 
 struct WhereCond<'a>(&'a CudaStorage, &'a Layout);
-impl<'a> Map2 for WhereCond<'a> {
+impl Map2 for WhereCond<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         t: &CudaSlice<T>,
@@ -1520,7 +1524,7 @@ impl BackendStorage for CudaStorage {
                 let inp = &inp.slice(inp_l.start_offset()..);
                 let k = &k.slice(kernel_l.start_offset()..);
                 let mut out = unsafe { device.alloc::<u8>(dst_el) }.w()?;
-                crate::cudnn::launch_conv2d::<u8>(inp, inp_l, k, &mut out, params, &device)
+                crate::cudnn::launch_conv2d::<u8, u8>(inp, inp_l, k, &mut out, params, &device)
                     .map_err(crate::Error::wrap)?;
                 S::U8(out)
             }
@@ -1528,7 +1532,10 @@ impl BackendStorage for CudaStorage {
                 let inp = &inp.slice(inp_l.start_offset()..);
                 let k = &k.slice(kernel_l.start_offset()..);
                 let mut out = unsafe { device.alloc::<bf16>(dst_el) }.w()?;
-                crate::cudnn::launch_conv2d::<bf16>(inp, inp_l, k, &mut out, params, &device)
+                // Only PSEUDO_BFLOAT16_CONFIG is supported in cudnn, there is no "true bfloat16"
+                // version.
+                // https://docs.nvidia.com/deeplearning/cudnn/latest/api/cudnn-cnn-library.html#id88
+                crate::cudnn::launch_conv2d::<bf16, f32>(inp, inp_l, k, &mut out, params, &device)
                     .map_err(crate::Error::wrap)?;
                 S::BF16(out)
             }
@@ -1536,7 +1543,7 @@ impl BackendStorage for CudaStorage {
                 let inp = &inp.slice(inp_l.start_offset()..);
                 let k = &k.slice(kernel_l.start_offset()..);
                 let mut out = unsafe { device.alloc::<f16>(dst_el) }.w()?;
-                crate::cudnn::launch_conv2d::<f16>(inp, inp_l, k, &mut out, params, &device)
+                crate::cudnn::launch_conv2d::<f16, f16>(inp, inp_l, k, &mut out, params, &device)
                     .map_err(crate::Error::wrap)?;
                 S::F16(out)
             }
@@ -1544,7 +1551,7 @@ impl BackendStorage for CudaStorage {
                 let inp = &inp.slice(inp_l.start_offset()..);
                 let k = &k.slice(kernel_l.start_offset()..);
                 let mut out = unsafe { device.alloc::<f32>(dst_el) }.w()?;
-                crate::cudnn::launch_conv2d::<f32>(inp, inp_l, k, &mut out, params, &device)
+                crate::cudnn::launch_conv2d::<f32, f32>(inp, inp_l, k, &mut out, params, &device)
                     .map_err(crate::Error::wrap)?;
                 S::F32(out)
             }
@@ -1552,7 +1559,7 @@ impl BackendStorage for CudaStorage {
                 let inp = &inp.slice(inp_l.start_offset()..);
                 let k = &k.slice(kernel_l.start_offset()..);
                 let mut out = unsafe { device.alloc::<f64>(dst_el) }.w()?;
-                crate::cudnn::launch_conv2d::<f64>(inp, inp_l, k, &mut out, params, &device)
+                crate::cudnn::launch_conv2d::<f64, f64>(inp, inp_l, k, &mut out, params, &device)
                     .map_err(crate::Error::wrap)?;
                 S::F64(out)
             }

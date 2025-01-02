@@ -12,6 +12,7 @@ pub enum DeviceLocation {
     Metal { gpu_id: usize },
 }
 
+/// Cpu, Cuda, or Metal
 #[derive(Debug, Clone)]
 pub enum Device {
     Cpu,
@@ -131,9 +132,29 @@ impl Device {
     pub fn new_cuda(ordinal: usize) -> Result<Self> {
         Ok(Self::Cuda(crate::CudaDevice::new(ordinal)?))
     }
-
     pub fn new_gcu(ordinal: usize) -> Result<Self> {
         Ok(Self::Gcu(crate::GcuDevice::new(ordinal)?))
+    }
+    pub fn as_cuda_device(&self) -> Result<&crate::CudaDevice> {
+        match self {
+            Self::Cuda(d) => Ok(d),
+            Self::Cpu => crate::bail!("expected a cuda device, got cpu"),
+            Self::Gcu(_) => crate::bail!("expected a cuda device, got gcu"),
+            Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
+        }
+    }
+
+    pub fn as_metal_device(&self) -> Result<&crate::MetalDevice> {
+        match self {
+            Self::Cuda(_) => crate::bail!("expected a metal device, got cuda"),
+            Self::Cpu => crate::bail!("expected a metal device, got cpu"),
+            Self::Gcu(_) => crate::bail!("expected a metal device, got gcu"),
+            Self::Metal(d) => Ok(d),
+        }
+    }
+
+    pub fn new_cuda_with_stream(ordinal: usize) -> Result<Self> {
+        Ok(Self::Cuda(crate::CudaDevice::new_with_stream(ordinal)?))
     }
 
     pub fn new_metal(ordinal: usize) -> Result<Self> {
@@ -188,7 +209,8 @@ impl Device {
         match self {
             Self::Cuda(_) => true,
             Self::Gcu(_) => true,
-            Self::Metal(_) | Self::Cpu => false,
+            Self::Metal(_) => true,
+            Self::Cpu => false,
         }
     }
 

@@ -1,3 +1,9 @@
+//! Llama inference implementation.
+//!
+//! See ["LLaMA: Open and Efficient Foundation Language Models"](https://arxiv.org/abs/2302.13971)
+//!
+//! Implementation based on Hugging Face's [transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py)
+
 use super::with_tracing::{linear_no_bias as linear, Linear, RmsNorm};
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{embedding, Embedding, Module, VarBuilder};
@@ -44,6 +50,7 @@ pub struct LlamaConfig {
     pub eos_token_id: Option<LlamaEosToks>,
     pub rope_scaling: Option<Llama3RopeConfig>,
     pub max_position_embeddings: usize,
+    pub tie_word_embeddings: Option<bool>,
 }
 
 impl LlamaConfig {
@@ -72,6 +79,7 @@ impl LlamaConfig {
             eos_token_id: self.eos_token_id,
             rope_scaling: self.rope_scaling,
             max_position_embeddings: self.max_position_embeddings,
+            tie_word_embeddings: self.tie_word_embeddings.unwrap_or(false),
         }
     }
 }
@@ -91,6 +99,7 @@ pub struct Config {
     pub eos_token_id: Option<LlamaEosToks>,
     pub rope_scaling: Option<Llama3RopeConfig>,
     pub max_position_embeddings: usize,
+    pub tie_word_embeddings: bool,
 }
 
 impl Config {
@@ -109,6 +118,7 @@ impl Config {
             eos_token_id: None,
             rope_scaling: None,
             max_position_embeddings: DEFAULT_MAX_SEQ_LEN,
+            tie_word_embeddings: false,
         }
     }
 
@@ -127,6 +137,7 @@ impl Config {
             eos_token_id: None,
             rope_scaling: None,
             max_position_embeddings: DEFAULT_MAX_SEQ_LEN,
+            tie_word_embeddings: false,
         }
     }
 }
@@ -257,16 +268,10 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
 impl CausalSelfAttention {
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize, cache: &Cache) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
-        let (b_sz, _, seq_len, hidden_size) = x.dims4()?;
+        let (_b_sz, _, seq_len, _hidden_size) = x.dims4()?;
         let cos = cache.cos.narrow(0, index_pos, seq_len)?;
         let sin = cache.sin.narrow(0, index_pos, seq_len)?;
-        let cos = cos.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
-        let sin = sin.broadcast_as((b_sz, 1, seq_len, hidden_size))?;
-        let x1 = x.narrow(D::Minus1, 0, hidden_size / 2)?;
-        let x2 = x.narrow(D::Minus1, hidden_size / 2, hidden_size / 2)?;
-        let rotate_x = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;
-        let rope = (x.broadcast_mul(&cos)? + rotate_x.broadcast_mul(&sin)?)?;
-        Ok(rope)
+        candle_nn::rotary_emb::rope(x, &cos, &sin)
     }
 
     fn forward(
@@ -537,10 +542,14 @@ impl Llama {
 
     pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let wte = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
-        let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
+        let lm_head = if cfg.tie_word_embeddings {
+            Linear::from_weights(wte.embeddings().clone(), None)
+        } else {
+            linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
+        };
         let ln_f = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
         let blocks: Vec<_> = (0..cfg.num_hidden_layers)
-            .map(|i| Block::load(vb.pp(&format!("model.layers.{i}")), cfg).unwrap())
+            .map(|i| Block::load(vb.pp(format!("model.layers.{i}")), cfg).unwrap())
             .collect();
 
         Ok(Self {

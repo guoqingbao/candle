@@ -1,11 +1,26 @@
+//! Mixtral Model, based on the Mistral architecture
+//!
+//! See Mistral and Mixtral at:
+//! - [Hugging Face](https://huggingface.co/docs/transformers/model_doc/mixtral)
+//! - [Github](https://github.com/mistralai/mistral-src)
+//!
+
 use crate::models::with_tracing::{linear_no_bias, Linear, RmsNorm};
 /// Mistral LLM, https://github.com/mistralai/mistral-src
 use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
 
+fn default_num_attention_heads() -> usize {
+    32
+}
+
 fn default_use_flash_attn() -> bool {
     false
+}
+
+fn default_hidden_act() -> candle_nn::Activation {
+    candle_nn::Activation::Silu
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -14,9 +29,11 @@ pub struct Config {
     pub hidden_size: usize,
     pub intermediate_size: usize,
     pub num_hidden_layers: usize,
+    #[serde(default = "default_num_attention_heads")]
     pub num_attention_heads: usize,
     pub head_dim: Option<usize>,
     pub num_key_value_heads: usize,
+    #[serde(default = "default_hidden_act")]
     pub hidden_act: Activation,
     pub max_position_embeddings: usize,
     pub rms_norm_eps: f64,
@@ -444,6 +461,22 @@ impl Model {
         let mut xs = self.embed_tokens.forward(input_ids)?;
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
+        }
+        xs.i((.., seq_len - 1, ..))?
+            .apply(&self.norm)?
+            .apply(&self.lm_head)
+    }
+
+    pub fn forward_embeds(
+        &mut self,
+        xs: &Tensor,
+        attn_mask: Option<&Tensor>,
+        seqlen_offset: usize,
+    ) -> Result<Tensor> {
+        let (_b_size, seq_len, _) = xs.dims3()?;
+        let mut xs = xs.clone();
+        for layer in self.layers.iter_mut() {
+            xs = layer.forward(&xs, attn_mask, seqlen_offset)?
         }
         xs.i((.., seq_len - 1, ..))?
             .apply(&self.norm)?

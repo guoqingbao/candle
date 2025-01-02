@@ -2,7 +2,8 @@
 [![discord server](https://dcbadge.vercel.app/api/server/hugging-face-879548962464493619)](https://discord.gg/hugging-face-879548962464493619)
 [![Latest version](https://img.shields.io/crates/v/candle-core.svg)](https://crates.io/crates/candle-core)
 [![Documentation](https://docs.rs/candle-core/badge.svg)](https://docs.rs/candle-core)
-![License](https://img.shields.io/crates/l/candle-core.svg)
+[![License](https://img.shields.io/github/license/base-org/node?color=blue)](https://github.com/huggingface/candle/blob/main/LICENSE-MIT)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](https://github.com/huggingface/candle/blob/main/LICENSE-APACHE)
 
 Candle is a minimalist ML framework for Rust with a focus on performance (including GPU support) 
 and ease of use. Try our online demos: 
@@ -102,7 +103,7 @@ We also provide a some command line based examples using state of the art models
 - [Falcon](./candle-examples/examples/falcon/): general LLM.
 - [Codegeex4](./candle-examples/examples/codegeex4-9b/): Code completion,code interpreter,web search,fuction calling,repository-level
 - [GLM4](./candle-examples/examples/glm4/): Open Multilingual Multimodal Chat LMs by THUDM
-- [Gemma](./candle-examples/examples/gemma/): 2b and 7b general LLMs from Google Deepmind.
+- [Gemma v1 and v2](./candle-examples/examples/gemma/): 2b and 7b+/9b general LLMs from Google Deepmind.
 - [RecurrentGemma](./candle-examples/examples/recurrent-gemma/): 2b and 7b
   Griffin based models from Google that mix attention with a RNN like state.
 - [Phi-1, Phi-1.5, Phi-2, and Phi-3](./candle-examples/examples/phi/): 1.3b,
@@ -157,6 +158,8 @@ We also provide a some command line based examples using state of the art models
   model using residual vector quantization.
 - [MetaVoice](./candle-examples/examples/metavoice/): foundational model for
   text-to-speech.
+- [Parler-TTS](./candle-examples/examples/parler-tts/): large text-to-speech
+  model.
 - [T5](./candle-examples/examples/t5), [Bert](./candle-examples/examples/bert/),
   [JinaBert](./candle-examples/examples/jina-bert/) : useful for sentence embeddings.
 - [DINOv2](./candle-examples/examples/dinov2/): computer vision model trained
@@ -222,6 +225,7 @@ And then head over to
 - [`candle-sampling`](https://github.com/EricLBuehler/candle-sampling): Sampling techniques for Candle.
 - [`gpt-from-scratch-rs`](https://github.com/jeroenvlek/gpt-from-scratch-rs): A port of Andrej Karpathy's _Let's build GPT_ tutorial on YouTube showcasing the Candle API on a toy problem.
 - [`candle-einops`](https://github.com/tomsanbear/candle-einops): A pure rust implementation of the python [einops](https://github.com/arogozhnikov/einops) library.
+- [`atoma-infer`](https://github.com/atoma-network/atoma-infer): A Rust library for fast inference at scale, leveraging FlashAttention2 for efficient attention computation, PagedAttention for efficient KV-cache memory management, and multi-GPU support. It is OpenAI api compatible.
 
 If you have an addition to this list, please submit a pull request.
 
@@ -245,7 +249,7 @@ If you have an addition to this list, please submit a pull request.
         - StarCoder, StarCoder2.
         - Phi 1, 1.5, 2, and 3.
         - Mamba, Minimal Mamba
-        - Gemma 2b and 7b.
+        - Gemma v1 2b and 7b+, v2 2b and 9b.
         - Mistral 7b v0.1.
         - Mixtral 8x7b v0.1.
         - StableLM-3B-4E1T, StableLM-2-1.6B, Stable-Code-3B.
@@ -273,9 +277,10 @@ If you have an addition to this list, please submit a pull request.
         - Whisper, multi-lingual speech-to-text.
         - EnCodec, audio compression model.
         - MetaVoice-1B, text-to-speech model.
+        - Parler-TTS, text-to-speech model.
     - Computer Vision Models.
         - DINOv2, ConvMixer, EfficientNet, ResNet, ViT, VGG, RepVGG, ConvNeXT,
-          ConvNeXTv2, MobileOne, EfficientVit (MSRA), MobileNetv4, Hiera.
+          ConvNeXTv2, MobileOne, EfficientVit (MSRA), MobileNetv4, Hiera, FastViT.
         - yolo-v3, yolo-v8.
         - Segment-Anything Model (SAM).
         - SegFormer.

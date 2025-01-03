@@ -5,10 +5,10 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
-use clap::Parser;
-use std::path::Path;
 use candle_transformers::models::qwen2::{Config as ConfigBase, ModelForCausalLM as ModelBase};
 use candle_transformers::models::qwen2_moe::{Config as ConfigMoe, Model as ModelMoe};
+use clap::Parser;
+use std::path::Path;
 
 use candle::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -285,7 +285,7 @@ fn main() -> Result<()> {
         WhichModel::W0_5b | WhichModel::W2_0_5b | WhichModel::W2_1_5b | WhichModel::W1_8b => {
             match &args.weight_path {
                 Some(path) => Path::new(path).join("model.safetensors"),
-                None => vec![repo.get("model.safetensors")?]
+                None => vec![repo.get("model.safetensors")?],
             }
         }
         WhichModel::W4b
@@ -294,15 +294,12 @@ fn main() -> Result<()> {
         | WhichModel::W14b
         | WhichModel::W72b
         | WhichModel::W2_72b
-        | WhichModel::MoeA27b => {
-            match &args.weight_path {
-                Some(path) => candle_examples::hub_load_local_safetensors(
-                    path,
-                    "model.safetensors.index.json",
-                )?,
-                None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?
+        | WhichModel::MoeA27b => match &args.weight_path {
+            Some(path) => {
+                candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
             }
-        }
+            None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
+        },
     };
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;

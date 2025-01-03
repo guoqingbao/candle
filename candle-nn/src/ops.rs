@@ -1,8 +1,10 @@
 //! Tensor ops.
 //!
 
-use candle::{CpuStorage, GcuStorage, DType, Layout, Module, Result, Shape, Tensor, D};
+use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor, D};
 use rayon::prelude::*;
+#[cfg(feature = "gcu")]
+use candle::GcuStorage;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
 /// a slice of fixed index on dimension `dim` are between 0 and 1 and sum to 1.
@@ -472,7 +474,7 @@ impl candle::CustomOp1 for SoftmaxLastDim {
                 };
                 // println!("n_rows: {}, n_cols: {}", n_rows, n_cols);
                 let mut cfg = dev.launch_cfg.clone();
-                cfg.set_shared_memory(src.num_bytes() as u32 + 512*1024);
+                cfg.set_shared_memory(src.num_bytes() as u32 + 512 * 1024);
                 let src = &src.slice(layout.start_offset()..);
                 let func = dev.get_or_load_func(&kernel_name::<T>("softmax"), ubridge::REDUCE)?;
                 let dst = dev.alloc::<T>(el).w()?;
@@ -748,13 +750,13 @@ pub fn rms_norm(xs: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
     xs.apply_op2_no_bwd(alpha, &RmsNorm { eps })
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "gcu"))]
 #[derive(Debug, Clone)]
 struct LayerNorm {
     eps: f32,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "gcu"))]
 impl candle::CustomOp3 for LayerNorm {
     fn name(&self) -> &'static str {
         "layer-norm"
@@ -992,7 +994,7 @@ pub fn layer_norm_slow(x: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> R
         .broadcast_add(beta)
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "gcu"))]
 pub fn layer_norm(xs: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> Result<Tensor> {
     let hidden_size_xs = xs.dim(D::Minus1)?;
     let hidden_size_alpha = alpha.dims1()?;
@@ -1330,9 +1332,7 @@ pub fn gptq_matmul(
 #[cfg(feature = "gcu")]
 pub fn gptq_weight_repack(qweight: &Tensor) -> Result<Tensor> {
     use candle::gcu_backend::GPTQRepack;
-    let op = GPTQRepack {
-        bits: 4,
-    };
+    let op = GPTQRepack { bits: 4 };
     qweight.apply_op1(op)
 }
 

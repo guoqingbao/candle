@@ -181,7 +181,7 @@ pub enum Error {
 
     #[error(transparent)]
     Ug(#[from] ug::Error),
-    
+
     #[error(transparent)]
     TryFromIntError(#[from] core::num::TryFromIntError),
 

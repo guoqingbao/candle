@@ -5,13 +5,13 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
-use clap::{Parser, ValueEnum};
-use std::path::Path;
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::models::mixformer::{Config, MixFormerSequentialForCausalLM as MixFormer};
 use candle_transformers::models::phi::{Config as PhiConfig, Model as Phi};
 use candle_transformers::models::phi3::{Config as Phi3Config, Model as Phi3};
 use candle_transformers::models::quantized_mixformer::MixFormerSequentialForCausalLM as QMixFormer;
+use clap::{Parser, ValueEnum};
+use std::path::Path;
 
 use candle::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
@@ -337,12 +337,10 @@ fn main() -> Result<()> {
             }
         } else {
             match args.model {
-                WhichModel::V1 | WhichModel::V1_5 => {
-                    match &args.weight_path {
-                        Some(path) =>  vec![Path::new(path).join("model.safetensors")],
-                        None => vec![repo.get("model.safetensors")?],
-                    }
-                }
+                WhichModel::V1 | WhichModel::V1_5 => match &args.weight_path {
+                    Some(path) => vec![Path::new(path).join("model.safetensors")],
+                    None => vec![repo.get("model.safetensors")?],
+                },
                 WhichModel::V2 | WhichModel::V2Old | WhichModel::V3 | WhichModel::V3Medium => {
                     match &args.weight_path {
                         Some(path) => candle_examples::hub_load_local_safetensors(
@@ -352,7 +350,7 @@ fn main() -> Result<()> {
                         None => candle_examples::hub_load_safetensors(
                             &repo,
                             "model.safetensors.index.json",
-                        )?
+                        )?,
                     }
                 }
                 WhichModel::PuffinPhiV2 => vec![repo.get("model-puffin-phi-v2.safetensors")?],

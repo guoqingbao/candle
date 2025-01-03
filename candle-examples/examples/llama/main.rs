@@ -13,13 +13,13 @@ extern crate accelerate_src;
 extern crate intel_mkl_src;
 
 use anyhow::{bail, Error as E, Result};
-use clap::{Parser, ValueEnum};
-use std::path::Path;
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
+use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::io::Write;
+use std::path::Path;
 
 use candle_transformers::models::llama as model;
 use model::{Llama, LlamaConfig};

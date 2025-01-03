@@ -1,6 +1,6 @@
 #![allow(unused)]
 use super::GgmlDType;
-use crate::{GcuDevice, GcuStorage, Error, Result};
+use crate::{Error, GcuDevice, GcuStorage, Result};
 
 pub struct QGcuStorage {
     dtype: GgmlDType,
@@ -25,6 +25,10 @@ impl QGcuStorage {
     }
 
     pub fn dequantize_f16(&self, _elem_count: usize) -> Result<GcuStorage> {
+        Err(Error::NotCompiledWithGcuSupport)
+    }
+
+    pub fn dequantize_bf16(&self, _elem_count: usize) -> Result<GcuStorage> {
         Err(Error::NotCompiledWithGcuSupport)
     }
 

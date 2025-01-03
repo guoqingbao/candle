@@ -278,7 +278,7 @@ impl MHA {
         qkv: &Tensor,
         seqlen_offset: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let (b_sz, seq_len, _, _, _) = qkv.dims5()?;
+        let (b_sz, _, _, _, _) = qkv.dims5()?;
         if qkv.device().is_gcu() {
             let q = qkv.i((.., .., 0))?;
             let k = qkv.i((.., .., 1))?;
@@ -469,10 +469,7 @@ impl MixFormerSequentialForCausalLM {
         for block in self.blocks.iter_mut() {
             xs = block.forward(&xs, mask.as_ref())?
         }
-        let xs = xs
-            .i((.., seq_len - 1, ..))?
-            .apply(&self.head)?
-            .squeeze(1)?;
+        let xs = xs.i((.., seq_len - 1, ..))?.apply(&self.head)?.squeeze(1)?;
         Ok(xs)
     }
 

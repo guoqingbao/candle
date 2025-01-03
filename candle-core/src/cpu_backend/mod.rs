@@ -1922,7 +1922,9 @@ impl BackendStorage for CpuStorage {
                 let data = unary_map(storage, layout, |v| v);
                 Ok(Self::F64(data))
             }
-            _=> { panic!("Not supported dtype conversion!");}
+            _ => {
+                panic!("Not supported dtype conversion!");
+            }
         }
     }
 

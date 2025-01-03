@@ -71,12 +71,14 @@ impl PyDType {
 
 static CUDA_DEVICE: std::sync::Mutex<Option<Device>> = std::sync::Mutex::new(None);
 static METAL_DEVICE: std::sync::Mutex<Option<Device>> = std::sync::Mutex::new(None);
+static GCU_DEVICE: std::sync::Mutex<Option<Device>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PyDevice {
     Cpu,
     Cuda,
     Metal,
+    Gcu,
 }
 
 impl PyDevice {
@@ -85,6 +87,7 @@ impl PyDevice {
             Device::Cpu => Self::Cpu,
             Device::Cuda(_) => Self::Cuda,
             Device::Metal(_) => Self::Metal,
+            Device::Gcu(_) => Self::Gcu,
         }
     }
 
@@ -109,6 +112,15 @@ impl PyDevice {
                 *device = Some(d.clone());
                 Ok(d)
             }
+            Self::Gcu => {
+                let mut device = GCU_DEVICE.lock().unwrap();
+                if let Some(device) = device.as_ref() {
+                    return Ok(device.clone());
+                };
+                let d = Device::new_gcu(0).map_err(wrap_err)?;
+                *device = Some(d.clone());
+                Ok(d)
+            }
         }
     }
 }
@@ -119,6 +131,7 @@ impl<'source> FromPyObject<'source> for PyDevice {
         let device = match device.as_str() {
             "cpu" => PyDevice::Cpu,
             "cuda" => PyDevice::Cuda,
+            "gcu" => PyDevice::Gcu,
             _ => Err(PyTypeError::new_err(format!("invalid device '{device}'")))?,
         };
         Ok(device)
@@ -131,6 +144,7 @@ impl ToPyObject for PyDevice {
             PyDevice::Cpu => "cpu",
             PyDevice::Cuda => "cuda",
             PyDevice::Metal => "metal",
+            PyDevice::Gcu => "gcu",
         };
         str.to_object(py)
     }
@@ -152,7 +166,9 @@ macro_rules! pydtype {
 
 pydtype!(i64, |v| v);
 pydtype!(u8, |v| v);
+pydtype!(i8, |v| v);
 pydtype!(u32, |v| v);
+pydtype!(i32, |v| v);
 pydtype!(f16, f32::from);
 pydtype!(bf16, f32::from);
 pydtype!(f32, |v| v);
@@ -198,11 +214,13 @@ trait MapDType {
     fn map(&self, t: &Tensor) -> PyResult<Self::Output> {
         match t.dtype() {
             DType::U8 => self.f::<u8>(t),
+            DType::I8 => self.f::<i8>(t),
             DType::U32 => self.f::<u32>(t),
             DType::I64 => self.f::<i64>(t),
             DType::BF16 => self.f::<bf16>(t),
             DType::F16 => self.f::<f16>(t),
             DType::F32 => self.f::<f32>(t),
+            DType::I32 => self.f::<i32>(t),
             DType::F64 => self.f::<f64>(t),
         }
     }

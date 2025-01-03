@@ -48,7 +48,9 @@ pub use group_norm::{group_norm, GroupNorm};
 pub use init::Init;
 pub use layer_norm::{layer_norm, rms_norm, LayerNorm, LayerNormConfig, RmsNorm};
 pub use linear::{linear, linear_b, linear_no_bias, Linear};
-pub use ops::{apply_rotary_emb_qkv, kvconcat, Dropout, gptq_matmul, gptq_weight_repack};
+pub use ops::{Dropout, apply_rotary_emb_qkv, kvconcat};
+#[cfg(feature = "gcu")]
+pub use ops::{gptq_matmul, gptq_weight_repack};
 pub use optim::{AdamW, Optimizer, ParamsAdamW, SGD};
 pub use rnn::{gru, lstm, GRUConfig, LSTMConfig, GRU, LSTM, RNN};
 pub use sequential::{seq, Sequential};

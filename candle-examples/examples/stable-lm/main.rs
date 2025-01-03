@@ -5,10 +5,10 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
-use clap::{Parser, ValueEnum};
-use std::path::Path;
 use candle_transformers::models::quantized_stable_lm::Model as QStableLM;
 use candle_transformers::models::stable_lm::{Config, Model as StableLM};
+use clap::{Parser, ValueEnum};
+use std::path::Path;
 
 use candle::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -278,18 +278,15 @@ fn main() -> Result<()> {
         (Which::V1Orig | Which::V1 | Which::V1Zephyr | Which::V2 | Which::V2Zephyr, false) => {
             match &args.weight_path {
                 Some(path) => vec![Path::new(path).join("model.safetensors")],
-                None => vec![repo.get("model.safetensors")?]
+                None => vec![repo.get("model.safetensors")?],
             }
         }
-        (Which::Code, false) => {
-            match &args.weight_path {
-                Some(path) => candle_examples::hub_load_local_safetensors(
-                    path,
-                    "model.safetensors.index.json",
-                )?,
-                None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?
+        (Which::Code, false) => match &args.weight_path {
+            Some(path) => {
+                candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
             }
-        }
+            None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
+        },
     };
 
     println!("retrieved the files in {:?}", start.elapsed());

@@ -1,15 +1,15 @@
 use super::gguf_file::Value;
 use super::{GgmlDType, QStorage};
+pub use crate::gcu_backend::GcuDType;
 use crate::quantized::k_quants::GgmlType;
 use crate::{backend::BackendDevice, gcu_backend::WrapErr};
 use crate::{GcuDevice, GcuStorage, Result};
 use half::{bf16, f16};
 pub use ubridge;
+use ubridge::device_ptr::DeviceSlice;
 use ubridge::gcu_launch::GcuLaunchAsync;
 use ubridge::gcu_slice::{GcuSlice, GcuView};
 use ubridge::prelude::DevicePtr;
-use ubridge::device_ptr::DeviceSlice;
-pub use crate::gcu_backend::GcuDType;
 
 #[derive(Clone, Debug)]
 pub struct QGcuStorage {
@@ -59,11 +59,15 @@ fn quantize_q8_1(
     //     block_dim: (GCU_DEQUANTIZE_BLOCK_SIZE as u32, 1, 1),
     //     shared_mem_bytes: 0,
     // };
-    let params = (src.device_ptr(), dst.device_ptr(), kx as i32, kx_padded as i32);
+    let params = (
+        src.device_ptr(),
+        dst.device_ptr(),
+        kx as i32,
+        kx_padded as i32,
+    );
     unsafe { func.launch(cfg, params) }.w()?;
     Ok(())
 }
-
 
 fn dequantize<T: GcuDType + crate::WithDType>(
     data: &GcuSlice<u8>,
@@ -95,13 +99,8 @@ fn dequantize<T: GcuDType + crate::WithDType>(
     Ok(GcuStorage::wrap_Gcu_slice(dst, dev.clone()))
 }
 
-fn quantize(
-    src: &GcuStorage,
-    dst: &GcuSlice<u8>,
-    dtype: GgmlDType,
-    dev: &GcuDevice,
-) -> Result<()> {
-    use crate::gcu_backend::{GcuStorageSlice, GcuError};
+fn quantize(src: &GcuStorage, dst: &GcuSlice<u8>, dtype: GgmlDType, dev: &GcuDevice) -> Result<()> {
+    use crate::gcu_backend::{GcuError, GcuStorageSlice};
     let cfg = &dev.launch_cfg;
     let name = match dtype {
         GgmlDType::Q4_0 => "quantize_block_q4_0",
@@ -119,19 +118,26 @@ fn quantize(
     };
 
     let (kernel_name, src_ptr, src_bytes) = match &src.slice {
-        GcuStorageSlice::BF16(slice) => {
-            (format!("{}_bf16", name), slice.device_ptr(), slice.num_bytes())
-        }
-        GcuStorageSlice::F16(slice) => {
-            (format!("{}_f16", name), slice.device_ptr(), slice.num_bytes())
-        }
-        GcuStorageSlice::F32(slice) => {
-            (format!("{}_f32", name), slice.device_ptr(), slice.num_bytes())
-        }
-        _ => Err(GcuError::InternalError("invalid source dtype for quantization"))?,
+        GcuStorageSlice::BF16(slice) => (
+            format!("{}_bf16", name),
+            slice.device_ptr(),
+            slice.num_bytes(),
+        ),
+        GcuStorageSlice::F16(slice) => (
+            format!("{}_f16", name),
+            slice.device_ptr(),
+            slice.num_bytes(),
+        ),
+        GcuStorageSlice::F32(slice) => (
+            format!("{}_f32", name),
+            slice.device_ptr(),
+            slice.num_bytes(),
+        ),
+        _ => Err(GcuError::InternalError(
+            "invalid source dtype for quantization",
+        ))?,
     };
 
-    
     let func = dev.get_or_load_func(&kernel_name, ubridge::QUANTIZED)?;
 
     let params = (src_ptr, dst.device_ptr(), src_bytes, dst.num_bytes());

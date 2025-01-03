@@ -5,10 +5,10 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
-use clap::Parser;
-use std::path::Path;
 use candle_transformers::models::mistral::{Config, Model as Mistral};
 use candle_transformers::models::quantized_mistral::Model as QMistral;
+use clap::Parser;
+use std::path::Path;
 
 use candle::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -304,10 +304,9 @@ fn main() -> Result<()> {
         None => repo.get("tokenizer.json")?,
     };
     let filenames = match &args.weight_path {
-        Some(path) => candle_examples::hub_load_local_safetensors(
-            path,
-            "model.safetensors.index.json",
-        )?,
+        Some(path) => {
+            candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+        }
         None => {
             if args.quantized {
                 vec![repo.get("model-q4k.gguf")?]

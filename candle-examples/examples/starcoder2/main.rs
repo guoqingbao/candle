@@ -5,9 +5,9 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
+use candle_transformers::models::starcoder2::Model;
 use clap::Parser;
 use std::path::Path;
-use candle_transformers::models::starcoder2::Model;
 
 use candle::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -210,10 +210,9 @@ fn main() -> Result<()> {
         None => repo.get("tokenizer.json")?,
     };
     let filenames = match &args.weight_path {
-        Some(path) => candle_examples::hub_load_local_safetensors(
-            path,
-            "model.safetensors.index.json",
-        )?,
+        Some(path) => {
+            candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+        }
         None => vec![repo.get("model.safetensors")?],
     };
     println!("retrieved the files in {:?}", start.elapsed());

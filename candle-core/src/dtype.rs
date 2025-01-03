@@ -89,7 +89,7 @@ impl DType {
 
     pub fn is_int(&self) -> bool {
         match self {
-            Self::U8 | Self::I8 |Self::U32 | Self::I32 | Self::I64 => true,
+            Self::U8 | Self::I8 | Self::U32 | Self::I32 | Self::I64 => true,
             Self::BF16 | Self::F16 | Self::F32 | Self::F64 => false,
         }
     }

@@ -426,4 +426,3 @@ impl Module for ClipTextTransformer {
         self.forward_with_mask(xs, usize::MAX)
     }
 }
-

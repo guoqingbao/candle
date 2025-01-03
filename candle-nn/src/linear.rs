@@ -27,10 +27,7 @@ pub struct Linear {
 
 impl Linear {
     pub fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self {
-            weight,
-            bias,
-        }
+        Self { weight, bias }
     }
 
     pub fn weight(&self) -> &Tensor {
@@ -45,15 +42,9 @@ impl Linear {
 impl super::Module for Linear {
     fn forward(&self, x: &Tensor) -> candle::Result<Tensor> {
         let x = match *x.dims() {
-            [b1, b2, _, _] => {
-                x.matmul(&self.weight.broadcast_left((b1, b2))?.t()?)?
-            }
-            [bsize, _, _] => {
-                x.matmul(&self.weight.broadcast_left(bsize)?.t()?)?
-            }
-            _ => {
-                x.matmul(&self.weight.t()?)?
-            }
+            [b1, b2, _, _] => x.matmul(&self.weight.broadcast_left((b1, b2))?.t()?)?,
+            [bsize, _, _] => x.matmul(&self.weight.broadcast_left(bsize)?.t()?)?,
+            _ => x.matmul(&self.weight.t()?)?,
         };
 
         // let x = x.matmul(&w)?;

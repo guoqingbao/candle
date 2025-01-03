@@ -5,9 +5,9 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
+use candle_transformers::models::bigcode::{Config, GPTBigCode};
 use clap::Parser;
 use std::path::Path;
-use candle_transformers::models::bigcode::{Config, GPTBigCode};
 
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;

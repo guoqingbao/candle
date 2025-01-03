@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{apply_rotary_emb_qkv, kvconcat, linear_b as linear, Activation, Linear, RmsNorm, VarBuilder};
+use candle_nn::{
+    apply_rotary_emb_qkv, kvconcat, linear_b as linear, Activation, Linear, RmsNorm, VarBuilder,
+};
 
 fn default_max_position_embeddings() -> usize {
     4096

@@ -5,10 +5,10 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
-use clap::Parser;
-use std::path::Path;
 use candle_transformers::models::gemma::{Config as Config1, Model as Model1};
 use candle_transformers::models::gemma2::{Config as Config2, Model as Model2};
+use clap::Parser;
+use std::path::Path;
 
 use candle::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -314,10 +314,9 @@ fn main() -> Result<()> {
         None => repo.get("config.json")?,
     };
     let filenames = match &args.weight_path {
-        Some(path) => candle_examples::hub_load_local_safetensors(
-            path,
-            "model.safetensors.index.json",
-        )?,
+        Some(path) => {
+            candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+        }
         None => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
     };
     println!("retrieved the files in {:?}", start.elapsed());

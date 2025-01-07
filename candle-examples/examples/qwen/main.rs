@@ -284,7 +284,7 @@ fn main() -> Result<()> {
     let filenames = match args.model {
         WhichModel::W0_5b | WhichModel::W2_0_5b | WhichModel::W2_1_5b | WhichModel::W1_8b => {
             match &args.weight_path {
-                Some(path) => Path::new(path).join("model.safetensors"),
+                Some(path) => vec![Path::new(path).join("model.safetensors")],
                 None => vec![repo.get("model.safetensors")?],
             }
         }

@@ -65,16 +65,8 @@ struct Args {
     cpu: bool,
 
     /// The temperature used to generate samples.
-    #[arg(long, default_value_t = 0.8)]
-    temperature: f64,
-
-    /// Nucleus sampling probability cutoff.
     #[arg(long)]
-    top_p: Option<f64>,
-
-    /// Only sample among the top K samples.
-    #[arg(long)]
-    top_k: Option<usize>,
+    temperature: Option<f64>,
 
     /// Nucleus sampling probability cutoff.
     #[arg(long)]
@@ -127,7 +119,7 @@ struct Args {
     weight_path: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = 1.)]
     repeat_penalty: f32,
 
     /// The context size to consider for the repeat penalty.

@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 use super::gguf_file::Value;
 use super::{GgmlDType, QStorage};
 pub use crate::gcu_backend::GcuDType;
@@ -96,7 +97,7 @@ fn dequantize<T: GcuDType + crate::WithDType>(
 
     let params = (data.device_ptr(), dst.device_ptr(), elem_count);
     unsafe { func.launch(cfg, params).w()? };
-    Ok(GcuStorage::wrap_Gcu_slice(dst, dev.clone()))
+    Ok(GcuStorage::wrap_gcu_slice(dst, dev.clone()))
 }
 
 fn quantize(src: &GcuStorage, dst: &GcuSlice<u8>, dtype: GgmlDType, dev: &GcuDevice) -> Result<()> {
@@ -185,7 +186,7 @@ fn dequantize_mul_mat_vec(
 
     let params = (data, y, &dst, ncols as i32, nrows as i32);
     unsafe { func.launch(cfg, params) }.w()?;
-    Ok(GcuStorage::wrap_Gcu_slice(dst, dev.clone()))
+    Ok(GcuStorage::wrap_gcu_slice(dst, dev.clone()))
 }
 
 fn mul_mat_vec_via_q8_1(
@@ -254,7 +255,7 @@ fn mul_mat_vec_via_q8_1(
         /* nrows_dst */ nrows as i32,
     );
     unsafe { func.launch(cfg, params) }.w()?;
-    Ok(GcuStorage::wrap_Gcu_slice(dst, dev.clone()))
+    Ok(GcuStorage::wrap_gcu_slice(dst, dev.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,7 +324,7 @@ fn mul_mat_via_q8_1(
         /* nrows_dst */ x_rows as i32,
     );
     unsafe { func.launch(cfg, params) }.w()?;
-    Ok(GcuStorage::wrap_Gcu_slice(dst, dev.clone()))
+    Ok(GcuStorage::wrap_gcu_slice(dst, dev.clone()))
 }
 
 impl QGcuStorage {
@@ -397,7 +398,7 @@ impl QGcuStorage {
         rhs_l: &crate::Layout,
     ) -> Result<(GcuStorage, crate::Shape)> {
         let (nrows, ncols) = self_shape.dims2()?;
-        let rhs = rhs.as_Gcu_slice::<f32>()?;
+        let rhs = rhs.as_gcu_slice::<f32>()?;
         let rhs = match rhs_l.contiguous_offsets() {
             Some((o1, o2)) => rhs.slice(o1..o2),
             None => Err(crate::Error::RequiresContiguous { op: "dmmv" }.bt())?,
@@ -452,7 +453,7 @@ impl QGcuStorage {
             let rhs_l = crate::Layout::new((k, n).into(), vec![1, k], 0).broadcast_as((b, k, n))?;
             storage.matmul(&data_f32, (b, m, n, k), layout, &rhs_l)?
         } else {
-            let storage = storage.as_Gcu_slice::<f32>()?;
+            let storage = storage.as_gcu_slice::<f32>()?;
             let storage = match layout.contiguous_offsets() {
                 Some((o1, o2)) => storage.slice(o1..o2),
                 None => Err(crate::Error::RequiresContiguous {
@@ -518,7 +519,7 @@ mod test {
         let vs: Vec<f32> = (0..ncols).map(|v| v as f32).collect();
         let y = dev.htod_sync_copy(&vs).w()?;
         let mut xs = QGcuStorage::zeros(&dev, ncols, GgmlDType::Q4_0)?;
-        xs.quantize(&GcuStorage::wrap_Gcu_slice(y.clone(), dev.clone()))?;
+        xs.quantize(&GcuStorage::wrap_gcu_slice(y.clone(), dev.clone()))?;
         let gcu_storage = mul_mat_vec_via_q8_1(
             &xs.data,
             &y.slice(..),
@@ -557,7 +558,7 @@ mod test {
         let vs: Vec<f32> = (0..ncols * 4).map(|v| v as f32 / 4.).collect();
         let y = dev.htod_sync_copy(&vs).w()?;
         let mut xs = QGcuStorage::zeros(&dev, ncols * 4, GgmlDType::Q4_0)?;
-        xs.quantize(&GcuStorage::wrap_Gcu_slice(y.clone(), dev.clone()))?;
+        xs.quantize(&GcuStorage::wrap_gcu_slice(y.clone(), dev.clone()))?;
         let gcu_storage = mul_mat_via_q8_1(
             &xs.data,
             &y.slice(..),

@@ -1,10 +1,10 @@
 //! Tensor ops.
 //!
 
-use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor, D};
-use rayon::prelude::*;
 #[cfg(feature = "gcu")]
 use candle::GcuStorage;
+use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor, D};
+use rayon::prelude::*;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
 /// a slice of fixed index on dimension `dim` are between 0 and 1 and sum to 1.
@@ -1524,4 +1524,203 @@ impl candle::CustomOp3 for Sdpa {
 ///     - GQA is not supported (requires `qhead` == `kv_head`)
 pub fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, softcapping: f32) -> Result<Tensor> {
     q.apply_op3_no_bwd(k, v, &Sdpa { scale, softcapping })
+}
+
+use crate::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::Linear;
+use candle::backend::BackendStorage;
+#[cfg(feature = "nccl")]
+pub use candle::cuda_backend::cudarc::nccl::safe::{Comm, ReduceOp};
+#[cfg(feature = "eccl")]
+pub use candle::gcu_backend::ubridge::eccl::{Comm, ReduceOp};
+use candle::CustomOp1;
+use candle::Module;
+pub use std::rc::Rc;
+
+#[cfg(all(not(feature = "nccl"), not(feature = "eccl")))]
+struct Comm {}
+
+#[cfg(all(not(feature = "nccl"), not(feature = "eccl")))]
+impl Comm {
+    //dummy Comm
+    fn rank(&self) -> i32 {
+        0
+    }
+    fn world_size(&self) -> i32 {
+        0
+    }
+}
+
+pub struct TensorParallelColumnLinear {
+    linear: Linear,
+}
+
+impl TensorParallelColumnLinear {
+    pub fn new(linear: Linear) -> Self {
+        Self { linear }
+    }
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.linear.forward(x)
+    }
+}
+
+pub struct TensorParallelRowLinear {
+    linear: Linear,
+    all_reduce: AllReduce,
+}
+
+struct AllReduce {
+    comm: Rc<Comm>,
+}
+
+unsafe impl Sync for AllReduce {}
+unsafe impl Send for AllReduce {}
+
+impl CustomOp1 for AllReduce {
+    fn name(&self) -> &'static str {
+        "allreduce"
+    }
+
+    fn cpu_fwd(&self, _s: &CpuStorage, _l: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle::bail!("AllReduce is never used on cpu")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s: &candle::CudaStorage,
+        l: &Layout,
+    ) -> Result<(candle::CudaStorage, Shape)> {
+        use candle::cuda_backend::cudarc::driver::DeviceSlice;
+        use candle::cuda_backend::WrapErr;
+        use half::{bf16, f16};
+
+        let elem_count = l.shape().elem_count();
+        let dev = s.device().clone();
+        let dst = match s.dtype() {
+            DType::BF16 => {
+                let s = s.as_cuda_slice::<bf16>()?;
+                let s = match l.contiguous_offsets() {
+                    Some((0, l)) if l == s.len() => s,
+                    Some(_) | None => candle::bail!("input has to be contiguous"),
+                };
+                let mut dst = unsafe { dev.alloc::<bf16>(elem_count) }.w()?;
+                self.comm
+                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
+                    .map_err(candle::Error::debug)?;
+                candle::CudaStorage::wrap_cuda_slice(dst, dev)
+            }
+            DType::F16 => {
+                let s = s.as_cuda_slice::<f16>()?;
+                let s = match l.contiguous_offsets() {
+                    Some((0, l)) if l == s.len() => s,
+                    Some(_) | None => candle::bail!("input has to be contiguous"),
+                };
+                let mut dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
+                self.comm
+                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
+                    .map_err(candle::Error::debug)?;
+                candle::CudaStorage::wrap_cuda_slice(dst, dev)
+            }
+            dtype => candle::bail!("unsupported dtype {dtype:?}"),
+        };
+        Ok((dst, l.shape().clone()))
+    }
+
+    #[cfg(feature = "gcu")]
+    fn gcu_fwd(&self, s: &candle::GcuStorage, l: &Layout) -> Result<(candle::GcuStorage, Shape)> {
+        use candle::gcu_backend::ubridge::device_ptr::DeviceSlice;
+        use candle::gcu_backend::WrapErr;
+        use half::{bf16, f16};
+
+        let elem_count = l.shape().elem_count();
+        let dev = s.device().clone();
+        let dst = match s.dtype() {
+            DType::BF16 => {
+                let s = s.as_gcu_slice::<bf16>()?;
+                let s = match l.contiguous_offsets() {
+                    Some((0, l)) if l == s.len() => s,
+                    Some(_) | None => candle::bail!("input has to be contiguous"),
+                };
+                let mut dst = dev.alloc::<bf16>(elem_count).w()?;
+                self.comm
+                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
+                    .map_err(candle::Error::debug)?;
+                candle::GcuStorage::wrap_gcu_slice(dst, dev)
+            }
+            DType::F16 => {
+                let s = s.as_gcu_slice::<f16>()?;
+                let s = match l.contiguous_offsets() {
+                    Some((0, l)) if l == s.len() => s,
+                    Some(_) | None => candle::bail!("input has to be contiguous"),
+                };
+                let mut dst = dev.alloc::<f16>(elem_count).w()?;
+                self.comm
+                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
+                    .map_err(candle::Error::debug)?;
+                candle::GcuStorage::wrap_gcu_slice(dst, dev)
+            }
+            DType::F32 => {
+                let s = s.as_gcu_slice::<f32>()?;
+                let s = match l.contiguous_offsets() {
+                    Some((0, l)) if l == s.len() => s,
+                    Some(_) | None => candle::bail!("input has to be contiguous"),
+                };
+                let mut dst = dev.alloc::<f32>(elem_count).w()?;
+                self.comm
+                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
+                    .map_err(candle::Error::debug)?;
+                candle::GcuStorage::wrap_gcu_slice(dst, dev)
+            }
+            dtype => candle::bail!("unsupported dtype {dtype:?}"),
+        };
+        Ok((dst, l.shape().clone()))
+    }
+}
+
+impl TensorParallelRowLinear {
+    pub fn new(linear: Linear, comm: Rc<Comm>) -> Self {
+        let all_reduce = AllReduce { comm };
+        Self { linear, all_reduce }
+    }
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.linear.forward(x)?.apply_op1_no_bwd(&self.all_reduce)
+    }
+}
+
+pub fn shard(dim: usize, rank: usize, world_size: usize) -> crate::var_builder::Shard {
+    crate::var_builder::Shard {
+        dim,
+        rank,
+        world_size,
+    }
+}
+
+impl TensorParallelColumnLinear {
+    pub fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
+        let rank = comm.rank();
+        let size = comm.world_size();
+        let weight = vb.get_with_hints((), "weight", shard(0, rank, size))?;
+        Ok(Self::new(Linear::new(weight, None)))
+    }
+
+    pub fn load_multi(vb: VarBuilder, prefixes: &[&str], comm: Rc<Comm>) -> Result<Self> {
+        let rank = comm.rank();
+        let size = comm.world_size();
+        let weights: Vec<_> = prefixes
+            .iter()
+            .map(|p| vb.pp(p).get_with_hints((), "weight", shard(0, rank, size)))
+            .collect::<Result<Vec<_>>>()?;
+        let weight = Tensor::cat(&weights, 0)?.contiguous()?;
+        Ok(Self::new(Linear::new(weight, None)))
+    }
+}
+
+impl TensorParallelRowLinear {
+    pub fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
+        let rank = comm.rank();
+        let size = comm.world_size();
+        let weight = vb.get_with_hints((), "weight", shard(1, rank, size))?;
+        Ok(Self::new(Linear::new(weight, None), comm))
+    }
 }

@@ -1,140 +1,14 @@
+use super::MAX_SEQ_LEN;
 use candle::backend::BackendStorage;
 use candle::{CpuStorage, CustomOp1, DType, Device, IndexOp, Layout, Result, Shape, Tensor, D};
+use candle_nn::ops::{shard, Comm, TensorParallelColumnLinear, TensorParallelRowLinear};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use candle_nn::{Embedding, Linear, Module, RmsNorm};
-use cudarc::nccl::safe::{Comm, ReduceOp};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-
-use super::MAX_SEQ_LEN;
-
 pub type Config = candle_transformers::models::llama::LlamaConfig;
-
-struct TensorParallelColumnLinear {
-    linear: Linear,
-}
-
-impl TensorParallelColumnLinear {
-    fn new(linear: Linear) -> Self {
-        Self { linear }
-    }
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.linear.forward(x)
-    }
-}
-
-struct TensorParallelRowLinear {
-    linear: Linear,
-    all_reduce: AllReduce,
-}
-
-struct AllReduce {
-    comm: Rc<Comm>,
-}
-
-/// This is actually not safe: https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/threadsafety.html
-/// But for this example purposes, this will work
-unsafe impl Sync for AllReduce {}
-unsafe impl Send for AllReduce {}
-
-impl CustomOp1 for AllReduce {
-    fn name(&self) -> &'static str {
-        "allreduce"
-    }
-
-    fn cpu_fwd(&self, _s: &CpuStorage, _l: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle::bail!("AllReduce is never used on cpu")
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        s: &candle::CudaStorage,
-        l: &Layout,
-    ) -> Result<(candle::CudaStorage, Shape)> {
-        use candle::cuda_backend::WrapErr;
-        use cudarc::driver::DeviceSlice;
-        use half::{bf16, f16};
-
-        let elem_count = l.shape().elem_count();
-        let dev = s.device().clone();
-        let dst = match s.dtype() {
-            DType::BF16 => {
-                let s = s.as_cuda_slice::<bf16>()?;
-                let s = match l.contiguous_offsets() {
-                    Some((0, l)) if l == s.len() => s,
-                    Some(_) | None => candle::bail!("input has to be contiguous"),
-                };
-                let mut dst = unsafe { dev.alloc::<bf16>(elem_count) }.w()?;
-                self.comm
-                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
-                    .map_err(candle::Error::debug)?;
-                candle::CudaStorage::wrap_cuda_slice(dst, dev)
-            }
-            DType::F16 => {
-                let s = s.as_cuda_slice::<f16>()?;
-                let s = match l.contiguous_offsets() {
-                    Some((0, l)) if l == s.len() => s,
-                    Some(_) | None => candle::bail!("input has to be contiguous"),
-                };
-                let mut dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
-                self.comm
-                    .all_reduce(s, &mut dst, &ReduceOp::Sum)
-                    .map_err(candle::Error::debug)?;
-                candle::CudaStorage::wrap_cuda_slice(dst, dev)
-            }
-            dtype => candle::bail!("unsupported dtype {dtype:?}"),
-        };
-        Ok((dst, l.shape().clone()))
-    }
-}
-
-impl TensorParallelRowLinear {
-    fn new(linear: Linear, comm: Rc<Comm>) -> Self {
-        let all_reduce = AllReduce { comm };
-        Self { linear, all_reduce }
-    }
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.linear.forward(x)?.apply_op1_no_bwd(&self.all_reduce)
-    }
-}
-
-fn shard(dim: usize, rank: usize, world_size: usize) -> candle_nn::var_builder::Shard {
-    candle_nn::var_builder::Shard {
-        dim,
-        rank,
-        world_size,
-    }
-}
-
-impl TensorParallelColumnLinear {
-    fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
-        let rank = comm.rank();
-        let size = comm.world_size();
-        let weight = vb.get_with_hints((), "weight", shard(0, rank, size))?;
-        Ok(Self::new(Linear::new(weight, None)))
-    }
-
-    fn load_multi(vb: VarBuilder, prefixes: &[&str], comm: Rc<Comm>) -> Result<Self> {
-        let rank = comm.rank();
-        let size = comm.world_size();
-        let weights: Vec<_> = prefixes
-            .iter()
-            .map(|p| vb.pp(p).get_with_hints((), "weight", shard(0, rank, size)))
-            .collect::<Result<Vec<_>>>()?;
-        let weight = Tensor::cat(&weights, 0)?;
-        Ok(Self::new(Linear::new(weight, None)))
-    }
-}
-
-impl TensorParallelRowLinear {
-    fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
-        let rank = comm.rank();
-        let size = comm.world_size();
-        let weight = vb.get_with_hints((), "weight", shard(1, rank, size))?;
-        Ok(Self::new(Linear::new(weight, None), comm))
-    }
-}
+use candle_transformers::models::llama::{Llama3RopeConfig, Llama3RopeType};
+use std::f32::consts::PI;
 
 #[derive(Clone)]
 pub struct Cache {
@@ -142,35 +16,74 @@ pub struct Cache {
     kvs: Arc<Mutex<Vec<Option<(Tensor, Tensor)>>>>,
     cos: Tensor,
     sin: Tensor,
+    cos_sin: Tensor,
+    device: Device,
+}
+
+fn calculate_default_inv_freq(cfg: &Config) -> Vec<f32> {
+    let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    (0..head_dim)
+        .step_by(2)
+        .map(|i| 1f32 / cfg.rope_theta.powf(i as f32 / head_dim as f32))
+        .collect()
 }
 
 impl Cache {
     pub fn new(dtype: DType, config: &Config, device: &Device) -> Result<Self> {
         // precompute freqs_cis
-        let n_elem = config.hidden_size / config.num_attention_heads;
-        let theta: Vec<_> = (0..n_elem)
-            .step_by(2)
-            .map(|i| 1f32 / config.rope_theta.powf(i as f32 / n_elem as f32))
-            .collect();
-        let theta = Tensor::new(theta.as_slice(), device)?;
-        let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
+        let theta = match &config.rope_scaling {
+            None
+            | Some(Llama3RopeConfig {
+                rope_type: Llama3RopeType::Default,
+                ..
+            }) => calculate_default_inv_freq(config),
+            Some(rope_scaling) => {
+                let low_freq_wavelen = rope_scaling.original_max_position_embeddings as f32
+                    / rope_scaling.low_freq_factor;
+                let high_freq_wavelen = rope_scaling.original_max_position_embeddings as f32
+                    / rope_scaling.high_freq_factor;
+
+                calculate_default_inv_freq(config)
+                    .into_iter()
+                    .map(|freq| {
+                        let wavelen = 2. * PI / freq;
+                        if wavelen < high_freq_wavelen {
+                            freq
+                        } else if wavelen > low_freq_wavelen {
+                            freq / rope_scaling.factor
+                        } else {
+                            let smooth = (rope_scaling.original_max_position_embeddings as f32
+                                / wavelen
+                                - rope_scaling.low_freq_factor)
+                                / (rope_scaling.high_freq_factor - rope_scaling.low_freq_factor);
+                            (1. - smooth) * freq / rope_scaling.factor + smooth * freq
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let theta = Tensor::new(theta, device)?.to_dtype(DType::F32)?;
+
+        let idx_theta = Tensor::arange(0, config.max_position_embeddings as u32, device)?
             .to_dtype(DType::F32)?
-            .reshape((MAX_SEQ_LEN, 1))?
+            .reshape((config.max_position_embeddings, 1))?
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
-        let cos = idx_theta.cos()?.to_dtype(dtype)?;
-        let sin = idx_theta.sin()?.to_dtype(dtype)?;
+        let cos_sin =
+            Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
+        let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
+        let cos = idx_theta.cos()?;
+        let sin = idx_theta.sin()?;
         Ok(Self {
             kvs: Arc::new(Mutex::new(vec![None; config.num_hidden_layers])),
             cos,
             sin,
+            cos_sin,
+            device: device.clone(),
         })
     }
-}
-
-fn silu(xs: &Tensor) -> Result<Tensor> {
-    xs / (xs.neg()?.exp()? + 1.0)?
 }
 
 fn linear(size1: usize, size2: usize, vb: VarBuilder) -> Result<Linear> {
@@ -200,7 +113,13 @@ impl CausalSelfAttention {
         candle_nn::rotary_emb::rope(x, &cos, &sin)
     }
 
-    fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        attention_mask: Option<&Tensor>,
+        index_pos: usize,
+        block_idx: usize,
+    ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.shape().dims3()?;
 
         let qkv = self.qkv_proj.forward(x)?;
@@ -219,28 +138,51 @@ impl CausalSelfAttention {
             ..,
             self.num_attention_heads * self.head_dim + self.num_key_value_heads * self.head_dim..,
         ))?;
-        // todo!("Q {:?} K {:?} V {:?} - x {:?}", q.shape(), k.shape(), v.shape(), x.shape());
 
-        let q = q
-            .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let mut v = v
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let (q, k, mut v) = if seq_len == 1 {
+            //no need transpose for seq_len == 1, change reshape dim
+            let q = q.reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
+            let k = k.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+            let v = v.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+            (q, k, v)
+        } else {
+            let q = q
+                .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = k
+                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = v
+                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v.contiguous()?)
+        };
 
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let mut k = self.apply_rotary_emb(&k, index_pos)?;
+        let mut input_positions = Vec::<i32>::new();
+        for _ in 0..b_sz {
+            input_positions.push(index_pos as i32);
+        }
+        let (q, mut k) = candle_nn::apply_rotary_emb_qkv(
+            &q,
+            &k,
+            if q.device().is_gcu() {
+                &self.cache.cos_sin
+            } else {
+                &self.cache.cos
+            },
+            &self.cache.sin,
+            &input_positions,
+            0,
+            true,
+            true,
+        )?;
 
         let mut cache = self.cache.kvs.lock().unwrap();
         if let Some((cache_k, cache_v)) = &cache[block_idx] {
-            k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-            v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+            // k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
+            // v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+            k = candle_nn::kvconcat(cache_k, &k, 2)?;
+            v = candle_nn::kvconcat(cache_v, &v, 2)?;
             let k_seq_len = k.dims()[1];
             if k_seq_len > MAX_SEQ_LEN {
                 k = k
@@ -258,12 +200,20 @@ impl CausalSelfAttention {
 
         let k = self.repeat_kv(k)?;
         let v = self.repeat_kv(v)?;
-        let q = q.transpose(1, 2)?;
-        let k = k.transpose(1, 2)?;
-        let v = v.transpose(1, 2)?;
-        let softmax_scale = 1f32 / (self.head_dim as f32).sqrt();
-        let y = candle_flash_attn::flash_attn(&q, &k, &v, softmax_scale, seq_len > 1)?
-            .reshape((b_sz, seq_len, hidden_size))?;
+
+        let y = {
+            let scale = 1f64 / f64::sqrt(self.head_dim as f64);
+            let attn = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+            let attn = match attention_mask {
+                None => attn,
+                Some(mask) => attn.broadcast_add(mask)?,
+            };
+            let attn_weights = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?
+                .to_dtype(q.dtype())?;
+            attn_weights.matmul(&v)?
+        };
+
+        let y = y.transpose(1, 2)?.reshape((b_sz, seq_len, hidden_size))?;
         let y = self.o_proj.forward(&y)?;
         Ok(y)
     }
@@ -299,7 +249,7 @@ struct Mlp {
 
 impl Mlp {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = (silu(&self.c_fc1.forward(x)?)? * self.c_fc2.forward(x)?)?;
+        let x = (candle_nn::ops::silu(&self.c_fc1.forward(x)?)? * self.c_fc2.forward(x)?)?;
         self.c_proj.forward(&x)
     }
 
@@ -337,10 +287,19 @@ impl Block {
         }
     }
 
-    fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize) -> Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        attention_mask: Option<&Tensor>,
+        index_pos: usize,
+        block_idx: usize,
+    ) -> Result<Tensor> {
         let residual = x;
         let x = self.rms_1.forward(x)?;
-        let x = (self.attn.forward(&x, index_pos, block_idx)? + residual)?;
+        let x = (self
+            .attn
+            .forward(&x, attention_mask, index_pos, block_idx)?
+            + residual)?;
         let residual = &x;
         let x = (self.mlp.forward(&self.rms_2.forward(&x)?)? + residual)?;
         Ok(x)
@@ -366,23 +325,40 @@ pub struct Llama {
     blocks: Vec<Block>,
     ln_f: RmsNorm,
     lm_head: Linear,
+    device: Device,
+    dtype: DType,
 }
 
 impl Llama {
-    fn new(wte: Embedding, blocks: Vec<Block>, ln_f: RmsNorm, lm_head: Linear) -> Self {
+    fn new(
+        wte: Embedding,
+        blocks: Vec<Block>,
+        ln_f: RmsNorm,
+        lm_head: Linear,
+        device: &Device,
+        dtype: DType,
+    ) -> Self {
         Self {
             wte,
             blocks,
             ln_f,
             lm_head,
+            device: device.clone(),
+            dtype,
         }
     }
 
     pub fn forward(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let (_b_sz, seq_len) = x.shape().dims2()?;
+        let (b_size, seq_len) = x.shape().dims2()?;
+        let attention_mask = if seq_len <= 1 {
+            None
+        } else {
+            let mask = self.prepare_decoder_attention_mask(b_size, seq_len, index_pos)?;
+            Some(mask)
+        };
         let mut x = self.wte.forward(x)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
-            x = block.forward(&x, index_pos, block_idx)?;
+            x = block.forward(&x, attention_mask.as_ref(), index_pos, block_idx)?;
         }
         let x = self.ln_f.forward(&x)?;
         let x = x.i((.., seq_len - 1, ..))?;
@@ -404,6 +380,34 @@ impl Llama {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self::new(wte, blocks, norm, lm_head))
+        Ok(Self::new(
+            wte,
+            blocks,
+            norm,
+            lm_head,
+            vb.device(),
+            vb.dtype(),
+        ))
+    }
+
+    fn prepare_decoder_attention_mask(
+        &self,
+        b_size: usize,
+        tgt_len: usize,
+        seqlen_offset: usize,
+    ) -> Result<Tensor> {
+        // Sliding window mask?
+        let mask: Vec<_> = (0..tgt_len)
+            .flat_map(|i| (0..tgt_len).map(move |j| if i < j { f32::NEG_INFINITY } else { 0. }))
+            .collect();
+        let mask = Tensor::from_slice(&mask, (tgt_len, tgt_len), &self.device)?;
+        let mask = if seqlen_offset > 0 {
+            let mask0 = Tensor::zeros((tgt_len, seqlen_offset), DType::F32, &self.device)?;
+            Tensor::cat(&[&mask0, &mask], D::Minus1)?
+        } else {
+            mask
+        };
+        mask.expand((b_size, 1, tgt_len, tgt_len + seqlen_offset))?
+            .to_dtype(self.dtype)
     }
 }

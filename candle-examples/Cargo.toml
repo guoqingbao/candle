@@ -38,6 +38,7 @@ tokenizers = { workspace = true, features = ["onig"] }
 float_eq = "1"
 cpal = { version = "0.15.2", optional = true }
 pdf2image = { version = "0.1.2" , optional = true}
+ubridge = { path = "../../ubridge", version = "0.1.0", optional=true}
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -60,12 +61,13 @@ bindgen_cuda = { version = "0.1.1", optional = true }
 [features]
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
 gcu = ["candle/gcu", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
+eccl = ["candle/eccl", "dep:half", "candle-nn/gcu", "candle-nn/eccl", "candle-transformers/gcu", "ubridge/eccl"]
 scorpio = ["candle/gcu", "candle/scorpio", "dep:half", "candle-nn/gcu", "candle-transformers/gcu"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
 cudnn = ["candle/cudnn"]
 flash-attn = ["cuda", "candle-transformers/flash-attn", "dep:candle-flash-attn"]
 mkl = ["dep:intel-mkl-src", "candle/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
-nccl = ["cuda", "cudarc/nccl", "dep:half"]
+nccl = ["cuda", "cudarc/nccl", "candle-nn/nccl", "dep:half"]
 onnx = ["candle-onnx"]
 metal = ["candle/metal", "candle-nn/metal"]
 #default = ["gcu", "scorpio", "candle/gcu", "candle-nn/gcu", "candle-transformers/gcu",] #for gcu development
@@ -77,7 +79,7 @@ mimi = ["cpal", "symphonia", "rubato"]
 
 [[example]]
 name = "llama_multiprocess"
-required-features = ["cuda", "nccl", "flash-attn"]
+#required-features = ["cuda", "nccl", "flash-attn"]
 
 [[example]]
 name = "reinforcement-learning"

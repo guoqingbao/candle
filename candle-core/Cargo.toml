@@ -55,6 +55,8 @@ mkl = ["dep:libc", "dep:intel-mkl-src"]
 accelerate = ["dep:libc", "dep:accelerate-src"]
 metal = ["dep:metal", "dep:candle-metal-kernels", "dep:ug-metal"]
 async = []
+eccl = ["ubridge/eccl", "uhal", "cust_core", "ubridge/scorpio"]
+nccl = ["cudarc/nccl", "dep:candle-kernels", "dep:ug-cuda"]
 
 
 [[bench]]

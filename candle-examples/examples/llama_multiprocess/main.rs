@@ -15,11 +15,18 @@ use clap::{Parser, ValueEnum};
 use candle::{DType, Device, Tensor};
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::llama::LlamaEosToks;
+#[cfg(feature = "cuda")]
 use cudarc::driver::safe::CudaDevice;
+#[cfg(feature = "nccl")]
 use cudarc::nccl::safe::{Comm, Id};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::io::Write;
+use std::path::Path;
 use std::rc::Rc;
+#[cfg(feature = "eccl")]
+use ubridge::eccl::{Comm, Id};
+#[cfg(feature = "gcu")]
+use ubridge::gcu_device::GcuDevice;
 
 mod model;
 use model::{Config, Llama};
@@ -45,7 +52,7 @@ struct Args {
     rank: Option<usize>,
 
     /// The temperature used to generate samples.
-    #[arg(long, default_value_t = 0.8)]
+    #[arg(long, default_value_t = 0.)]
     temperature: f64,
 
     /// Nucleus sampling probability cutoff.
@@ -82,6 +89,9 @@ struct Args {
 
     #[arg(long, default_value = "nccl_id.txt")]
     comm_file: String,
+
+    #[arg(long)]
+    weight_path: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -118,10 +128,24 @@ fn main() -> Result<()> {
     println!("loading the model weights from {model_id}");
     let revision = args.revision.unwrap_or("main".to_string());
     let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-    let config_filename = api.get("config.json")?;
+    let tokenizer_filename = match &args.weight_path {
+        Some(path) => Path::new(path).join("tokenizer.json"),
+        _ => api.get("tokenizer.json")?,
+    };
+
+    let config_filename = match &args.weight_path {
+        Some(path) => Path::new(path).join("config.json"),
+        _ => api.get("config.json")?,
+    };
+
     let config: Config = serde_json::from_slice(&std::fs::read(config_filename)?)?;
-    let tokenizer_filename = api.get("tokenizer.json")?;
-    let filenames = candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?;
+
+    let filenames = match &args.weight_path {
+        Some(path) => {
+            candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+        }
+        _ => candle_examples::hub_load_safetensors(&api, "model.safetensors.index.json")?,
+    };
 
     let rank = match args.rank {
         None => {
@@ -166,7 +190,14 @@ fn main() -> Result<()> {
         let id: Id = Id::uninit(internal);
         id
     };
+
+    println!("Rank {}, Unique ID {:?}.", rank, id.internal());
+
+    #[cfg(feature = "cuda")]
     let device = CudaDevice::new(rank)?;
+    #[cfg(feature = "gcu")]
+    let device = GcuDevice::new(rank, false)?;
+
     let comm = match Comm::from_rank(device, rank, num_shards, id) {
         Ok(comm) => Rc::new(comm),
         Err(err) => anyhow::bail!("nccl error {:?}", err.0),
@@ -175,8 +206,10 @@ fn main() -> Result<()> {
         std::fs::remove_file(comm_file)?;
     }
     println!("Rank {rank:?} spawned");
-
+    #[cfg(feature = "cuda")]
     let device = Device::new_cuda(rank)?;
+    #[cfg(feature = "gcu")]
+    let device = Device::new_gcu(rank)?;
     let cache = model::Cache::new(dtype, &config, &device)?;
 
     println!("building the model");

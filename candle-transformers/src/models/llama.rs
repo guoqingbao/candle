@@ -144,7 +144,6 @@ impl Config {
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    masks: HashMap<usize, Tensor>,
     pub use_kv_cache: bool,
     kvs: Vec<Option<(Tensor, Tensor)>>,
     cos: Tensor,
@@ -196,10 +195,10 @@ impl Cache {
             }
         };
 
-        let theta = Tensor::new(theta, device)?.to_dtype(dtype)?;
+        let theta = Tensor::new(theta, device)?.to_dtype(DType::F32)?;
 
         let idx_theta = Tensor::arange(0, config.max_position_embeddings as u32, device)?
-            .to_dtype(dtype)?
+            .to_dtype(DType::F32)?
             .reshape((config.max_position_embeddings, 1))?
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
@@ -207,10 +206,9 @@ impl Cache {
         let cos_sin =
             Tensor::cat(&[&idx_theta.cos()?, &idx_theta.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         let idx_theta = Tensor::cat(&[&idx_theta, &idx_theta], D::Minus1)?;
-        let cos = idx_theta.cos()?;
-        let sin = idx_theta.sin()?;
+        let cos = idx_theta.cos()?.to_dtype(dtype)?;
+        let sin = idx_theta.sin()?.to_dtype(dtype)?;
         Ok(Self {
-            masks: HashMap::new(),
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
             device: device.clone(),
@@ -221,16 +219,11 @@ impl Cache {
     }
 
     fn mask(&mut self, t: usize) -> Result<Tensor> {
-        if let Some(mask) = self.masks.get(&t) {
-            Ok(mask.clone())
-        } else {
-            let mask: Vec<_> = (0..t)
-                .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
-                .collect();
-            let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
-            self.masks.insert(t, mask.clone());
-            Ok(mask)
-        }
+        let mask: Vec<_> = (0..t)
+            .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
+        Ok(mask)
     }
 }
 
@@ -244,8 +237,6 @@ struct CausalSelfAttention {
     num_key_value_heads: usize,
     head_dim: usize,
     use_flash_attn: bool,
-    span: tracing::Span,
-    span_rot: tracing::Span,
     max_position_embeddings: usize,
 }
 
@@ -267,7 +258,6 @@ fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Ten
 
 impl CausalSelfAttention {
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize, cache: &Cache) -> Result<Tensor> {
-        let _enter = self.span_rot.enter();
         let (_b_sz, _, seq_len, _hidden_size) = x.dims4()?;
         let cos = cache.cos.narrow(0, index_pos, seq_len)?;
         let sin = cache.sin.narrow(0, index_pos, seq_len)?;
@@ -281,7 +271,6 @@ impl CausalSelfAttention {
         block_idx: usize,
         cache: &mut Cache,
     ) -> Result<Tensor> {
-        let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
         let q = self.q_proj.forward(x)?;
         let k = self.k_proj.forward(x)?;
@@ -363,10 +352,6 @@ impl CausalSelfAttention {
             let softmax_scale = 1f32 / (self.head_dim as f32).sqrt();
             flash_attn(&q, &k, &v, softmax_scale, seq_len > 1)?.transpose(1, 2)?
         } else {
-            // let in_dtype = q.dtype();
-            // let q = q.to_dtype(DType::F32)?;
-            // let k = k.to_dtype(DType::F32)?;
-            // let v = v.to_dtype(DType::F32)?;
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
             let att = if seq_len == 1 {
                 att
@@ -375,7 +360,8 @@ impl CausalSelfAttention {
                 masked_fill(&att.to_dtype(DType::F32)?, &mask, f32::NEG_INFINITY)?
                     .to_dtype(q.dtype())?
             };
-            let att = candle_nn::ops::softmax_last_dim(&att)?;
+            let att = candle_nn::ops::softmax_last_dim(&att.to_dtype(DType::F32)?)?
+                .to_dtype(q.dtype())?;
             // Convert to contiguous as matmul doesn't support strided vs for now.
             att.matmul(&v)?
         };
@@ -389,8 +375,6 @@ impl CausalSelfAttention {
     }
 
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "attn");
-        let span_rot = tracing::span!(tracing::Level::TRACE, "attn-rot");
         let size_in = cfg.hidden_size;
         let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
         let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
@@ -407,8 +391,6 @@ impl CausalSelfAttention {
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim: cfg.hidden_size / cfg.num_attention_heads,
             use_flash_attn: cfg.use_flash_attn,
-            span,
-            span_rot,
             max_position_embeddings: cfg.max_position_embeddings,
         })
     }
@@ -426,18 +408,15 @@ struct Mlp {
     c_fc1: Linear,
     c_fc2: Linear,
     c_proj: Linear,
-    span: tracing::Span,
 }
 
 impl Mlp {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
         let x = (candle_nn::ops::silu(&self.c_fc1.forward(x)?)? * self.c_fc2.forward(x)?)?;
         self.c_proj.forward(&x)
     }
 
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "mlp");
         let h_size = cfg.hidden_size;
         let i_size = cfg.intermediate_size;
         let c_fc1 = linear(h_size, i_size, vb.pp("gate_proj"))?;
@@ -447,7 +426,6 @@ impl Mlp {
             c_fc1,
             c_fc2,
             c_proj,
-            span,
         })
     }
 }
@@ -458,7 +436,6 @@ struct Block {
     attn: CausalSelfAttention,
     rms_2: RmsNorm,
     mlp: Mlp,
-    span: tracing::Span,
 }
 
 impl Block {
@@ -469,7 +446,6 @@ impl Block {
         block_idx: usize,
         cache: &mut Cache,
     ) -> Result<Tensor> {
-        let _enter = self.span.enter();
         let residual = x;
         let x = self.rms_1.forward(x)?;
         let x = (self.attn.forward(&x, index_pos, block_idx, cache)? + residual)?;
@@ -479,7 +455,6 @@ impl Block {
     }
 
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "block");
         let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = Mlp::load(vb.pp("mlp"), cfg)?;
         let rms_1 = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
@@ -493,7 +468,6 @@ impl Block {
             attn,
             rms_2,
             mlp,
-            span,
         })
     }
 }

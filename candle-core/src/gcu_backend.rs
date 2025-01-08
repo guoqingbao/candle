@@ -98,8 +98,8 @@ pub enum GcuError {
         got: DType,
     },
 
-    #[error("{Gcu} when loading {module_name}")]
-    Load { Gcu: String, module_name: String },
+    #[error("{gcu} when loading {module_name}")]
+    Load { gcu: String, module_name: String },
 }
 
 impl From<GcuError> for crate::Error {
@@ -1620,14 +1620,14 @@ fn slice_src_and_dst<'a, T: DeviceCopy>(
 }
 
 pub trait GcuDType: Sized + DeviceCopy {
-    fn as_Gcu_slice(s: &GcuStorage) -> Result<&GcuSlice<Self>>;
-    fn wrap_Gcu_slice(s: GcuSlice<Self>, dev: GcuDevice) -> GcuStorage;
+    fn as_gcu_slice(s: &GcuStorage) -> Result<&GcuSlice<Self>>;
+    fn wrap_gcu_slice(s: GcuSlice<Self>, dev: GcuDevice) -> GcuStorage;
 }
 
 macro_rules! Gcu_dtype {
     ($ty:ty, $dtype:ident) => {
         impl GcuDType for $ty {
-            fn as_Gcu_slice(s: &GcuStorage) -> Result<&GcuSlice<Self>> {
+            fn as_gcu_slice(s: &GcuStorage) -> Result<&GcuSlice<Self>> {
                 match &s.slice {
                     GcuStorageSlice::$dtype(data) => Ok(&data),
                     _ => Err(crate::Error::UnexpectedDType {
@@ -1639,7 +1639,7 @@ macro_rules! Gcu_dtype {
                 }
             }
 
-            fn wrap_Gcu_slice(slice: GcuSlice<Self>, device: GcuDevice) -> GcuStorage {
+            fn wrap_gcu_slice(slice: GcuSlice<Self>, device: GcuDevice) -> GcuStorage {
                 let slice = GcuStorageSlice::$dtype(slice);
                 GcuStorage { slice, device }
             }
@@ -1655,12 +1655,12 @@ Gcu_dtype!(f32, F32);
 Gcu_dtype!(f64, F64);
 
 impl GcuStorage {
-    pub fn wrap_Gcu_slice<T: GcuDType>(slice: GcuSlice<T>, device: GcuDevice) -> GcuStorage {
-        T::wrap_Gcu_slice(slice, device)
+    pub fn wrap_gcu_slice<T: GcuDType>(slice: GcuSlice<T>, device: GcuDevice) -> GcuStorage {
+        T::wrap_gcu_slice(slice, device)
     }
 
-    pub fn as_Gcu_slice<T: GcuDType>(&self) -> Result<&GcuSlice<T>> {
-        T::as_Gcu_slice(self)
+    pub fn as_gcu_slice<T: GcuDType>(&self) -> Result<&GcuSlice<T>> {
+        T::as_gcu_slice(self)
     }
 
     fn to_dtype_impl(&self, src: &Self, layout: &Layout, dtype: DType) -> Result<Self> {
@@ -3273,7 +3273,7 @@ impl GPTQMatMul {
                         crate::Storage::Gcu(p) => p,
                         _ => panic!("qzeros must be a gcu tensor"),
                     };
-                    let qzeros_ = qzeros.as_Gcu_slice::<T>()?;
+                    let qzeros_ = qzeros.as_gcu_slice::<T>()?;
                     let qzeros_ = qzeros_.slice(qzeros_l.start_offset()..);
                     qzeros_.device_ptr()
                 } else {
@@ -3389,7 +3389,7 @@ impl GPTQRepack {
         let oshape: Shape = out_shape.into();
 
         // Get gcu slices for all tensors
-        let q = qweight.as_Gcu_slice::<u32>()?;
+        let q = qweight.as_gcu_slice::<u32>()?;
 
         // Get gcu views for all tensors
         let q = q.slice(qweight_l.start_offset()..);
@@ -3397,10 +3397,10 @@ impl GPTQRepack {
         let elem_count = oshape.elem_count();
         let out = dev.alloc::<u32>(elem_count).w()?;
 
-        let out_ptr = out.device_ptr() as *const core::ffi::c_void;
-        let q_ptr = q.device_ptr() as *const core::ffi::c_void;
+        // let out_ptr = out.device_ptr() as *const core::ffi::c_void;
+        // let q_ptr = q.device_ptr() as *const core::ffi::c_void;
 
-        let out = GcuStorage::wrap_Gcu_slice(out, dev.clone());
+        let out = GcuStorage::wrap_gcu_slice(out, dev.clone());
         Ok((out, oshape))
     }
 }

@@ -229,6 +229,18 @@ impl Tensor {
         Ok(from_storage(storage, shape, none, is_variable))
     }
 
+    pub(crate) fn empty_impl<S: Into<Shape>>(
+        shape: S,
+        dtype: DType,
+        device: &Device,
+        is_variable: bool,
+    ) -> Result<Self> {
+        let none = BackpropOp::none();
+        let shape = shape.into();
+        let storage = unsafe { device.alloc_uninit(&shape, dtype)? };
+        Ok(from_storage(storage, shape, none, is_variable))
+    }
+
     /// Creates a new tensor filled with zeros.
     ///
     /// ```rust
@@ -240,6 +252,10 @@ impl Tensor {
     /// ```
     pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
         Self::zeros_impl(shape, dtype, device, false)
+    }
+
+    pub fn empty<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+        Self::empty_impl(shape, dtype, device, false)
     }
 
     /// Creates a new tensor filled with zeros with same shape, dtype, and device as the other

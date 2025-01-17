@@ -143,7 +143,14 @@ impl Device {
             Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
         }
     }
-
+    pub fn as_gcu_device(&self) -> Result<&crate::GcuDevice> {
+        match self {
+            Self::Gcu(d) => Ok(d),
+            Self::Cpu => crate::bail!("expected a gcu device, got cpu"),
+            Self::Cuda(_) => crate::bail!("expected a gcu device, got cuda"),
+            Self::Metal(_) => crate::bail!("expected a gcu device, got Metal"),
+        }
+    }
     pub fn as_metal_device(&self) -> Result<&crate::MetalDevice> {
         match self {
             Self::Cuda(_) => crate::bail!("expected a metal device, got cuda"),

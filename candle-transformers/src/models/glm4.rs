@@ -60,6 +60,7 @@ impl Config {
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     cache: Tensor,
+    cos_sin: Tensor,
 }
 
 impl RotaryEmbedding {
@@ -76,8 +77,9 @@ impl RotaryEmbedding {
             .to_dtype(dtype)?
             .reshape((cfg.seq_length, 1))?;
         let freqs = t.matmul(&inv_freq)?;
+        let cos_sin = Tensor::cat(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?.contiguous()?; //must be contiguous tensor;
         let cache = Tensor::stack(&[&freqs.cos()?, &freqs.sin()?], D::Minus1)?;
-        Ok(Self { cache })
+        Ok(Self { cache, cos_sin })
     }
 
     fn apply(&self, xs: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
@@ -157,6 +159,7 @@ impl CoreAttention {
             &query_layer.transpose(0, 1)?.contiguous()?,
             &key_layer.transpose(0, 1)?.transpose(1, 2)?.contiguous()?,
         )?;
+        let matmul_result = matmul_result.to_dtype(DType::F32)?; //for precision
         let matmul_result = (matmul_result / self.norm_factor)?.reshape(output_size)?;
         let matmul_result = match self.coeff {
             None => matmul_result,
@@ -167,11 +170,11 @@ impl CoreAttention {
                 &matmul_result,
                 &mask.broadcast_left((matmul_result.dim(0)?, matmul_result.dim(1)?))?,
                 f32::NEG_INFINITY,
-                self.dtype,
+                DType::F32,
             )?,
             None => matmul_result,
         };
-        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?;
+        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(query_layer.dtype())?;
 
         let output_size = (
             value_layer.dim(1)?,
@@ -291,15 +294,31 @@ impl SelfAttention {
             None => 0,
             Some((prev_k, _)) => prev_k.dim(0)?,
         };
-        let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
-        let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
+        // let query_layer = rotary_emb.apply(&query_layer, seqlen_offset)?;
+        // let key_layer = rotary_emb.apply(&key_layer, seqlen_offset)?;
+
+        let mut input_positions = Vec::<i32>::new();
+        input_positions.push(seqlen_offset as i32);
+        #[cfg(feature = "gcu")]
+        let (query_layer, key_layer) = candle_nn::ops::apply_rotary_emb_qkv(
+            &query_layer,
+            &key_layer,
+            &rotary_emb.cos_sin,
+            &rotary_emb.cache,
+            &input_positions,
+            rotary_emb.cache.dim(D::Minus2)? * 2,
+            false,
+            false,
+        )?;
 
         // KV cache.
         let (key_layer, value_layer) = match &self.kv_cache {
             None => (key_layer, value_layer),
             Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
-                let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
+                // let k = Tensor::cat(&[prev_k, &key_layer], 0)?;
+                // let v = Tensor::cat(&[prev_v, &value_layer], 0)?;
+                let k = candle_nn::ops::kvconcat(prev_k, &key_layer, 0)?; //kv concat on dim0
+                let v = candle_nn::ops::kvconcat(prev_v, &value_layer, 0)?;
                 (k, v)
             }
         };

@@ -1532,7 +1532,7 @@ use candle::backend::BackendStorage;
 #[cfg(feature = "nccl")]
 pub use candle::cuda_backend::cudarc::nccl::safe::{Comm, ReduceOp};
 #[cfg(feature = "eccl")]
-pub use candle::gcu_backend::ubridge::eccl::{Comm, ReduceOp};
+pub use candle::gcu_backend::ubridge::eccl::{Comm, ReduceOp, Id};
 use candle::CustomOp1;
 use candle::Module;
 pub use std::rc::Rc;
@@ -1547,7 +1547,7 @@ impl Comm {
         0
     }
     fn world_size(&self) -> i32 {
-        0
+        1
     }
 }
 
@@ -1627,7 +1627,7 @@ impl CustomOp1 for AllReduce {
         Ok((dst, l.shape().clone()))
     }
 
-    #[cfg(feature = "gcu")]
+    #[cfg(all(feature = "gcu", feature = "eccl"))]
     fn gcu_fwd(&self, s: &candle::GcuStorage, l: &Layout) -> Result<(candle::GcuStorage, Shape)> {
         use candle::gcu_backend::ubridge::device_ptr::DeviceSlice;
         use candle::gcu_backend::WrapErr;
@@ -1700,7 +1700,7 @@ impl TensorParallelColumnLinear {
     pub fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
         let rank = comm.rank();
         let size = comm.world_size();
-        let weight = vb.get_with_hints((), "weight", shard(0, rank, size))?;
+        let weight = vb.get_with_hints((), "weight", shard(0, rank as usize, size as usize))?;
         Ok(Self::new(Linear::new(weight, None)))
     }
 
@@ -1709,7 +1709,7 @@ impl TensorParallelColumnLinear {
         let size = comm.world_size();
         let weights: Vec<_> = prefixes
             .iter()
-            .map(|p| vb.pp(p).get_with_hints((), "weight", shard(0, rank, size)))
+            .map(|p| vb.pp(p).get_with_hints((), "weight", shard(0, rank as usize, size as usize)))
             .collect::<Result<Vec<_>>>()?;
         let weight = Tensor::cat(&weights, 0)?.contiguous()?;
         Ok(Self::new(Linear::new(weight, None)))
@@ -1720,7 +1720,7 @@ impl TensorParallelRowLinear {
     pub fn load(vb: VarBuilder, comm: Rc<Comm>) -> Result<Self> {
         let rank = comm.rank();
         let size = comm.world_size();
-        let weight = vb.get_with_hints((), "weight", shard(1, rank, size))?;
+        let weight = vb.get_with_hints((), "weight", shard(1, rank as usize, size as usize))?;
         Ok(Self::new(Linear::new(weight, None), comm))
     }
 }

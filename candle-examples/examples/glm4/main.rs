@@ -126,11 +126,11 @@ struct Args {
     verbose: bool,
 
     /// The temperature used to generate samples.
-    #[arg(long)]
+    #[arg(long, default_value_t = 0.8)]
     temperature: Option<f64>,
 
     /// Nucleus sampling probability cutoff.
-    #[arg(long)]
+    #[arg(long, default_value_t = 0.8)]
     top_p: Option<f64>,
 
     /// The seed to use when generating random samples.
@@ -154,7 +154,7 @@ struct Args {
     tokenizer: Option<String>,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
-    #[arg(long, default_value_t = 1.2)]
+    #[arg(long, default_value_t = 1.)]
     repeat_penalty: f32,
 
     /// The context size to consider for the repeat penalty.
@@ -236,7 +236,7 @@ fn main() -> anyhow::Result<()> {
     let tokenizer = Tokenizer::from_file(tokenizer_filename).expect("Tokenizer Error");
 
     let start = std::time::Instant::now();
-    let config = Config::glm4();
+    let config: Config = serde_json::from_slice(&std::fs::read(config_filename)?)?;
     let device = candle_examples::device(args.cpu)?;
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,

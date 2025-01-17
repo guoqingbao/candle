@@ -20,7 +20,7 @@ struct TextGeneration {
 impl TextGeneration {
     #[allow(clippy::too_many_arguments)]
     fn new(model: Model, tokenizer: Tokenizer, args: Args, device: &Device, dtype: DType) -> Self {
-        let logits_processor = LogitsProcessor::new(args.seed, args.temperature, args.top_p);
+        let logits_processor = LogitsProcessor::new(args.seed, Some(args.temperature.unwrap_or(0.8)), Some(args.top_p.unwrap_or(0.8)));
         Self {
             model,
             tokenizer,
@@ -126,11 +126,11 @@ struct Args {
     verbose: bool,
 
     /// The temperature used to generate samples.
-    #[arg(long, default_value_t = 0.8)]
+    #[arg(long)]
     temperature: Option<f64>,
 
     /// Nucleus sampling probability cutoff.
-    #[arg(long, default_value_t = 0.8)]
+    #[arg(long)]
     top_p: Option<f64>,
 
     /// The seed to use when generating random samples.
@@ -176,7 +176,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!(
         "temp: {:.2} repeat-penalty: {:.2} repeat-last-n: {}",
-        args.temperature.unwrap_or(0.6),
+        args.temperature.unwrap_or(0.8),
         args.repeat_penalty,
         args.repeat_last_n
     );

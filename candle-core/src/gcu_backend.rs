@@ -1648,6 +1648,7 @@ macro_rules! Gcu_dtype {
 }
 Gcu_dtype!(u8, U8);
 Gcu_dtype!(u32, U32);
+Gcu_dtype!(i32, I32);
 Gcu_dtype!(i64, I64);
 Gcu_dtype!(f16, F16);
 Gcu_dtype!(bf16, BF16);

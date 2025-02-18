@@ -5,6 +5,7 @@ use rayon::prelude::*;
 struct ArgSort {
     asc: bool,
     last_dim: usize,
+    inplace: bool,
 }
 
 impl ArgSort {
@@ -196,6 +197,66 @@ impl crate::CustomOp1 for ArgSort {
         let dst = crate::MetalStorage::new(dst, device.clone(), el, DType::U32);
         Ok((dst, layout.shape().clone()))
     }
+
+    #[cfg(feature = "gcu")]
+    fn gcu_fwd(
+        &self,
+        storage: &crate::GcuStorage,
+        layout: &crate::Layout,
+    ) -> Result<(crate::GcuStorage, crate::Shape)> {
+        use crate::backend::BackendStorage;
+        use crate::gcu_backend::ubridge::device_ptr::DevicePtr;
+        use crate::gcu_backend::ubridge::gcu_launch::{GcuLaunchAsync, GcuLaunchConfig};
+        use crate::gcu_backend::{kernel_name, GcuStorageSlice, WrapErr};
+
+        let dev = storage.device();
+        let elem_count = layout.shape().elem_count();
+        let ncols = self.last_dim as i32;
+        let nrows = (elem_count as i32 / ncols) as i32;
+        let dst = unsafe { dev.alloc::<u32>(elem_count) }.w()?;
+
+        use std::ffi::c_void;
+
+        let (src_ptr, dtype_str) = match &storage.slice {
+            GcuStorageSlice::U8(inp) => (inp.device_ptr(), "u8"),
+            GcuStorageSlice::U32(inp) => (inp.device_ptr(), "u32"),
+            GcuStorageSlice::I64(inp) => (inp.device_ptr(), "i64"),
+            GcuStorageSlice::BF16(inp) => (inp.device_ptr(), "bf16"),
+            GcuStorageSlice::F16(inp) => (inp.device_ptr(), "f16"),
+            GcuStorageSlice::F32(inp) => (inp.device_ptr(), "f32"),
+            GcuStorageSlice::F64(inp) => (inp.device_ptr(), "f64"),
+            _ => panic!("not supported!"),
+        };
+        let dst_ptr = dst.device_ptr();
+
+        let func = if self.asc {
+            dev.get_or_load_func(&format!("asort_asc_{}", dtype_str), ubridge::SORT)?
+        } else {
+            dev.get_or_load_func(&format!("asort_desc_{}", dtype_str), ubridge::SORT)?
+        };
+        let ncols_pad = next_power_of_2(ncols as usize);
+        let params = (
+            src_ptr,
+            dst_ptr,
+            nrows,
+            ncols,
+            ncols_pad as i32,
+            self.inplace,
+        );
+        let cfg = GcuLaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (12, 1, 1),
+            shared_mem_bytes: (3 * ncols_pad * std::mem::size_of::<u32>()) as u32,
+        };
+
+        unsafe { func.launch(&cfg, params) }.w()?;
+
+        let dst_ret = crate::gcu_backend::GcuStorage {
+            slice: GcuStorageSlice::U32(dst),
+            device: dev.clone(),
+        };
+        Ok((dst_ret, layout.shape().clone()))
+    }
 }
 
 #[allow(unused)]
@@ -224,7 +285,11 @@ impl Tensor {
             Some(last_dim) => *last_dim,
         };
         // No need for a backward pass for arg sort.
-        self.apply_op1_no_bwd(&ArgSort { asc, last_dim })
+        self.apply_op1_no_bwd(&ArgSort {
+            asc,
+            last_dim,
+            inplace: false,
+        })
     }
 
     /// Sorts the tensor along the last dimension, returns the sorted tensor together with the
@@ -239,8 +304,24 @@ impl Tensor {
                 op: "sort_last_dim",
             });
         }
+        #[cfg(not(feature = "gcu"))]
         let asort = self.arg_sort_last_dim(asc)?;
+        #[cfg(not(feature = "gcu"))]
         let sorted = self.gather(&asort, crate::D::Minus1)?;
+
+        #[cfg(feature = "gcu")]
+        let last_dim = match self.dims().last() {
+            None => crate::bail!("empty last-dim in arg-sort"),
+            Some(last_dim) => *last_dim,
+        };
+        #[cfg(feature = "gcu")]
+        let sorted = self.copy()?;
+        #[cfg(feature = "gcu")]
+        let asort = sorted.apply_op1_no_bwd(&ArgSort {
+            asc,
+            last_dim,
+            inplace: true,
+        })?;
         Ok((sorted, asort))
     }
 }

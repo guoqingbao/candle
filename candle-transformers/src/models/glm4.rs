@@ -177,7 +177,8 @@ impl CoreAttention {
             )?,
             None => matmul_result,
         };
-        let attention_probs = candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(query_layer.dtype())?;
+        let attention_probs =
+            candle_nn::ops::softmax_last_dim(&attention_scores)?.to_dtype(query_layer.dtype())?;
 
         let output_size = (
             value_layer.dim(1)?,

@@ -5,8 +5,8 @@ use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{Repo, RepoType};
-use tokenizers::Tokenizer;
 use std::path::Path;
+use tokenizers::Tokenizer;
 
 struct TextGeneration {
     model: Model,
@@ -20,7 +20,11 @@ struct TextGeneration {
 impl TextGeneration {
     #[allow(clippy::too_many_arguments)]
     fn new(model: Model, tokenizer: Tokenizer, args: Args, device: &Device, dtype: DType) -> Self {
-        let logits_processor = LogitsProcessor::new(args.seed, Some(args.temperature.unwrap_or(0.8)), Some(args.top_p.unwrap_or(0.8)));
+        let logits_processor = LogitsProcessor::new(
+            args.seed,
+            Some(args.temperature.unwrap_or(0.8)),
+            Some(args.top_p.unwrap_or(0.8)),
+        );
         Self {
             model,
             tokenizer,
@@ -206,10 +210,9 @@ fn main() -> anyhow::Result<()> {
             if Path::new(path).join("tokenizer.json").exists() {
                 Path::new(path).join("tokenizer.json")
             } else {
-                api
-                .model("THUDM/codegeex4-all-9b".to_string())
-                .get("tokenizer.json")
-                .map_err(anyhow::Error::msg)?
+                api.model("THUDM/codegeex4-all-9b".to_string())
+                    .get("tokenizer.json")
+                    .map_err(anyhow::Error::msg)?
             }
         }
         None => api
@@ -224,13 +227,11 @@ fn main() -> anyhow::Result<()> {
     };
 
     let filenames = match &args.weight_path {
-        Some(path) => candle_examples::hub_load_local_safetensors(
-            path,
-            "model.safetensors.index.json",
-        )?,
+        Some(path) => {
+            candle_examples::hub_load_local_safetensors(path, "model.safetensors.index.json")?
+        }
         _ => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,
     };
-
 
     println!("retrieved the files in {:?}", start.elapsed());
     let tokenizer = Tokenizer::from_file(tokenizer_filename).expect("Tokenizer Error");

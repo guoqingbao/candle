@@ -691,7 +691,7 @@ impl Storage {
         indexes_l: &Layout,
         d: usize,
     ) -> Result<Self> {
-        self.same_device(indexes, "index-add")?;
+        self.same_device(indexes, "gather")?;
         match (self, indexes) {
             (Self::Cpu(s), Self::Cpu(indexes)) => {
                 let storage = s.gather(l, indexes, indexes_l, d)?;

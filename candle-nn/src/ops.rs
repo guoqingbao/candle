@@ -1973,6 +1973,7 @@ pub fn paged_attention<
         || head_size == 96
         || head_size == 112
         || head_size == 128
+        || head_size == 192
         || head_size == 256)
     {
         candle::bail!("`head_size` must be one of 64, 80, 96, 112, 128 or 256");

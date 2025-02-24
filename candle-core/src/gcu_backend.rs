@@ -1051,22 +1051,17 @@ impl<'a> Map1 for Gather<'a> {
         let ids = &self.0;
         let ids_l = &self.1;
         let dim = self.2;
-        // let (ids_o1, ids_o2) = match ids_l.contiguous_offsets() {
-        //     Some(o12) => o12,
-        //     None => Err(crate::Error::RequiresContiguous { op: "gather" }.bt())?,
-        // };
-        let name = match &ids.slice {
-            GcuStorageSlice::U32(_) => {
-                // ("gather_u32", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()})
-                "gather_u32"
+        let (ids_o1, ids_o2) = match ids_l.contiguous_offsets() {
+            Some(o12) => o12,
+            None => Err(crate::Error::RequiresContiguous { op: "gather" }.bt())?,
+        };
+        let (name, ids) = match &ids.slice {
+            GcuStorageSlice::U32(slice) => {
+                ("gather_u32", slice.slice(ids_o1..ids_o2).device_ptr())
             }
-            GcuStorageSlice::U8(_) => {
-                // ("gather_u8", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()}),
-                "gather_u8"
-            }
-            GcuStorageSlice::I64(_) => {
-                // ("gather_i64", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()})
-                "gather_i64"
+            GcuStorageSlice::U8(slice) => ("gather_u8", slice.slice(ids_o1..ids_o2).device_ptr()),
+            GcuStorageSlice::I64(slice) => {
+                ("gather_i64", slice.slice(ids_o1..ids_o2).device_ptr())
             }
             _ => Err(GcuError::UnexpectedDType {
                 msg: "gather ids should be u8/u32/i64",
@@ -1084,20 +1079,13 @@ impl<'a> Map1 for Gather<'a> {
         let src_dim_sz = src_l.dims()[dim];
         let ids_dim_sz = ids_l.dims()[dim];
         let func = dev.get_or_load_func(&kernel_name::<T>(name), ubridge::INDEXING)?;
-        // SAFETY: Set later by running the kernel.
         let out = dev.alloc::<T>(el).w()?;
         let params = (
-            el,
-            // ids,
-            src.device_ptr(),
-            out.device_ptr(),
-            left_sz,
-            src_dim_sz,
-            ids_dim_sz,
-            right_sz,
+            el, ids, src.device_ptr(), out.device_ptr(), left_sz, src_dim_sz, ids_dim_sz, right_sz,
         );
-        // SAFETY: ffi.
-        unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
+        let mut cfg = dev.launch_cfg.clone();
+        cfg.set_shared_memory(el as u32 * std::mem::size_of::<T>() as u32);
+        unsafe { func.launch(&cfg, params) }.w()?;
         Ok(out)
     }
 }
@@ -1115,23 +1103,14 @@ impl<'a> Map2InPlace for IndexAdd<'a> {
         let ids = &self.0;
         let ids_l = &self.1;
         let dim = self.2;
-        // let (ids_o1, ids_o2) = match ids_l.contiguous_offsets() {
-        //     Some(o12) => o12,
-        //     None => Err(crate::Error::RequiresContiguous { op: "index-add" }.bt())?,
-        // };
-        let name = match &ids.slice {
-            GcuStorageSlice::U32(_) => {
-                // ("ia_u32", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()}),
-                "ia_u32"
-            }
-            GcuStorageSlice::I64(_) => {
-                // ("ia_i64", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()}),
-                "ia_i64"
-            }
-            GcuStorageSlice::U8(_) => {
-                // ("ia_u8", unsafe {*slice.slice(ids_o1..ids_o2).device_ptr()}),
-                "ia_u8"
-            }
+        let (ids_o1, ids_o2) = match ids_l.contiguous_offsets() {
+            Some(o12) => o12,
+            None => Err(crate::Error::RequiresContiguous { op: "index-add" }.bt())?,
+        };
+        let (name, ids) = match &ids.slice {
+            GcuStorageSlice::U32(slice) => ("ia_u32", slice.slice(ids_o1..ids_o2).device_ptr()),
+            GcuStorageSlice::I64(slice) => ("ia_i64", slice.slice(ids_o1..ids_o2).device_ptr()),
+            GcuStorageSlice::U8(slice) => ("ia_u8", slice.slice(ids_o1..ids_o2).device_ptr()),
             _ => Err(GcuError::UnexpectedDType {
                 msg: "index-add ids should be u8/u32/i64",
                 expected: DType::U32,
@@ -1147,18 +1126,14 @@ impl<'a> Map2InPlace for IndexAdd<'a> {
         let src_dim_sz = src_l.dims()[dim];
         let dst_dim_sz = dst_shape.dims()[dim];
         let ids_dim_sz = ids_l.dims()[0];
+        let el = (left_sz * right_sz) as u32;
         let func = dev.get_or_load_func(&kernel_name::<T>(name), ubridge::INDEXING)?;
         let params = (
-            // ids,
-            ids_dim_sz,
-            src.device_ptr(),
-            dst.buffer.as_device_ptr().as_raw(),
-            left_sz,
-            src_dim_sz,
-            dst_dim_sz,
-            right_sz,
+            ids, ids_dim_sz, src.device_ptr(), dst.device_ptr(), left_sz, src_dim_sz, dst_dim_sz, right_sz,
         );
-        unsafe { func.launch(&dev.launch_cfg, params) }.w()?;
+        let mut cfg = dev.launch_cfg.clone();
+        cfg.set_shared_memory(2 * el as u32 * std::mem::size_of::<T>() as u32);
+        unsafe { func.launch(&cfg, params) }.w()?;
         Ok(())
     }
 }
@@ -1864,8 +1839,16 @@ impl BackendStorage for GcuStorage {
 
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_l: &Layout, rhs_l: &Layout) -> Result<Self> {
         let device = self.device().clone();
-        let slice = Cmp(op).map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
-        Ok(Self { slice, device })
+        let r_strides: usize = rhs_l.stride().iter().product();
+        if rhs_l.is_contiguous() || (!rhs_l.is_contiguous() && r_strides == 0) {
+            let slice = Cmp(op).map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
+            Ok(Self { slice, device })
+        } else {
+            let mut src = unsafe { device.alloc_uninit(rhs_l.shape(), rhs.dtype())? };
+            self.copy_strided_src(&mut src, 0, rhs_l)?;
+            let slice = Cmp(op).map(&self.slice, lhs_l, &src.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
+            Ok(Self { slice, device })
+        }
     }
 
     fn unary_impl<U: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
@@ -2186,10 +2169,19 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
-        self.copy_strided_src(&mut acc, 0, l)?;
-        IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
-        Ok(acc)
+        let (mut slice, l) = if l.is_contiguous() { 
+            (self.to_owned(), l)
+        } else {
+            let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
+            self.copy_strided_src(&mut acc, 0, l)?;
+            (acc, &Layout::contiguous(l.shape()))
+        };
+        if src_l.is_contiguous() {
+            IndexAdd(ids, ids_l, dim).map(&mut slice.slice, l.shape(), &src.slice, src_l, &device)?;
+        } else {
+            assert!(src_l.is_contiguous())
+        }
+        Ok(slice)
     }
 
     fn matmul(

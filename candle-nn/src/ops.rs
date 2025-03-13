@@ -2066,6 +2066,7 @@ fn topk_func<
     use candle::gcu_backend::{kernel_name, Map1, WrapErr};
     use candle::Storage;
     use candle::gcu_backend::ubridge::ffi::{topk_f32, topk_f16, topk_bf16};
+    use half::{f16, bf16};
     let dev = input.device().as_gcu_device()?;
     let (value, input_l) = input.storage_and_layout();
     let shape = input_l.shape();
@@ -2083,20 +2084,20 @@ fn topk_func<
     let output = input.copy()?;
     // let func = dev.get_or_load_func(&kernel_name::<T>("topk"), ubridge::TOPK)?;
 
-    let dims = if rank == 3 {
-        shape.dims().to_vec()
+    let (chunks, dims) = if rank == 3 {
+        (shape.dims()[0] * shape.dims()[1], shape.dims().to_vec())
     } else if rank == 2 {
-        [1usize, shape.dims()[0], shape.dims()[1]].to_vec()
+        (shape.dims()[0], [1usize, shape.dims()[0], shape.dims()[1]].to_vec())
     } else {
-        [1usize, 1usize, shape.dims()[0]].to_vec()
+        (1usize, [1usize, 1usize, shape.dims()[0]].to_vec())
     };
 
     let indices = Tensor::arange(0u32, dims[2] as u32, input.device())?;
-    // let indices = if rank > 1 {
-    //     indices.broadcast_as(shape)?.contiguous()?
-    // } else {
-    //     indices
-    // };
+    let indices = if rank > 1 {
+        indices.broadcast_as(shape)?.contiguous()?
+    } else {
+        indices
+    };
     let (index, indices_l) = indices.storage_and_layout();
     let index = match &*index {
         Storage::Gcu(k) => k,
@@ -2131,7 +2132,7 @@ fn topk_func<
     match input.dtype() {
         DType::F16 => {
             unsafe {
-                topk_f16(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
+                topk_f16(value.device_ptr() as *mut f16, out.device_ptr() as *mut f16, index.device_ptr() as *mut u32, 
                 workspace.device_ptr(), 
                 dims[0] as i32, dims[1] as i32, dims[2] as i32,
                 2 as i32,
@@ -2141,8 +2142,8 @@ fn topk_func<
         }
         DType::BF16 => {
             unsafe {
-                topk_bf16(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
-                workspace.device_ptr(), 
+                topk_bf16(value.device_ptr() as *mut bf16, out.device_ptr() as *mut bf16, index.device_ptr() as *mut u32, 
+                workspace.device_ptr() as *mut core::ffi::c_void, 
                 dims[0] as i32, dims[1] as i32, dims[2] as i32,
                 2 as i32,
                 k as i32, stream as *mut core::ffi::c_void);
@@ -2151,8 +2152,8 @@ fn topk_func<
         }
         DType::F32 => {
             unsafe {
-                topk_f32(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
-                workspace.device_ptr(), 
+                topk_f32(value.device_ptr() as *mut f32, out.device_ptr() as *mut f32, index.device_ptr() as *mut u32, 
+                workspace.device_ptr() as *mut core::ffi::c_void, 
                 dims[0] as i32, dims[1] as i32, dims[2] as i32,
                 2 as i32,
                 k as i32, stream as *mut core::ffi::c_void);
@@ -2160,8 +2161,23 @@ fn topk_func<
         }
         _=> { panic!("not supported data type!")}
     }
-    let values = output.narrow(D::Minus1, 0, k)?;
-    let indices = indices.narrow(D::Minus1, 0, k)?;
+    let (values, indices) = if rank == 1 {
+        (output.narrow(D::Minus1, 0, k)?,
+        indices.narrow(D::Minus1, 0, k)?)
+    } else {
+        let values = output.flatten_all()?.narrow(0, 0, chunks * k)?.contiguous()?;
+        let indices = indices.flatten_all()?.narrow(0, 0, chunks * k)?.contiguous()?;
+        match rank {
+            2 => {
+                (values.reshape((shape.dims()[0], k))?, indices.reshape((shape.dims()[0], k))?)
+            }
+            3 => {
+                (values.reshape((shape.dims()[0], shape.dims()[1], k))?, indices.reshape((shape.dims()[0], shape.dims()[1], k))?)
+            }
+            _=> { panic!("invalid rank!")}
+        }
+    };
+
     Ok((values, indices))
 }
 

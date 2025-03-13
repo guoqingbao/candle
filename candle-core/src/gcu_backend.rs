@@ -1187,7 +1187,7 @@ impl<'a> Map2InPlace for ScatterAdd<'a> {
         let params = (
             // ids,
             src.device_ptr(),
-            dst.buffer.as_device_ptr().as_raw(),
+            dst.buffer,
             left_sz,
             src_dim_sz,
             dst_dim_sz,

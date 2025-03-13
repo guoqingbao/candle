@@ -247,6 +247,7 @@ impl crate::CustomOp1 for ArgSort {
             grid_dim: (1, 1, 1),
             block_dim: (12, 1, 1),
             shared_mem_bytes: (3 * ncols_pad * std::mem::size_of::<u32>()) as u32,
+            is_cooperative_launch: false,
         };
 
         unsafe { func.launch(&cfg, params) }.w()?;

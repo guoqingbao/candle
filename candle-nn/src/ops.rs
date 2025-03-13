@@ -2052,3 +2052,131 @@ pub fn paged_attention<
     let storage = GcuStorage::wrap_gcu_slice(out, dev.clone());
     Ok((storage, out_shape))
 }
+
+#[cfg(feature = "gcu")]
+fn topk_func<
+    T: candle::gcu_backend::GcuDType + candle::gcu_backend::DeviceCopy + candle::WithDType,
+>(
+    input: &Tensor,
+    k: usize,
+) -> Result<(Tensor, Tensor)> {
+    use candle::gcu_backend::ubridge;
+    use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
+    use candle::gcu_backend::ubridge::gcu_launch::{GcuLaunchAsync, GcuLaunchConfig};
+    use candle::gcu_backend::{kernel_name, Map1, WrapErr};
+    use candle::Storage;
+    use candle::gcu_backend::ubridge::ffi::{topk_f32, topk_f16, topk_bf16};
+    let dev = input.device().as_gcu_device()?;
+    let (value, input_l) = input.storage_and_layout();
+    let shape = input_l.shape();
+    let el_count = shape.elem_count();
+    let stream = dev.stream_inner().unwrap();
+    let value = match &*value {
+        Storage::Gcu(k) => k,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+
+    let rank = input_l.dims().len();
+    assert!(rank <= 3);
+    let value = value.as_gcu_slice::<T>()?;
+    let value = value.slice(input_l.start_offset()..);
+    let output = input.copy()?;
+    // let func = dev.get_or_load_func(&kernel_name::<T>("topk"), ubridge::TOPK)?;
+
+    let dims = if rank == 3 {
+        shape.dims().to_vec()
+    } else if rank == 2 {
+        [1usize, shape.dims()[0], shape.dims()[1]].to_vec()
+    } else {
+        [1usize, 1usize, shape.dims()[0]].to_vec()
+    };
+
+    let indices = Tensor::arange(0u32, dims[2] as u32, input.device())?;
+    // let indices = if rank > 1 {
+    //     indices.broadcast_as(shape)?.contiguous()?
+    // } else {
+    //     indices
+    // };
+    let (index, indices_l) = indices.storage_and_layout();
+    let index = match &*index {
+        Storage::Gcu(k) => k,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let index = index.as_gcu_slice::<u32>()?;
+    let index = index.slice(indices_l.start_offset()..);
+
+    fn next_power_of_2(x: usize) -> usize {
+        let mut n = 1;
+        while n < x {
+            n *= 2
+        }
+        n
+    }
+
+    fn align_up(a: usize, b: usize) -> usize {
+        ((a + b - 1) / b) * b
+    }
+    const SHARED_SIZE: i32 = 1024 * 1024 * (64 - 4);
+
+    let workspace_size = dims[0] * (std::mem::size_of::<T>() + 4) * 24 * next_power_of_2(k) * align_up(dims[1], 128);
+    let workspace_size = align_up(workspace_size, 512);
+    let workspace = dev.alloc::<i8>(workspace_size).w()?;
+    let (out, output_l) = output.storage_and_layout();
+    let out = match &*out {
+        Storage::Gcu(k) => k,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let out = out.as_gcu_slice::<T>()?;
+    let out = out.slice(output_l.start_offset()..);
+    match input.dtype() {
+        DType::F16 => {
+            unsafe {
+                topk_f16(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
+                workspace.device_ptr(), 
+                dims[0] as i32, dims[1] as i32, dims[2] as i32,
+                2 as i32,
+                k as i32, stream as *mut core::ffi::c_void);
+            }
+
+        }
+        DType::BF16 => {
+            unsafe {
+                topk_bf16(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
+                workspace.device_ptr(), 
+                dims[0] as i32, dims[1] as i32, dims[2] as i32,
+                2 as i32,
+                k as i32, stream as *mut core::ffi::c_void);
+            }
+
+        }
+        DType::F32 => {
+            unsafe {
+                topk_f32(value.device_ptr() as *const core::ffi::c_void, out.device_ptr() as *mut core::ffi::c_void, index.device_ptr() as *mut u32, 
+                workspace.device_ptr(), 
+                dims[0] as i32, dims[1] as i32, dims[2] as i32,
+                2 as i32,
+                k as i32, stream as *mut core::ffi::c_void);
+            }
+        }
+        _=> { panic!("not supported data type!")}
+    }
+    let values = output.narrow(D::Minus1, 0, k)?;
+    let indices = indices.narrow(D::Minus1, 0, k)?;
+    Ok((values, indices))
+}
+
+#[cfg(feature = "gcu")]
+pub fn topk(
+    input: &Tensor,
+    k: usize,
+) -> Result<(Tensor, Tensor)> {
+    use half::{bf16, f16};
+    match input.dtype() {
+        DType::F16 => topk_func::<f16>(input, k),
+        DType::BF16 => topk_func::<bf16>(input, k),
+        DType::F32 => topk_func::<f32>(input, k),
+        dt => {
+            candle::bail!("topk is only supported for f32, f16 and bf16 ({dt:?})")
+        }
+    }
+}

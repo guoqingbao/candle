@@ -2586,15 +2586,15 @@ impl BackendDevice for CpuDevice {
         use rand::prelude::*;
 
         let elem_count = shape.elem_count();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         match dtype {
-            DType::U8 | DType::I8 | DType::U32 | DType::I32 | DType::I64 => {
+            DType::U8 | DType::I8 | DType::I32 | DType::U32 | DType::I64 => {
                 Err(Error::UnsupportedDTypeForOp(dtype, "rand_uniform").bt())
             }
             DType::BF16 => {
                 let mut data = Vec::with_capacity(elem_count);
-                let uniform =
-                    rand::distributions::Uniform::new(bf16::from_f64(min), bf16::from_f64(max));
+                let uniform = rand::distr::Uniform::new(bf16::from_f64(min), bf16::from_f64(max))
+                    .map_err(Error::wrap)?;
                 for _i in 0..elem_count {
                     data.push(rng.sample::<bf16, _>(uniform))
                 }
@@ -2602,8 +2602,8 @@ impl BackendDevice for CpuDevice {
             }
             DType::F16 => {
                 let mut data = Vec::with_capacity(elem_count);
-                let uniform =
-                    rand::distributions::Uniform::new(f16::from_f64(min), f16::from_f64(max));
+                let uniform = rand::distr::Uniform::new(f16::from_f64(min), f16::from_f64(max))
+                    .map_err(Error::wrap)?;
                 for _i in 0..elem_count {
                     data.push(rng.sample::<f16, _>(uniform))
                 }
@@ -2611,7 +2611,8 @@ impl BackendDevice for CpuDevice {
             }
             DType::F32 => {
                 let mut data = Vec::with_capacity(elem_count);
-                let uniform = rand::distributions::Uniform::new(min as f32, max as f32);
+                let uniform =
+                    rand::distr::Uniform::new(min as f32, max as f32).map_err(Error::wrap)?;
                 for _i in 0..elem_count {
                     data.push(rng.sample::<f32, _>(uniform))
                 }
@@ -2619,7 +2620,7 @@ impl BackendDevice for CpuDevice {
             }
             DType::F64 => {
                 let mut data = Vec::with_capacity(elem_count);
-                let uniform = rand::distributions::Uniform::new(min, max);
+                let uniform = rand::distr::Uniform::new(min, max).map_err(Error::wrap)?;
                 for _i in 0..elem_count {
                     data.push(rng.sample::<f64, _>(uniform))
                 }

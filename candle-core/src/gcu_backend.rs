@@ -3175,6 +3175,18 @@ impl GPTQMatMul {
                 };
                 let lhs = &lhs.slice(x_l.start_offset()..);
                 let sc = &sc.slice(scale_l.start_offset()..);
+                let qzeros_ptr = if self.qzeros.is_some() {
+                    let (qzeros, qzeros_l) = self.qzeros.as_ref().unwrap().storage_and_layout();
+                    let qzeros = match &*qzeros {
+                        crate::Storage::Gcu(p) => p,
+                        _ => panic!("qzeros must be a gcu tensor"),
+                    };
+                    let qzeros_ = qzeros.as_gcu_slice::<T>()?;
+                    let qzeros_ = qzeros_.slice(qzeros_l.start_offset()..);
+                    qzeros_.device_ptr()
+                } else {
+                    sc.device_ptr()
+                };
                 let out = dev.alloc::<bf16>(elem_count).w()?;
                 let param = dev.get_gemm_launch_params(
                     ubridge::DATATYPE::DataBf16,
@@ -3192,34 +3204,12 @@ impl GPTQMatMul {
                         * 4,
                 );
 
-                // fn CeilDiv(a: i32, b: i32) -> i32 {
-                //     (a + b - 1) / b
-                // }
-                // let M_align = CeilDiv(param.input_m, param.sip_m) * param.sip_m;
-                // let K_align = CeilDiv(param.input_k, param.sip_k) * param.sip_k;
-                // let LSIZE = M_align * K_align * 2;
-                // let R_SIP_SIZE = param.sip_k * param.sip_n * 4;
-                // let OTHER_SIZE = M_align * param.sip_n * 2 * 2 + 64 * param.sip_n * 2;
-                // const VDMEM_VALID_SIZE: i32 = 0x180000 - 0x8000 - 0x800;
-                // if LSIZE + R_SIP_SIZE + OTHER_SIZE < VDMEM_VALID_SIZE {
-                //     let split_loop = if param.batch_multicore > 0 {
-                //         // Splitting B
-                //         if broadcasted_weight > 0 { 1i32 } else { b as i32 }
-                //       } else {
-                //         // Splitting N
-                //         CeilDiv(param.input_n, param.sip_n)
-                //       };
-                //       let sip_loop = CeilDiv(split_loop, 2 * 12);
-                //       let dimBlocks = CeilDiv(split_loop, 2 * sip_loop);
-                //       cfg.block_dim = (dimBlocks as u32, 1, 1);
-                // }
-
                 let params = (
                     lhs.device_ptr(),
                     rhs_ptr,
                     out.device_ptr(),
                     sc.device_ptr(),
-                    sc.device_ptr(), //no qzeros in w8a16
+                    qzeros_ptr, 
                     param.input_dtype,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },

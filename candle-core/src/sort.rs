@@ -305,24 +305,24 @@ impl Tensor {
                 op: "sort_last_dim",
             });
         }
-        #[cfg(not(feature = "gcu"))]
+        // #[cfg(not(feature = "gcu"))]
         let asort = self.arg_sort_last_dim(asc)?;
-        #[cfg(not(feature = "gcu"))]
+        // #[cfg(not(feature = "gcu"))]
         let sorted = self.gather(&asort, crate::D::Minus1)?;
 
-        #[cfg(feature = "gcu")]
-        let last_dim = match self.dims().last() {
-            None => crate::bail!("empty last-dim in arg-sort"),
-            Some(last_dim) => *last_dim,
-        };
-        #[cfg(feature = "gcu")]
-        let sorted = self.copy()?;
-        #[cfg(feature = "gcu")]
-        let asort = sorted.apply_op1_no_bwd(&ArgSort {
-            asc,
-            last_dim,
-            inplace: true,
-        })?;
+        // #[cfg(feature = "gcu")]
+        // let last_dim = match self.dims().last() {
+        //     None => crate::bail!("empty last-dim in arg-sort"),
+        //     Some(last_dim) => *last_dim,
+        // };
+        // #[cfg(feature = "gcu")]
+        // let sorted = self.copy()?;
+        // #[cfg(feature = "gcu")]
+        // let asort = sorted.apply_op1_no_bwd(&ArgSort {
+        //     asc,
+        //     last_dim,
+        //     inplace: true,
+        // })?;
         Ok((sorted, asort))
     }
 }

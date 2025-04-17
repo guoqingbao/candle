@@ -1,0 +1,15 @@
+[build]
+# rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "link-args=-Wl,-rpath,/opt/tops/lib"]
+# rustflags = ["-C", "link-args=-Wl,-rpath,/xxx/caps/build/lib"] # for debug candle-gcu + topsruntime
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-feature=-avx,-avx2"]
+
+[env]
+ATOMIC_URL = "http://artifact.enflame.cn:80/artifactory/module_package/acore"
+ATOMIC_VERSION = "01d7f5d"
+ATOMIC_TAG = "3.3.20250314"

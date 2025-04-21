@@ -2154,3 +2154,123 @@ pub fn topk(input: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
         }
     }
 }
+
+//Example:
+// y = [N, M]
+// idx=[K]
+// top=[K]
+// e_out = [K, M]
+// w = [K, topk]
+
+#[cfg(feature = "gcu")]
+fn moe_func<
+    T: candle::gcu_backend::GcuDType + candle::gcu_backend::DeviceCopy + candle::WithDType,
+>(
+    y: &Tensor, e_out: &Tensor, w: &Tensor, idx: &Tensor, top: &Tensor
+) -> Result<()> {
+    use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
+    use candle::gcu_backend::ubridge::ffi::{moe_bf16, moe_f16};
+    use candle::gcu_backend::WrapErr;
+    use candle::Storage;
+    use half::{bf16, f16};
+    let dev = y.device().as_gcu_device()?;
+    let (y_value, y_l) = y.storage_and_layout();
+    let (e_value, e_l) = e_out.storage_and_layout();
+    let (w_value, w_l) = w.storage_and_layout();
+    let (idx_value, idx_l) = idx.storage_and_layout();
+    let (top_value, top_l) = top.storage_and_layout();
+
+    assert!(y_l.dims().len() == 2 && e_l.dims().len() == 2 && w_l.dims().len() == 2 
+        && idx_l.dims().len() == 1 && top_l.dims().len() == 1, "Invalid input dims!");
+    let (_, topk) = w.dims2()?;
+    let (n, m) = y.dims2()?;
+    let (k, m1) = e_out.dims2()?;
+    assert!(m == m1, "y and expert out should have same last dim!");
+    assert!(k == idx.dim(0)? && k == top.dim(0)?, "the first dim of idx and top tensors should match expert out!");
+    assert!(k == w.dim(0)?, "the first dim of topk_weight should match y tensor!");
+    assert!(topk == w.dim(1)?, "the last dim of topk_weight must equal to the given topk!");
+
+    // let el_count = shape.elem_count();
+    let stream = dev.stream_inner().unwrap();
+    let y_value = match &*y_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let y_value = y_value.as_gcu_slice::<T>()?;
+    let y_value = y_value.slice(y_l.start_offset()..);
+    
+    let e_value = match &*e_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let e_value = e_value.as_gcu_slice::<T>()?;
+    let e_value = e_value.slice(e_l.start_offset()..);
+
+    let idx_value = match &*idx_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let idx_value = idx_value.as_gcu_slice::<u32>()?;
+    let idx_value = idx_value.slice(idx_l.start_offset()..);
+
+    let top_value = match &*top_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let top_value = top_value.as_gcu_slice::<u32>()?;
+    let top_value = top_value.slice(top_l.start_offset()..);
+    
+    let w_value = match &*w_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let w_value = w_value.as_gcu_slice::<f32>()?;
+    let w_value = w_value.slice(w_l.start_offset()..);
+
+    match y.dtype() {
+        DType::F16 => unsafe {
+            moe_f16(
+                y_value.device_ptr() as *mut f16,
+                e_value.device_ptr() as *mut f16,
+                w_value.device_ptr() as *mut f32,
+                idx_value.device_ptr() as *mut u32,
+                top_value.device_ptr() as *mut u32,
+                n as i32,
+                k as i32,
+                m as i32,
+                topk as i32,
+                stream as *mut core::ffi::c_void,
+            );
+        },
+        DType::BF16 => unsafe {
+            moe_bf16(
+                y_value.device_ptr() as *mut bf16,
+                e_value.device_ptr() as *mut bf16,
+                w_value.device_ptr() as *mut f32,
+                idx_value.device_ptr() as *mut u32,
+                top_value.device_ptr() as *mut u32,
+                n as i32,
+                k as i32,
+                m as i32,
+                topk as i32,
+                stream as *mut core::ffi::c_void,
+            );
+        },
+        _ => {
+            panic!("not supported data type!")
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gcu")]
+pub fn moe(y: &Tensor, e_out: &Tensor, w: &Tensor, idx: &Tensor, top: &Tensor) -> Result<()> {
+    use half::{bf16, f16};
+    match y.dtype() {
+        DType::F16 => moe_func::<f16>(y, e_out, w, idx, top),
+        DType::BF16 => moe_func::<bf16>(y, e_out, w, idx, top),
+        dt => {
+            candle::bail!("topk is only supported for f16 and bf16 ({dt:?})")
+        }
+    }
+}

@@ -1056,13 +1056,9 @@ impl<'a> Map1 for Gather<'a> {
             None => Err(crate::Error::RequiresContiguous { op: "gather" }.bt())?,
         };
         let (name, ids) = match &ids.slice {
-            GcuStorageSlice::U32(slice) => {
-                ("gather_u32", slice.slice(ids_o1..ids_o2).device_ptr())
-            }
+            GcuStorageSlice::U32(slice) => ("gather_u32", slice.slice(ids_o1..ids_o2).device_ptr()),
             GcuStorageSlice::U8(slice) => ("gather_u8", slice.slice(ids_o1..ids_o2).device_ptr()),
-            GcuStorageSlice::I64(slice) => {
-                ("gather_i64", slice.slice(ids_o1..ids_o2).device_ptr())
-            }
+            GcuStorageSlice::I64(slice) => ("gather_i64", slice.slice(ids_o1..ids_o2).device_ptr()),
             _ => Err(GcuError::UnexpectedDType {
                 msg: "gather ids should be u8/u32/i64",
                 expected: DType::U32,
@@ -1081,7 +1077,14 @@ impl<'a> Map1 for Gather<'a> {
         let func = dev.get_or_load_func(&kernel_name::<T>(name), ubridge::INDEXING)?;
         let out = dev.alloc::<T>(el).w()?;
         let params = (
-            el, ids, src.device_ptr(), out.device_ptr(), left_sz, src_dim_sz, ids_dim_sz, right_sz,
+            el,
+            ids,
+            src.device_ptr(),
+            out.device_ptr(),
+            left_sz,
+            src_dim_sz,
+            ids_dim_sz,
+            right_sz,
         );
         let mut cfg = dev.launch_cfg.clone();
         cfg.set_shared_memory(el as u32 * std::mem::size_of::<T>() as u32);
@@ -1129,7 +1132,14 @@ impl<'a> Map2InPlace for IndexAdd<'a> {
         let el = (left_sz * right_sz) as u32;
         let func = dev.get_or_load_func(&kernel_name::<T>(name), ubridge::INDEXING)?;
         let params = (
-            ids, ids_dim_sz, src.device_ptr(), dst.device_ptr(), left_sz, src_dim_sz, dst_dim_sz, right_sz,
+            ids,
+            ids_dim_sz,
+            src.device_ptr(),
+            dst.device_ptr(),
+            left_sz,
+            src_dim_sz,
+            dst_dim_sz,
+            right_sz,
         );
         let mut cfg = dev.launch_cfg.clone();
         cfg.set_shared_memory(2 * el as u32 * std::mem::size_of::<T>() as u32);
@@ -1846,7 +1856,13 @@ impl BackendStorage for GcuStorage {
         } else {
             let mut src = unsafe { device.alloc_uninit(rhs_l.shape(), rhs.dtype())? };
             self.copy_strided_src(&mut src, 0, rhs_l)?;
-            let slice = Cmp(op).map(&self.slice, lhs_l, &src.slice, &Layout::contiguous(rhs_l.shape()), &device)?;
+            let slice = Cmp(op).map(
+                &self.slice,
+                lhs_l,
+                &src.slice,
+                &Layout::contiguous(rhs_l.shape()),
+                &device,
+            )?;
             Ok(Self { slice, device })
         }
     }
@@ -2169,7 +2185,7 @@ impl BackendStorage for GcuStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let (mut slice, l) = if l.is_contiguous() { 
+        let (mut slice, l) = if l.is_contiguous() {
             (self.to_owned(), l)
         } else {
             let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
@@ -2177,7 +2193,13 @@ impl BackendStorage for GcuStorage {
             (acc, &Layout::contiguous(l.shape()))
         };
         if src_l.is_contiguous() {
-            IndexAdd(ids, ids_l, dim).map(&mut slice.slice, l.shape(), &src.slice, src_l, &device)?;
+            IndexAdd(ids, ids_l, dim).map(
+                &mut slice.slice,
+                l.shape(),
+                &src.slice,
+                src_l,
+                &device,
+            )?;
         } else {
             assert!(src_l.is_contiguous())
         }
@@ -2610,6 +2632,7 @@ impl BackendStorage for GcuStorage {
 }
 
 pub struct Rope {
+    pub cos_sin_length: i32,
     pub cos_sin_stride: i32,
     pub index_positions: Vec<i32>,
     pub batch: i32,
@@ -2678,6 +2701,7 @@ impl crate::CustomOp3 for Rope {
                     query_.device_ptr(),
                     key_.device_ptr(),
                     cos_sin_ptr,
+                    self.cos_sin_length,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -2702,6 +2726,7 @@ impl crate::CustomOp3 for Rope {
                     query_.device_ptr(),
                     key_.device_ptr(),
                     cos_sin_ptr,
+                    self.cos_sin_length,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -2730,6 +2755,7 @@ impl crate::CustomOp3 for Rope {
                     query_.device_ptr(),
                     key_.device_ptr(),
                     cos_sin_ptr,
+                    self.cos_sin_length,
                     self.cos_sin_stride,
                     positions.device_ptr(),
                     self.batch,
@@ -3209,7 +3235,7 @@ impl GPTQMatMul {
                     rhs_ptr,
                     out.device_ptr(),
                     sc.device_ptr(),
-                    qzeros_ptr, 
+                    qzeros_ptr,
                     param.input_dtype,
                     if broadcasted_weight > 0 { 1 } else { b },
                     if broadcasted_weight > 0 { b * m } else { m },

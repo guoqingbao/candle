@@ -1065,6 +1065,7 @@ pub fn apply_rotary_emb_qkv(
         query: &Tensor,
         key: &Tensor,
         cos_sin: &Tensor,
+        cos_sin_length: i32,
         cos_sin_stride: i32,
         index_positions: &Vec<i32>,
         batch: i32,
@@ -1077,6 +1078,7 @@ pub fn apply_rotary_emb_qkv(
     ) -> Result<Tensor> {
         use candle::gcu_backend::Rope;
         let op = Rope {
+            cos_sin_length,
             cos_sin_stride,
             index_positions: index_positions.clone(),
             batch,
@@ -1090,6 +1092,7 @@ pub fn apply_rotary_emb_qkv(
         query.apply_op3(key, cos_sin, op)
     }
     let cos_sin_dims = cos_sin.shape().dims();
+    let cos_sin_length = cos_sin_dims[0];
     let cos_sin_stride = cos_sin_dims[cos_sin_dims.len() - 1];
     if query_key_transposed {
         //(b_sz, num_heads, seq_len, hidden_size)
@@ -1099,6 +1102,7 @@ pub fn apply_rotary_emb_qkv(
             query,
             key,
             cos_sin,
+            cos_sin_length as i32,
             cos_sin_stride as i32,
             index_positions,
             b_sz as i32,
@@ -1119,6 +1123,7 @@ pub fn apply_rotary_emb_qkv(
             query,
             key,
             cos_sin,
+            cos_sin_length as i32,
             cos_sin_stride as i32,
             index_positions,
             b_sz as i32,
@@ -2138,8 +2143,10 @@ fn topk_func<
     let mut out_dims = shape.dims().to_vec();
     let last_dim = out_dims.len() - 1;
     out_dims[last_dim] = k;
-    Ok((Tensor::from_storage(candle::Storage::Gcu(s_out), out_dims.clone())?,
-    Tensor::from_storage(candle::Storage::Gcu(s_indices), out_dims.clone())?))
+    Ok((
+        Tensor::from_storage(candle::Storage::Gcu(s_out), out_dims.clone())?,
+        Tensor::from_storage(candle::Storage::Gcu(s_indices), out_dims.clone())?,
+    ))
 }
 
 #[cfg(feature = "gcu")]
@@ -2166,7 +2173,11 @@ pub fn topk(input: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
 fn moe_func<
     T: candle::gcu_backend::GcuDType + candle::gcu_backend::DeviceCopy + candle::WithDType,
 >(
-    y: &Tensor, e_out: &Tensor, w: &Tensor, idx: &Tensor, top: &Tensor
+    y: &Tensor,
+    e_out: &Tensor,
+    w: &Tensor,
+    idx: &Tensor,
+    top: &Tensor,
 ) -> Result<()> {
     use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
     use candle::gcu_backend::ubridge::ffi::{moe_bf16, moe_f16};
@@ -2180,15 +2191,30 @@ fn moe_func<
     let (idx_value, idx_l) = idx.storage_and_layout();
     let (top_value, top_l) = top.storage_and_layout();
 
-    assert!(y_l.dims().len() == 2 && e_l.dims().len() == 2 && w_l.dims().len() == 2 
-        && idx_l.dims().len() == 1 && top_l.dims().len() == 1, "Invalid input dims!");
+    assert!(
+        y_l.dims().len() == 2
+            && e_l.dims().len() == 2
+            && w_l.dims().len() == 2
+            && idx_l.dims().len() == 1
+            && top_l.dims().len() == 1,
+        "Invalid input dims!"
+    );
     let (_, topk) = w.dims2()?;
     let (n, m) = y.dims2()?;
     let (k, m1) = e_out.dims2()?;
     assert!(m == m1, "y and expert out should have same last dim!");
-    assert!(k == idx.dim(0)? && k == top.dim(0)?, "the first dim of idx and top tensors should match expert out!");
-    assert!(k == w.dim(0)?, "the first dim of topk_weight should match y tensor!");
-    assert!(topk == w.dim(1)?, "the last dim of topk_weight must equal to the given topk!");
+    assert!(
+        k == idx.dim(0)? && k == top.dim(0)?,
+        "the first dim of idx and top tensors should match expert out!"
+    );
+    assert!(
+        n == w.dim(0)?,
+        "the first dim of topk_weight should match y tensor!"
+    );
+    assert!(
+        topk == w.dim(1)?,
+        "the last dim of topk_weight must equal to the given topk!"
+    );
 
     // let el_count = shape.elem_count();
     let stream = dev.stream_inner().unwrap();
@@ -2198,7 +2224,7 @@ fn moe_func<
     };
     let y_value = y_value.as_gcu_slice::<T>()?;
     let y_value = y_value.slice(y_l.start_offset()..);
-    
+
     let e_value = match &*e_value {
         Storage::Gcu(s) => s,
         _ => candle::bail!("tensor must be a gcu tensor"),
@@ -2219,7 +2245,7 @@ fn moe_func<
     };
     let top_value = top_value.as_gcu_slice::<u32>()?;
     let top_value = top_value.slice(top_l.start_offset()..);
-    
+
     let w_value = match &*w_value {
         Storage::Gcu(s) => s,
         _ => candle::bail!("tensor must be a gcu tensor"),

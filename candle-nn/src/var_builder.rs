@@ -476,7 +476,10 @@ impl<'a> VarBuilder<'a> {
         dtype: DType,
         device: Device,
     ) -> Self {
-        let data = TensorData { backend: Arc::new(backend), device };
+        let data = TensorData {
+            backend: Arc::new(backend),
+            device,
+        };
         Self {
             data: Arc::new(data),
             path: vec![],
@@ -590,7 +593,10 @@ impl<'a> VarBuilder<'a> {
         let path = self.path.clone();
         let backend = Rename::new(self, renamer);
         let backend: Box<dyn SimpleBackend + 'a> = Box::new(backend);
-        let data = TensorData { backend: Arc::new(backend), device };
+        let data = TensorData {
+            backend: Arc::new(backend),
+            device,
+        };
         Self {
             data: Arc::new(data),
             dtype,

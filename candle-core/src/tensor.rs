@@ -177,14 +177,11 @@ pub(crate) fn from_storage<S: Into<Shape>>(
 }
 
 impl Tensor {
-    pub fn from_storage<S: Into<Shape>>(
-        storage: Storage,
-        shape: S,
-    ) -> Result<Self> {
+    pub fn from_storage<S: Into<Shape>>(storage: Storage, shape: S) -> Result<Self> {
         let none = BackpropOp::none();
         Ok(from_storage(storage, shape, none, false))
     }
-    
+
     pub(crate) fn ones_impl<S: Into<Shape>>(
         shape: S,
         dtype: DType,

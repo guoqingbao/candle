@@ -106,6 +106,8 @@ pub use variable::Var;
 
 #[cfg(feature = "cuda")]
 pub use cuda_backend as cuda;
+#[cfg(feature = "cuda")]
+pub mod offloadable;
 
 #[cfg(not(feature = "cuda"))]
 pub use dummy_cuda_backend as cuda;

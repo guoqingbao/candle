@@ -1,6 +1,10 @@
 //! Tensors are N-dimensional matrixes of elements using a single data type.
 #![allow(clippy::redundant_closure_call)]
 use crate::backend::{BackendDevice, BackendStorage};
+#[cfg(feature = "cuda")]
+use crate::offloadable::OffloadBuffer;
+#[cfg(not(feature = "cuda"))]
+struct OffloadBuffer {}
 use crate::op::{BackpropOp, BinaryOp, CmpOp, Op, ReduceOp, UnaryOp};
 use crate::scalar::TensorOrScalar;
 use crate::shape::{Dim, Dims, ShapeWithOneHole};
@@ -40,6 +44,7 @@ pub struct Tensor_ {
     is_variable: bool,
     dtype: DType,
     device: Device,
+    cpu_offload_buffer: Option<Arc<OffloadBuffer>>,
 }
 
 impl AsRef<Tensor> for Tensor {
@@ -172,8 +177,111 @@ pub(crate) fn from_storage<S: Into<Shape>>(
         is_variable,
         dtype,
         device,
+        cpu_offload_buffer: None,
     };
     Tensor(Arc::new(tensor_))
+}
+
+#[cfg(feature = "cuda")]
+impl Tensor {
+    pub fn offload(&self) -> Result<Tensor> {
+        use half::{bf16, f16};
+        let cpu_buffer = if self.cpu_offload_buffer.is_none() {
+            let storage = match &*self.storage() {
+                Storage::Cpu(storage) => storage.clone(),
+                Storage::Cuda(storage) => storage.to_cpu_storage()?,
+                Storage::Metal(storage) => storage.to_cpu_storage()?,
+            };
+            let buffer = match self.dtype() {
+                DType::U8 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<u8>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::U32 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<u32>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::F16 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<f16>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::BF16 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<bf16>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::F32 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<f32>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::I64 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<i64>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+                DType::F64 => Arc::new(OffloadBuffer::new(
+                    storage.as_slice::<f64>()?,
+                    self.dtype(),
+                    storage.device(),
+                    self.device(),
+                )?),
+            };
+            buffer
+        } else {
+            self.cpu_offload_buffer.as_ref().unwrap().to_owned()
+        };
+
+        let dtype = self.dtype();
+        //placeholder storage
+        let sp: Shape = (1,).into();
+        let storage = unsafe { cpu_buffer.cpu_device.alloc_uninit(&sp, dtype)? };
+        let device = self.device().clone();
+        let tensor_ = Tensor_ {
+            id: self.id(),
+            storage: Arc::new(RwLock::new(Storage::Cpu(storage))),
+            layout: self.layout().clone(),
+            op: BackpropOp::none(),
+            is_variable: self.is_variable(),
+            dtype,
+            device,
+            cpu_offload_buffer: Some(cpu_buffer.into()),
+        };
+        Ok(Tensor(Arc::new(tensor_)))
+    }
+
+    pub fn reload(&self) -> Result<Tensor> {
+        let cpu_buffer = if self.cpu_offload_buffer.is_some() {
+            self.cpu_offload_buffer.as_ref().unwrap().to_owned()
+        } else {
+            panic!(
+                "missing cpu buffer, the tensor should be offloaded first before calling reload!"
+            )
+        };
+
+        let dtype = self.dtype();
+        let device = self.device().clone();
+        let tensor_ = Tensor_ {
+            id: self.id(),
+            storage: Arc::new(RwLock::new(cpu_buffer.reload()?)),
+            layout: self.layout().clone(),
+            op: BackpropOp::none(),
+            is_variable: self.is_variable(),
+            dtype,
+            device,
+            cpu_offload_buffer: Some(cpu_buffer.into()),
+        };
+        Ok(Tensor(Arc::new(tensor_)))
+    }
 }
 
 impl Tensor {
@@ -909,6 +1017,7 @@ impl Tensor {
                 is_variable: false,
                 dtype: self.dtype,
                 device: self.device.clone(),
+                cpu_offload_buffer: None,
             };
             Ok(Tensor(Arc::new(tensor_)))
         }
@@ -2277,6 +2386,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }
@@ -2313,6 +2423,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }
@@ -2339,6 +2450,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }
@@ -2359,6 +2471,7 @@ impl Tensor {
                 is_variable: false,
                 dtype: self.dtype,
                 device: self.device.clone(),
+                cpu_offload_buffer: None,
             };
             Tensor(Arc::new(tensor_))
         }
@@ -2402,6 +2515,7 @@ impl Tensor {
                 is_variable: false,
                 dtype: self.dtype,
                 device: device.clone(),
+                cpu_offload_buffer: None,
             };
             Ok(Tensor(Arc::new(tensor_)))
         }
@@ -2432,6 +2546,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }
@@ -2541,6 +2656,7 @@ impl Tensor {
                 is_variable: false,
                 dtype: self.dtype,
                 device: self.device.clone(),
+                cpu_offload_buffer: None,
             };
             Ok(Tensor(Arc::new(tensor_)))
         } else {
@@ -2582,6 +2698,7 @@ impl Tensor {
                 is_variable: false,
                 dtype: self.dtype,
                 device: self.device.clone(),
+                cpu_offload_buffer: None,
             };
             Ok(Tensor(Arc::new(tensor_)))
         } else {
@@ -2620,6 +2737,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }

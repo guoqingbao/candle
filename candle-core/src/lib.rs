@@ -75,6 +75,8 @@ pub mod metal_backend;
 #[cfg(feature = "mkl")]
 mod mkl;
 pub mod npy;
+#[cfg(feature = "gcu")]
+pub mod offloadable;
 pub mod op;
 pub mod pickle;
 pub mod quantized;

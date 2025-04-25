@@ -2300,3 +2300,126 @@ pub fn moe(y: &Tensor, e_out: &Tensor, w: &Tensor, idx: &Tensor, top: &Tensor) -
         }
     }
 }
+
+//example:
+// input [K, N] (actual [K/2, N]) (unsigned char)
+// scale [2 * K / group_size, N] （bf16/fp16）
+// zeros [2 * K / group_size, N] （bf16/fp16）
+// out [2*K, N] (bf16, fp16)
+
+#[cfg(feature = "gcu")]
+fn dequant_func<
+    T: candle::gcu_backend::GcuDType + candle::gcu_backend::DeviceCopy + candle::WithDType,
+>(
+    weight: &Tensor,
+    scale: &Tensor,
+    zeros: &Tensor,
+    group_size: usize,
+) -> Result<Tensor> {
+    use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
+    use candle::gcu_backend::ubridge::ffi::{dequant_bf16, dequant_f16};
+    use candle::gcu_backend::WrapErr;
+    use candle::Storage;
+    use half::{bf16, f16};
+    let dev = weight.device().as_gcu_device()?;
+    let (w_value, w_l) = weight.storage_and_layout();
+    let (s_value, s_l) = scale.storage_and_layout();
+    let (z_value, z_l) = zeros.storage_and_layout();
+    // println!("w {:?}, scale {:?}, zeros {:?}", w_l.shape(), s_l.shape(), z_l.shape());
+    assert!(
+        w_l.dims().len() == 2 && s_l.dims().len() == 2 && s_l.dims().len() == 2,
+        "Invalid input dims!"
+    );
+    let (k, n) = weight.dims2()?;
+
+    let (sub_k1, n1) = scale.dims2()?;
+
+    assert!(
+        scale.shape() == zeros.shape(),
+        "scale and zeros must have same shape!"
+    );
+    assert!(
+        k * 2 / group_size == sub_k1,
+        "Invalid shape for input scale and zeros!"
+    );
+    assert!(n1 == n, "Invalid shape for input scale and zeros!");
+
+    let stream = dev.stream_inner().unwrap();
+    let w_value = match &*w_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let w_value = w_value.as_gcu_slice::<u8>()?;
+    let w_value = w_value.slice(w_l.start_offset()..);
+
+    let s_value = match &*s_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let s_value = s_value.as_gcu_slice::<T>()?;
+    let s_value = s_value.slice(s_l.start_offset()..);
+
+    let z_value = match &*z_value {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+    let z_value = z_value.as_gcu_slice::<T>()?;
+    let z_value = z_value.slice(z_l.start_offset()..);
+    let weight_transpose = 0;
+    let out = dev.alloc::<T>(k * 2 * n).w()?;
+
+    match scale.dtype() {
+        DType::F16 => unsafe {
+            dequant_f16(
+                out.device_ptr() as *mut f16,
+                w_value.device_ptr() as *mut u8,
+                s_value.device_ptr() as *mut f16,
+                z_value.device_ptr() as *mut f16,
+                k as i32,
+                n as i32,
+                weight_transpose as i32,
+                group_size as i32,
+                stream as *mut core::ffi::c_void,
+            );
+        },
+        DType::BF16 => unsafe {
+            dequant_bf16(
+                out.device_ptr() as *mut bf16,
+                w_value.device_ptr() as *mut u8,
+                s_value.device_ptr() as *mut bf16,
+                z_value.device_ptr() as *mut bf16,
+                k as i32,
+                n as i32,
+                weight_transpose as i32,
+                group_size as i32,
+                stream as *mut core::ffi::c_void,
+            );
+        },
+        _ => {
+            panic!("not supported data type!")
+        }
+    }
+
+    let s_out = candle::GcuStorage::wrap_gcu_slice(out, dev.clone());
+    Ok(Tensor::from_storage(
+        candle::Storage::Gcu(s_out),
+        (k * 2, n),
+    )?)
+}
+
+#[cfg(feature = "gcu")]
+pub fn dequant_4bit(
+    weight: &Tensor,
+    scale: &Tensor,
+    zeros: &Tensor,
+    group_size: usize,
+) -> Result<Tensor> {
+    use half::{bf16, f16};
+    match scale.dtype() {
+        DType::F16 => dequant_func::<f16>(weight, scale, zeros, group_size),
+        DType::BF16 => dequant_func::<bf16>(weight, scale, zeros, group_size),
+        dt => {
+            candle::bail!("dequant is only supported for f16 and bf16 output ({dt:?})")
+        }
+    }
+}

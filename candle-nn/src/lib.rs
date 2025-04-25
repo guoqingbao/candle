@@ -50,7 +50,7 @@ pub use layer_norm::{layer_norm, rms_norm, LayerNorm, LayerNormConfig, RmsNorm};
 pub use linear::{linear, linear_b, linear_no_bias, Linear};
 pub use ops::{apply_rotary_emb_qkv, kvconcat, Dropout};
 #[cfg(feature = "gcu")]
-pub use ops::{gptq_matmul, gptq_weight_repack, moe, topk};
+pub use ops::{dequant_4bit, gptq_matmul, gptq_weight_repack, moe, topk};
 pub use optim::{AdamW, Optimizer, ParamsAdamW, SGD};
 pub use rnn::{gru, lstm, GRUConfig, LSTMConfig, GRU, LSTM, RNN};
 pub use sequential::{seq, Sequential};

@@ -272,6 +272,56 @@ impl GcuDevice {
     //         })
 
     // }
+
+    pub fn storage_from_buffer<T: crate::WithDType>(
+        &self,
+        s: *mut T,
+        len: usize,
+    ) -> Result<GcuStorage> {
+        let ss = unsafe { std::slice::from_raw_parts(s, len) };
+        let slice = match T::cpu_storage_ref(ss) {
+            CpuStorageRef::U8(_) => {
+                let data = self.htod_copy_buffer::<u8>(s as *mut u8, len).w()?;
+                GcuStorageSlice::U8(data)
+            }
+            CpuStorageRef::I8(_) => {
+                let data = self.htod_copy_buffer::<i8>(s as *mut i8, len).w()?;
+                GcuStorageSlice::I8(data)
+            }
+            CpuStorageRef::U32(_) => {
+                let data = self.htod_copy_buffer::<u32>(s as *mut u32, len).w()?;
+                GcuStorageSlice::U32(data)
+            }
+            CpuStorageRef::I32(_) => {
+                let data = self.htod_copy_buffer::<i32>(s as *mut i32, len).w()?;
+                GcuStorageSlice::I32(data)
+            }
+            CpuStorageRef::I64(_) => {
+                let data = self.htod_copy_buffer::<i64>(s as *mut i64, len).w()?;
+                GcuStorageSlice::I64(data)
+            }
+            CpuStorageRef::BF16(_) => {
+                let data = self.htod_copy_buffer::<bf16>(s as *mut bf16, len).w()?;
+                GcuStorageSlice::BF16(data)
+            }
+            CpuStorageRef::F16(_) => {
+                let data = self.htod_copy_buffer::<f16>(s as *mut f16, len).w()?;
+                GcuStorageSlice::F16(data)
+            }
+            CpuStorageRef::F32(_) => {
+                let data = self.htod_copy_buffer::<f32>(s as *mut f32, len).w()?;
+                GcuStorageSlice::F32(data)
+            }
+            CpuStorageRef::F64(_) => {
+                let data = self.htod_copy_buffer::<f64>(s as *mut f64, len).w()?;
+                GcuStorageSlice::F64(data)
+            }
+        };
+        Ok(GcuStorage {
+            slice,
+            device: self.clone(),
+        })
+    }
 }
 
 impl BackendDevice for GcuDevice {

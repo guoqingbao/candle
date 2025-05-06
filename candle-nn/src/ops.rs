@@ -1322,6 +1322,7 @@ pub fn gptq_matmul(
     workspace: &Option<Tensor>,
     bits: i32,
     group_size: i32,
+    is_awq: bool,
 ) -> Result<Tensor> {
     use candle::gcu_backend::GPTQMatMul;
     let op = GPTQMatMul {
@@ -1335,7 +1336,7 @@ pub fn gptq_matmul(
 }
 
 #[cfg(feature = "gcu")]
-pub fn gptq_weight_repack(qweight: &Tensor) -> Result<Tensor> {
+pub fn marlin_weight_repack(qweight: &Tensor, bits: i32, is_awq: bool) -> Result<Tensor> {
     use candle::gcu_backend::GPTQRepack;
     let op = GPTQRepack { bits: 4 };
     qweight.apply_op1(op)

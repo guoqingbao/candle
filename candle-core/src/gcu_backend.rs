@@ -2513,14 +2513,19 @@ impl BackendStorage for GcuStorage {
         let ds = dev
             .htod_copy([dims, src_l.stride(), &dst_layout, origin_shape.dims()].concat())
             .w()?;
-
-        let shared_memory_required = if op_type == 2 {
-            origin_el_count
-        } else {
-            origin_el_count + el_count
-        } * self.dtype().size_in_bytes();
         let mut cfg = dev.launch_cfg.clone();
-        cfg.set_shared_memory(shared_memory_required as u32);
+
+        if (op_type == 1 && origin_el_count == el_count && dims.len() < 5)
+            || (op_type == 2
+                && origin_el_count < el_count
+                && origin_shape.dims().len() <= dims.len())
+            || (op_type == 4 && origin_el_count > el_count)
+        {
+        } else {
+            let shared_memory_required =
+                (origin_el_count + el_count) * self.dtype().size_in_bytes();
+            cfg.set_shared_memory(shared_memory_required as u32);
+        };
 
         match (&self.slice, &mut dst.slice) {
             (GcuStorageSlice::BF16(src), GcuStorageSlice::BF16(dst)) => {

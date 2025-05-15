@@ -2424,3 +2424,80 @@ pub fn dequant_4bit(
         }
     }
 }
+
+#[cfg(feature = "gcu")]
+pub fn expert_mask(
+    input: &Tensor,
+    v: u32,
+) -> Result<Tensor> {
+    use candle::gcu_backend::ubridge::device_ptr::DevicePtr;
+    use candle::gcu_backend::ubridge::ffi::{mask_f32, mask_i32, mask_u32};
+    use candle::gcu_backend::WrapErr;
+    use std::ffi::c_void;
+    use candle::Storage;
+    use half::{bf16, f16};
+    let dev = input.device().as_gcu_device()?;
+    let (v_input, input_l) = input.storage_and_layout();
+    assert!(
+        input_l.dims().len() == 2,
+        "Invalid input dims!"
+    );
+    let (batch, dim_size) = input.dims2()?;
+
+    let stream = dev.stream_inner().unwrap();
+
+    let v_input = match &*v_input {
+        Storage::Gcu(s) => s,
+        _ => candle::bail!("tensor must be a gcu tensor"),
+    };
+
+    let out = dev.alloc::<u32>(batch * dim_size * 2).w()?;
+
+    let count = match input.dtype() {
+        DType::F32 => unsafe {
+            let v_input = v_input.as_gcu_slice::<f32>()?;
+            let v_input = v_input.slice(input_l.start_offset()..);
+            mask_f32(
+                v_input.device_ptr() as *mut f32,
+                v as f32,
+                out.device_ptr() as *mut u32,
+                batch as i32,
+                dim_size as i32,
+                stream as *const c_void,
+            )
+        },
+        DType::U32 => unsafe {
+            let v_input = v_input.as_gcu_slice::<u32>()?;
+            let v_input = v_input.slice(input_l.start_offset()..);
+            mask_u32(
+                v_input.device_ptr() as *mut u32,
+                v as u32,
+                out.device_ptr() as *mut u32,
+                batch as i32,
+                dim_size as i32,
+                stream as *const c_void,
+            )
+        },
+        DType::I32 => unsafe {
+            let v_input = v_input.as_gcu_slice::<i32>()?;
+            let v_input = v_input.slice(input_l.start_offset()..);
+            mask_i32(
+                v_input.device_ptr() as *mut i32,
+                v as i32,
+                out.device_ptr() as *mut u32,
+                batch as i32,
+                dim_size as i32,
+                stream as *const c_void,
+            )
+        },
+        _ => {
+            panic!("not supported data type!")
+        }
+    };
+
+    let s_out = candle::GcuStorage::wrap_gcu_slice(out, dev.clone());
+    Ok(Tensor::from_storage(
+        candle::Storage::Gcu(s_out),
+        (2usize, count as usize),
+    )?)
+}

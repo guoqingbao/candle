@@ -1,0 +1,47 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "run llama",
+            "program": "${workspaceFolder}/target/debug/examples/llama",
+            "args": ["--local-weights", "/home/guoqing/llama2_weights/", "--prompt", "Please give me 200 words!"],
+            "cwd": "${workspaceFolder}",
+            "sourceFileMap": {},
+            "env": {
+                "RUST_BACKTRACE": "short",
+                "MAIL": "/var/mail/guoqing",
+                "USER": "guoqing",
+                "SSH_CLIENT": "10.31.60.37 50859 22",
+                "SHLVL": "3",
+                "HOME": "/home/guoqing",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/10006/bus",
+                "LOGNAME": "guoqing",
+                "_": "/home/guoqing/.vscode-server/bin/ee2b180d582a7f601fa6ecfdad8d9fd269ab1884/node",
+                "XDG_SESSION_ID": "3113",
+                "PATH": "/home/guoqing/.vscode-server/bin/ee2b180d582a7f601fa6ecfdad8d9fd269ab1884/bin/remote-cli:/home/guoqing/.local/bin:/home/guoqing/.cargo/bin:/usr/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/opt/intel/oneapi/vtune/2022.4.0/bin64",
+                "VSCODE_AGENT_FOLDER": "/home/guoqing/.vscode-server",
+                "XDG_RUNTIME_DIR": "/run/user/10006",
+                "LANG": "en_US.UTF-8",
+                "SHELL": "/bin/bash",
+                "PWD": "/home/guoqing",
+                "SSH_CONNECTION": "10.31.60.37 50859 10.9.112.51 22",
+                "VSCODE_HANDLES_SIGPIPE": "true",
+                "LS_COLORS": "",
+                "LESSCLOSE": "/usr/bin/lesspipe %s %s",
+                "LIBVIRT_DEFAULT_URI": "qemu:///system",
+                "XDG_DATA_DIRS": "/usr/local/share:/usr/share:/var/lib/snapd/desktop",
+                "LESSOPEN": "| /usr/bin/lesspipe %s",
+                "VSCODE_AMD_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+                "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+                "VSCODE_NLS_CONFIG": "{\"locale\":\"en\",\"availableLanguages\":{}}",
+                "BROWSER": "/home/guoqing/.vscode-server/bin/ee2b180d582a7f601fa6ecfdad8d9fd269ab1884/bin/helpers/browser.sh",
+                "VSCODE_CWD": "/home/guoqing",
+                "ELECTRON_RUN_AS_NODE": "1",
+                "VSCODE_IPC_HOOK_CLI": "/run/user/10006/vscode-ipc-b22b61ff-1b68-4195-822b-98410fd3cd29.sock",
+                "APPLICATION_INSIGHTS_NO_DIAGNOSTIC_CHANNEL": "1",
+                "VSCODE_L10N_BUNDLE_LOCATION": ""
+            }
+        }
+    ]
+}

@@ -204,6 +204,7 @@ impl FlashAttn {
                 /* window_size_left */ window_size_left,
                 /* window_size_right */ window_size_right,
                 /* softcap */ self.softcap.unwrap_or(0f32),
+                *dev.cu_stream() as i64,
             )
         }
 
@@ -666,6 +667,7 @@ impl FlashAttnVarLen {
                 /* window_size_left */ window_size_left,
                 /* window_size_right */ window_size_right,
                 /* softcap */ self.softcap.unwrap_or(0.0),
+                *dev.cu_stream() as i64,
             )
         }
 

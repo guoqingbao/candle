@@ -58,7 +58,8 @@ extern "C" void run_mha(
     int window_size_left,
     int window_size_right,
 
-    float softcap
+    float softcap,
+    int64_t cu_stream
 ) {
     Flash_fwd_params params;
     // Reset the parameters
@@ -131,6 +132,6 @@ extern "C" void run_mha(
     params.num_splits = 1;
     params.unpadded_lse = unpadded_lse;
 
-    cudaStream_t stream = 0; // Use the default stream.
+    cudaStream_t stream = (cudaStream_t)cu_stream; // Use the default stream.
     run_mha_fwd(params, stream);
 }

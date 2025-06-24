@@ -41,6 +41,7 @@ impl TryFrom<st::Dtype> for DType {
             st::Dtype::F16 => Ok(DType::F16),
             st::Dtype::F32 => Ok(DType::F32),
             st::Dtype::F64 => Ok(DType::F64),
+            st::Dtype::I32 => Ok(DType::U32),
             dtype => Err(Error::UnsupportedSafeTensorDtype(dtype)),
         }
     }

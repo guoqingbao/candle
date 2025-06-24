@@ -9,6 +9,7 @@ keywords = ["blas", "tensor", "machine-learning"]
 categories = ["science"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+exclude = ["cutlass/docs/**", "cutlass/test/**", "cutlass/examples/**", "cutlass/tools/**", "cutlass/media/**"]
 
 [dependencies]
 candle = { path = "../candle-core", features = ["cuda"], package = "candle-core", version = "0.8.3" }

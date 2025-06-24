@@ -48,6 +48,7 @@ extern "C" {
         window_size_right: c_int,
 
         softcap: f32,
+        cu_stream: i64,
     );
 
 }

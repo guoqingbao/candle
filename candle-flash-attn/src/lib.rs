@@ -528,9 +528,9 @@ impl FlashAttnVarLen {
             None => candle::bail!("seqlens_k has to be contiguous"),
         };
 
-        let q = q.as_cuda_slice::<f16>()?;
-        let k = k.as_cuda_slice::<f16>()?;
-        let v = v.as_cuda_slice::<f16>()?;
+        let q = q.as_cuda_slice::<T>()?;
+        let k = k.as_cuda_slice::<T>()?;
+        let v = v.as_cuda_slice::<T>()?;
         let q = q.slice(q_l.start_offset()..);
         let k = k.slice(k_l.start_offset()..);
         let v = v.slice(v_l.start_offset()..);
@@ -642,7 +642,7 @@ impl FlashAttnVarLen {
         let seqlen_k_rounded = round_multiple(self.max_seqlen_k, 128);
 
         let elem_count = out_shape.elem_count();
-        let dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
+        let dst = unsafe { dev.alloc::<T>(elem_count) }.w()?;
         let softmax_lse = dev.alloc_zeros::<f32>(num_heads * total_q).w()?;
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
@@ -799,6 +799,35 @@ pub fn flash_attn_varlen(
     q.apply_op3(k, v, op)
 }
 
+pub fn flash_attn_varlen_softcap(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    seqlens_q: &Tensor,
+    seqlens_k: &Tensor,
+    max_seqlen_q: usize,
+    max_seqlen_k: usize,
+    softmax_scale: f32,
+    softcap: Option<f32>,
+    causal: bool,
+) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
+    let op = FlashAttnVarLen {
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_k,
+        seqlens_q: seqlens_q.clone(),
+        seqlens_k: seqlens_k.clone(),
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+        softcap,
+    };
+    q.apply_op3(k, v, op)
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Flash-attention v2 layer with variable-length batching.
 ///
@@ -849,6 +878,33 @@ pub fn flash_attn_varlen_windowed(
         window_size_left,
         window_size_right,
         softcap: None,
+    };
+    q.apply_op3(k, v, op)
+}
+
+pub fn flash_attn_varlen_windowed_softcap(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    seqlens_q: &Tensor,
+    seqlens_k: &Tensor,
+    max_seqlen_q: usize,
+    max_seqlen_k: usize,
+    softmax_scale: f32,
+    softcap: Option<f32>,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttnVarLen {
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_k,
+        seqlens_q: seqlens_q.clone(),
+        seqlens_k: seqlens_k.clone(),
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+        softcap,
     };
     q.apply_op3(k, v, op)
 }

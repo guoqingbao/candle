@@ -265,6 +265,7 @@ pub fn flash_attn(
     k: &Tensor,
     v: &Tensor,
     softmax_scale: f32,
+    softcap: Option<f32>,
     causal: bool,
 ) -> Result<Tensor> {
     let window_size_left = None;
@@ -275,7 +276,7 @@ pub fn flash_attn(
         alibi_slopes: None,
         window_size_left,
         window_size_right,
-        softcap: None,
+        softcap,
     };
     q.apply_op3(k, v, op)
 }
@@ -305,6 +306,7 @@ pub fn flash_attn_windowed(
     k: &Tensor,
     v: &Tensor,
     softmax_scale: f32,
+    softcap: Option<f32>,
     window_size_left: Option<usize>,
     window_size_right: Option<usize>,
 ) -> Result<Tensor> {
@@ -313,7 +315,7 @@ pub fn flash_attn_windowed(
         alibi_slopes: None,
         window_size_left,
         window_size_right,
-        softcap: None,
+        softcap,
     };
     q.apply_op3(k, v, op)
 }

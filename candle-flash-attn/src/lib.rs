@@ -265,6 +265,26 @@ pub fn flash_attn(
     k: &Tensor,
     v: &Tensor,
     softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let window_size_left = None;
+    let window_size_right = if causal { Some(0) } else { None };
+
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+        softcap: None,
+    };
+    q.apply_op3(k, v, op)
+}
+
+pub fn flash_attn_softcap(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
     softcap: Option<f32>,
     causal: bool,
 ) -> Result<Tensor> {
@@ -302,6 +322,24 @@ pub fn flash_attn(
 ///
 /// The resulting tensor has dimensions `(batch, seq_len_q, num_heads_q, head_size)`.
 pub fn flash_attn_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    window_size_left: Option<usize>,
+    window_size_right: Option<usize>,
+) -> Result<Tensor> {
+    let op = FlashAttn {
+        softmax_scale,
+        alibi_slopes: None,
+        window_size_left,
+        window_size_right,
+        softcap: None,
+    };
+    q.apply_op3(k, v, op)
+}
+
+pub fn flash_attn_windowed_softcap(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,

@@ -5,9 +5,7 @@
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
   FP16_SWITCH(!params.is_bf16, [&] {
       HEADDIM_SWITCH(params.d, [&] {
-          BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-              run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-          });
+            run_mha_fwd_<elem_type, kHeadDim, true>(params, stream);
       });
   });
 }

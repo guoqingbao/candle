@@ -1517,6 +1517,28 @@ impl Tensor {
         }
     }
 
+    pub fn copy_(&self, dst: &Self, dst_offset: usize) -> Result<()> {
+        if self.dtype() != dst.dtype() {
+            Err(Error::DTypeMismatchBinaryOp {
+                lhs: self.dtype(),
+                rhs: dst.dtype(),
+                op: "copy_",
+            }
+            .bt())?
+        }
+
+        if self.elem_count() > dst.elem_count() {
+            Err(Error::Msg {
+                0: "Dst tensor size must not smaller than the src Tensor.".to_string(),
+            }
+            .bt())?
+        }
+
+        let mut storage = dst.storage_mut();
+        self.storage()
+            .copy_strided_src(&mut storage, dst_offset, self.layout())
+    }
+
     /// Embeds the values of the `src` tensor into the `self` tensor on the first dimension.
     pub fn slice_scatter0(&self, src: &Self, start: usize) -> Result<Self> {
         if self.dtype() != src.dtype() {

@@ -85,7 +85,9 @@ fn main() -> Result<()> {
         .arg("--expt-relaxed-constexpr")
         .arg("--expt-extended-lambda")
         .arg("--use_fast_math")
-        .arg("--verbose");
+        .arg("--verbose")
+        .arg("-Xcompiler")
+        .arg("-fPIC");
 
     if let Ok(target) = std::env::var("TARGET") {
         if target.contains("msvc") {

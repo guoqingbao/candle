@@ -94,7 +94,9 @@ fn main() -> Result<()> {
         .arg("--expt-relaxed-constexpr")
         .arg("--expt-extended-lambda")
         .arg("--use_fast_math")
-        .arg("--verbose");
+        .arg("--verbose")
+        .arg("-Xcompiler")
+        .arg("-fPIC");
 
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {

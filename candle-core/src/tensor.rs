@@ -1517,26 +1517,68 @@ impl Tensor {
         }
     }
 
-    pub fn copy_(&self, dst: &Self, dst_offset: usize) -> Result<()> {
-        if self.dtype() != dst.dtype() {
+    /// copy src data to current tensor
+    pub fn copy_(&self, src: &Self) -> Result<()> {
+        if self.dtype() != src.dtype() {
             Err(Error::DTypeMismatchBinaryOp {
                 lhs: self.dtype(),
-                rhs: dst.dtype(),
+                rhs: src.dtype(),
                 op: "copy_",
             }
             .bt())?
         }
 
-        if self.elem_count() > dst.elem_count() {
+        if self.elem_count() < src.elem_count() {
             Err(Error::Msg {
                 0: "Dst tensor size must not smaller than the src Tensor.".to_string(),
             }
             .bt())?
         }
 
-        let mut storage = dst.storage_mut();
-        self.storage()
-            .copy_strided_src(&mut storage, dst_offset, self.layout())
+        let mut storage = self.storage_mut();
+        src.storage()
+            .copy_strided_src(&mut storage, 0, self.layout())
+    }
+
+    /// clear current tensor data to all zeros
+    pub fn zero_(&self) -> Result<()> {
+        #[cfg(not(feature = "cuda"))]
+        crate::bail!("Not supported platform!");
+
+        #[cfg(feature = "cuda")]
+        let dev = self.device().as_cuda_device()?;
+        #[cfg(feature = "cuda")]
+        match *self.storage_mut() {
+            Storage::Cuda(ref mut storage) => {
+                use crate::cuda_backend::CudaStorageSlice;
+                match &mut storage.slice {
+                    CudaStorageSlice::U32(dst) => {
+                        let mut dst = dst.slice_mut(..);
+                        dev.memset_zeros(&mut dst).map_err(crate::Error::wrap)
+                    }
+                    CudaStorageSlice::I64(dst) => {
+                        let mut dst = dst.slice_mut(..);
+                        dev.memset_zeros(&mut dst).map_err(crate::Error::wrap)
+                    }
+                    CudaStorageSlice::F32(dst) => {
+                        let mut dst = dst.slice_mut(..);
+                        dev.memset_zeros(&mut dst).map_err(crate::Error::wrap)
+                    }
+                    CudaStorageSlice::F16(dst) => {
+                        let mut dst = dst.slice_mut(..);
+                        dev.memset_zeros(&mut dst).map_err(crate::Error::wrap)
+                    }
+                    CudaStorageSlice::BF16(dst) => {
+                        let mut dst = dst.slice_mut(..);
+                        dev.memset_zeros(&mut dst).map_err(crate::Error::wrap)
+                    }
+                    _ => crate::bail!("Not supported dtype!"),
+                }
+            }
+            _ => {
+                crate::bail!("Not supported platform!")
+            }
+        }
     }
 
     /// Embeds the values of the `src` tensor into the `self` tensor on the first dimension.

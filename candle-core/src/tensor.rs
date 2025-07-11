@@ -1842,7 +1842,7 @@ impl Tensor {
     }
 
     /// copy src data to current tensor
-    pub fn copy_(&self, src: &Self) -> Result<()> {
+    pub fn copy_(&self, src: &Self, dst_offset: usize) -> Result<()> {
         if self.dtype() != src.dtype() {
             Err(Error::DTypeMismatchBinaryOp {
                 lhs: self.dtype(),
@@ -1861,7 +1861,7 @@ impl Tensor {
 
         let mut storage = self.storage_mut();
         src.storage()
-            .copy_strided_src(&mut storage, 0, self.layout())
+            .copy_strided_src(&mut storage, dst_offset, self.layout())
     }
 
     /// clear current tensor data to all zeros

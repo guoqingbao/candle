@@ -5,6 +5,7 @@ extern "C" {
         q_ptr: *const c_void,
         k_ptr: *const c_void,
         v_ptr: *const c_void,
+        block_table_ptr: *const c_void,
         o_ptr: *const c_void,
         softmax_lse_ptr: *const c_void,
         alibi_slopes_ptr: *const c_void,
@@ -47,8 +48,12 @@ extern "C" {
         window_size_left: c_int,
         window_size_right: c_int,
 
+        block_table_batch_stride: u32,
+        page_block_size: c_int,
+        num_splits: c_int,
+        softmax_lseaccum_ptr: *const c_void,
+        oaccum_ptr: *const c_void,
         softcap: f32,
         cu_stream: i64,
     );
-
 }

@@ -196,12 +196,6 @@ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
-inline bool cuda_is_sm8x() {
-  //  dprops = at::cuda::getCurrentDeviceProperties();
-  //  return dprops->major == 8 && dprops->minor > 0;
-  return false;
-}
-
 template<typename T, bool Is_causal>
 void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 96;
@@ -303,33 +297,6 @@ void run_mha_fwd_hdim192(Flash_fwd_params &params, cudaStream_t stream) {
         // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, T>>(params, stream);
         // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 128, 4, false, T>>(params, stream);
         // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 8, false, T>>(params, stream);
-    });
-}
-
-template<typename T, bool Is_causal>
-void run_mha_fwd_hdim224(Flash_fwd_params &params, cudaStream_t stream) {
-    constexpr static int Headdim = 224;
-    int device;
-    cudaGetDevice(&device);
-    int max_smem_per_block;
-    cudaError status_ = cudaDeviceGetAttribute(
-        &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    if (status_ != cudaSuccess) {
-      C10_CUDA_CHECK(status_);
-    }
-    // printf("max_smem_per_block = %d\n", max_smem_per_block);
-    DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
-        if (max_smem_per_block >= 2 * Headdim * (128 + 2 * 64)) {  // 112 KB
-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 8, false, false, T>, Is_dropout, Is_causal>(params, stream);
-        } else {
-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
-        }
-        // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
-        // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
-        // We can't do 128 x 32 with 8 warps because with headdim 224, kBlockKSmem = 32.
-        // If we have N = 32, there are only 1024 elements to load at once, where each load
-        // is 8 elements. This means we can only use 128 threads and not 256 threads.
-        // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 8, false, false, T>, Is_dropout, Is_causal>(params, stream);
     });
 }
 

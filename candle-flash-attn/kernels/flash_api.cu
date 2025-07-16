@@ -2,10 +2,14 @@
 #include "kernel_helpers.h"
 #include "flash_fwd_launch_template.h"
 
-void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
   FP16_SWITCH(!params.is_bf16, [&] {
       HEADDIM_SWITCH(params.d, [&] {
-            run_mha_fwd_<elem_type, kHeadDim, true>(params, stream);
+            if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+                run_mha_fwd_<elem_type, kHeadDim, true>(params, stream);
+            } else {
+                run_mha_fwd_splitkv_dispatch_<elem_type, kHeadDim, false>(params, stream);
+            }
       });
   });
 }
@@ -14,6 +18,7 @@ extern "C" void run_mha(
     void *q_ptr,
     void *k_ptr,
     void *v_ptr,
+    void* block_table_ptr,//paged kv
     void *o_ptr,
     void *softmax_lse_ptr,
     void *alibi_slopes_ptr,
@@ -56,6 +61,12 @@ extern "C" void run_mha(
     int window_size_left,
     int window_size_right,
 
+    uint32_t block_table_batch_stride,//paged kv
+    int page_block_size,//paged kv
+    int num_splits,
+    void *softmax_lseaccum_ptr,
+    void *oaccum_ptr,
+
     float softcap,
     int64_t cu_stream
 ) {
@@ -69,6 +80,13 @@ extern "C" void run_mha(
     params.v_ptr = v_ptr;
     params.o_ptr = o_ptr;
 
+    bool paged_kv = block_table_ptr != nullptr;
+    if (paged_kv) {
+        params.block_table = (int*)block_table_ptr;
+        params.block_table_batch_stride = block_table_batch_stride;
+        params.page_block_size = page_block_size;
+    }
+
     params.softmax_lse_ptr = softmax_lse_ptr;
     params.alibi_slopes_ptr = alibi_slopes_ptr;
 
@@ -77,6 +95,7 @@ extern "C" void run_mha(
     params.k_batch_stride = k_batch_stride;
     params.v_batch_stride = v_batch_stride;
     params.o_batch_stride = o_batch_stride;
+
     params.alibi_slopes_batch_stride = alibi_slopes_batch_stride;
 
     params.q_row_stride = q_row_stride;
@@ -119,6 +138,7 @@ extern "C" void run_mha(
     params.is_bf16 = is_bf16;
     params.cu_seqlens_q = cu_seqlens_q_ptr;
     params.cu_seqlens_k = cu_seqlens_k_ptr;
+
     params.p_ptr = nullptr; // used for `return_softmax`.
     params.seqused_k = nullptr;
 
@@ -126,10 +146,14 @@ extern "C" void run_mha(
     params.window_size_left = window_size_left;
     params.window_size_right = window_size_right;
 
-    params.is_seqlens_k_cumulative = true;
-    params.num_splits = 1;
-    params.unpadded_lse = unpadded_lse;
+    params.is_seqlens_k_cumulative = !paged_kv;
+    params.num_splits = num_splits;
+    if (num_splits > 1) {
+        params.softmax_lseaccum_ptr = softmax_lseaccum_ptr;
+        params.oaccum_ptr = oaccum_ptr;
+    }
 
+    params.unpadded_lse = unpadded_lse;
     cudaStream_t stream = (cudaStream_t)cu_stream; // Use the default stream.
-    run_mha_fwd(params, stream);
+    run_mha_fwd(params, stream, paged_kv);
 }

@@ -4,12 +4,11 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-const KERNEL_FILES: [&str; 17] = [
+const KERNEL_FILES: [&str; 29] = [
     "kernels/flash_api.cu",
     // "kernels/flash_fwd_hdim128_fp16_sm80.cu",
     // "kernels/flash_fwd_hdim160_fp16_sm80.cu",
     // "kernels/flash_fwd_hdim192_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim224_fp16_sm80.cu",
     // "kernels/flash_fwd_hdim256_fp16_sm80.cu",
     // "kernels/flash_fwd_hdim32_fp16_sm80.cu",
     // "kernels/flash_fwd_hdim64_fp16_sm80.cu",
@@ -17,15 +16,29 @@ const KERNEL_FILES: [&str; 17] = [
     // "kernels/flash_fwd_hdim128_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim160_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim192_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim224_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim256_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim32_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim64_bf16_sm80.cu",
     // "kernels/flash_fwd_hdim96_bf16_sm80.cu",
+
+    "kernels/flash_fwd_split_hdim128_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim160_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim192_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim256_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim32_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim64_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim96_fp16_sm80.cu",
+    "kernels/flash_fwd_split_hdim128_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim160_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim192_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim256_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim32_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim64_bf16_sm80.cu",
+    "kernels/flash_fwd_split_hdim96_bf16_sm80.cu",
+
     "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
     "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
     "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim224_fp16_causal_sm80.cu",
     "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
     "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
     "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
@@ -33,7 +46,6 @@ const KERNEL_FILES: [&str; 17] = [
     "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
     "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
     "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim224_bf16_causal_sm80.cu",
     "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
     "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
     "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
@@ -76,6 +88,7 @@ fn main() -> Result<()> {
     let mut builder = bindgen_cuda::Builder::default()
         .kernel_paths(kernels)
         .out_dir(build_dir.clone())
+        .arg("-O3")
         .arg("-std=c++17")
         .arg("-U__CUDA_NO_HALF_OPERATORS__")
         .arg("-U__CUDA_NO_HALF_CONVERSIONS__")
@@ -86,6 +99,8 @@ fn main() -> Result<()> {
         .arg("--expt-extended-lambda")
         .arg("--use_fast_math")
         .arg("--verbose")
+        .arg("-Xfatbin")
+        .arg("-compress-all")
         .arg("-Xcompiler")
         .arg("-fPIC");
 

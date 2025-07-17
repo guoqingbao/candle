@@ -5,6 +5,12 @@ use candle::cuda_backend::cudarc::driver::DevicePtr;
 use candle::cuda_backend::WrapErr;
 use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor};
 use half::{bf16, f16};
+#[cfg(feature = "flash-decoding")]
+use once_cell::sync::Lazy;
+#[cfg(feature = "flash-decoding")]
+use std::collections::HashMap;
+#[cfg(feature = "flash-decoding")]
+use std::sync::Mutex;
 
 pub struct FlashAttn {
     pub softmax_scale: f32,
@@ -1086,6 +1092,7 @@ pub fn flash_attn_varlen_alibi_windowed_softcap(
     q.apply_op3(k, v, op)
 }
 
+#[cfg(feature = "flash-decoding")]
 fn num_splits_heuristic(
     batch_nheads_mblocks: i32,
     num_sms: i32,
@@ -1132,13 +1139,13 @@ fn num_splits_heuristic(
     1
 }
 
+#[cfg(feature = "flash-decoding")]
 pub fn get_num_splits(
     batch_size: usize,
     num_heads: usize,
     head_size: usize,
     max_seqlen_k: usize,
     max_seqlen_q: usize,
-    head_size_rounded: usize,
     num_sm: usize,
 ) -> usize {
     let block_n = if head_size <= 64 {
@@ -1159,22 +1166,56 @@ pub fn get_num_splits(
         128i32,
     );
 
-    assert!(
-        num_splits <= 128,
-        "num_splits > 128 not supported"
-    );
+    assert!(num_splits <= 128, "num_splits > 128 not supported");
 
     num_splits as usize
 }
 
+#[cfg(feature = "flash-decoding")]
+// A global, thread-safe cache of SM count per device ID
+static SM_COUNT_CACHE: Lazy<Mutex<HashMap<i32, i32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "flash-decoding")]
+pub fn get_multiprocessor_count(device: &candle::CudaDevice) -> Result<i32> {
+    use candle::cuda_backend::cudarc::driver::sys;
+    let device_id = device.cu_device();
+    // Lock the cache for access
+    let mut cache = SM_COUNT_CACHE.lock().unwrap();
+
+    if let Some(&cached_value) = cache.get(&device_id) {
+        return Ok(cached_value);
+    }
+
+    // Not cached: query
+    let mut value: i32 = 0;
+    unsafe {
+        sys::lib()
+            .cuDeviceGetAttribute(
+                &mut value as *mut _,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+                *device_id,
+            )
+            .result()
+            .map_err(|e| candle::Error::Msg(format!("cuDeviceGetAttribute failed: {e:?}")))?;
+    }
+
+    // Insert result into cache
+    cache.insert(*device_id, value);
+    Ok(value)
+}
+
+#[cfg(feature = "flash-decoding")]
 struct FlashAttnCache {
     pub softmax_scale: f32,
     pub block_table: Option<Tensor>,
     pub context_lens: Option<Tensor>,
     pub alibi_slopes: Option<Tensor>,
     pub softcap: Option<f32>,
+    pub seqlenq_ngroups_swapped: bool,
+    pub q_batch_stride: usize,
 }
 
+#[cfg(feature = "flash-decoding")]
 impl FlashAttnCache {
     fn cuda_fwd_t<
         T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
@@ -1189,6 +1230,7 @@ impl FlashAttnCache {
         is_bf16: bool,
     ) -> Result<(candle::CudaStorage, Shape)> {
         let dev = q.device();
+        let num_sm = get_multiprocessor_count(dev)?;
         let out_shape = q_l.shape().clone();
         let out_l = Layout::contiguous(&out_shape);
 
@@ -1211,7 +1253,7 @@ impl FlashAttnCache {
         let o_rank = o_stride.len();
 
         //flash attn q expect [batch_size, seqlen_q, num_heads, head_dim]
-        if q_rank != 4 || k_rank != 4 || v_rank != 4 {
+        if q_rank != 4 || k_rank != 4 || v_rank != 4 || o_rank != 4 {
             candle::bail!(
                 "flash-attn-with_kvcache expects input tensors of rank 4 (q: {q_rank}, k: {k_rank}, v: {v_rank}"
             )
@@ -1242,22 +1284,27 @@ impl FlashAttnCache {
             candle::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
         }
 
-        let (block_table_ptr, block_table_batch_stride, max_num_blocks_per_seq) = if let Some(block_table) = &self.block_table {
-            // println!("block table: {:?}", block_table.to_device(&candle::Device::Cpu)?.to_vec2::<u32>()?);
-            let max_num_blocks_per_seq = block_table.dim(1)?;
-            let (block_table, block_table_layout) = block_table.storage_and_layout();
-            let block_table_batch_stride = block_table_layout.stride()[0];
-            let block_table = match &*block_table {
-                candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-                _ => candle::bail!("block_table must be a cuda tensor"),
+        let (block_table_ptr, block_table_batch_stride, max_num_blocks_per_seq) =
+            if let Some(block_table) = &self.block_table {
+                // println!("block table: {:?}", block_table.to_device(&candle::Device::Cpu)?.to_vec2::<u32>()?);
+                let max_num_blocks_per_seq = block_table.dim(1)?;
+                let (block_table, block_table_layout) = block_table.storage_and_layout();
+                let block_table_batch_stride = block_table_layout.stride()[0];
+                let block_table = match &*block_table {
+                    candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
+                    _ => candle::bail!("block_table must be a cuda tensor"),
+                };
+
+                let block_table = block_table.slice(block_table_layout.start_offset()..);
+
+                (
+                    *block_table.device_ptr() as *const core::ffi::c_void,
+                    block_table_batch_stride,
+                    max_num_blocks_per_seq,
+                )
+            } else {
+                (std::ptr::null(), 0usize, 0usize)
             };
-
-            let block_table = block_table.slice(block_table_layout.start_offset()..);
-
-            (*block_table.device_ptr() as *const core::ffi::c_void, block_table_batch_stride, max_num_blocks_per_seq)
-        } else {
-            (std::ptr::null(), 0usize, 0usize)
-        };
 
         let context_lens_ptr = if let Some(context_lens) = &self.context_lens {
             // println!("context_lens: {:?}", context_lens.to_device(&candle::Device::Cpu)?.to_vec1::<u32>()?);
@@ -1307,7 +1354,11 @@ impl FlashAttnCache {
         };
 
         let head_size = round_multiple(head_size_og, 8);
-        let head_size_rounded = if head_size <= 192  { round_multiple(head_size, 32) } else { 256 };
+        let head_size_rounded = if head_size <= 192 {
+            round_multiple(head_size, 32)
+        } else {
+            256
+        };
         let seqlen_q_rounded = round_multiple(seqlen_q, 128);
 
         let seqlen_k = max_num_blocks_per_seq * block_size;
@@ -1315,24 +1366,45 @@ impl FlashAttnCache {
 
         let elem_count = out_shape.elem_count();
         let dst = unsafe { dev.alloc::<T>(elem_count) }.w()?;
-        let softmax_lse = dev.alloc_zeros::<f32>(num_heads * batch_size * seqlen_q).w()?;
+        let softmax_lse = dev
+            .alloc_zeros::<f32>(num_heads * batch_size * seqlen_q)
+            .w()?;
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
         // println!("seqlen_q: {:?}, seqlen_k {:?}", seqlen_q, seqlen_k);
 
-        let num_sm = 108;
-        let num_splits = get_num_splits(batch_size, num_heads, head_size, seqlen_k, seqlen_q, head_size_rounded, num_sm);
+        let num_splits = get_num_splits(
+            batch_size,
+            num_heads,
+            head_size,
+            seqlen_k,
+            seqlen_q,
+            num_sm as usize,
+        );
 
         let (softmax_lseaccum_ptr, oaccum_ptr) = if num_splits > 1 {
+            let softmax_lse_accum = dev
+                .alloc_zeros::<f32>(num_splits * batch_size * num_heads * seqlen_q)
+                .w()?;
+            let out_accum = dev
+                .alloc_zeros::<f32>(
+                    num_splits * batch_size * num_heads * seqlen_q * head_size_rounded,
+                )
+                .w()?;
 
-            let softmax_lse_accum = dev.alloc_zeros::<f32>(num_splits * batch_size * num_heads * seqlen_q).w()?;
-            let out_accum = dev.alloc_zeros::<f32>(num_splits * batch_size * num_heads * seqlen_q * head_size_rounded).w()?;
-
-            (*softmax_lse_accum.device_ptr() as *const core::ffi::c_void,
-            *out_accum.device_ptr() as *const core::ffi::c_void)
+            (
+                *softmax_lse_accum.device_ptr() as *const core::ffi::c_void,
+                *out_accum.device_ptr() as *const core::ffi::c_void,
+            )
         } else {
             (std::ptr::null(), std::ptr::null())
         };
+
+        let mut o_batch_stride = o_stride[0] as u32;
+
+        if self.seqlenq_ngroups_swapped {
+            o_batch_stride *= seqlen_q as u32;
+        }
 
         unsafe {
             let q_ptr = *q.device_ptr() as *const core::ffi::c_void;
@@ -1350,10 +1422,10 @@ impl FlashAttnCache {
                 /* alibi_slopes_ptr */ alibi_slopes_ptr,
                 /* cu_seqlens_q_ptr */ std::ptr::null(),
                 /* cu_seqlens_k_ptr */ context_lens_ptr,
-                /* q_batch_stride */ q_stride[0] as u32,
+                /* q_batch_stride */ self.q_batch_stride as u32,
                 /* k_batch_stride */ k_stride[0] as u32,
                 /* v_batch_stride */ v_stride[0] as u32,
-                /* o_batch_stride */ o_stride[0] as u32,
+                /* o_batch_stride */ o_batch_stride,
                 /* alibi_slopes_batch_stride */ 0,
                 /* q_row_stride   */ q_stride[1] as u32,
                 /* k_row_stride   */ k_stride[1] as u32,
@@ -1383,7 +1455,7 @@ impl FlashAttnCache {
                 num_splits as i32,
                 softmax_lseaccum_ptr,
                 oaccum_ptr,
-                /* softcap */ self.softcap.unwrap_or(0.0),                
+                /* softcap */ self.softcap.unwrap_or(0.0),
                 *dev.cu_stream() as i64,
             )
         }
@@ -1394,6 +1466,7 @@ impl FlashAttnCache {
     }
 }
 
+#[cfg(feature = "flash-decoding")]
 impl candle::CustomOp3 for FlashAttnCache {
     fn name(&self) -> &'static str {
         "flash-attn-with-kvcache"
@@ -1421,8 +1494,12 @@ impl candle::CustomOp3 for FlashAttnCache {
         v_cache_l: &Layout,
     ) -> Result<(candle::CudaStorage, Shape)> {
         match q.dtype() {
-            candle::DType::F16 => self.cuda_fwd_t::<f16>(q, q_l, k_cache, k_cache_l, v_cache, v_cache_l, false),
-            candle::DType::BF16 => self.cuda_fwd_t::<bf16>(q, q_l, k_cache, k_cache_l, v_cache, v_cache_l, true),
+            candle::DType::F16 => {
+                self.cuda_fwd_t::<f16>(q, q_l, k_cache, k_cache_l, v_cache, v_cache_l, false)
+            }
+            candle::DType::BF16 => {
+                self.cuda_fwd_t::<bf16>(q, q_l, k_cache, k_cache_l, v_cache, v_cache_l, true)
+            }
             dt => candle::bail!("flash-attn is only supported for f16/bf16 ({dt:?})"),
         }
     }
@@ -1445,6 +1522,7 @@ impl candle::CustomOp3 for FlashAttnCache {
 ///
 ///
 /// The resulting tensor has dimensions `(total_q, num_heads_q, head_size)`.
+#[cfg(feature = "flash-decoding")]
 pub fn flash_attn_with_kvcache(
     q: &Tensor,
     k_cache: &Tensor,
@@ -1453,12 +1531,36 @@ pub fn flash_attn_with_kvcache(
     block_table: &Tensor,
     softmax_scale: f32,
 ) -> Result<Tensor> {
+    let (batch_size, mut seqlen_q, num_heads, head_size_og) = q.dims4()?;
+    let (_, _, num_heads_k, _) = k_cache.dims4()?;
+    let mut q_batch_stride = q.stride()[0];
+
+    let seqlenq_ngroups_swapped = seqlen_q == 1 && num_heads > num_heads_k && head_size_og % 8 == 0;
+    let q = if seqlenq_ngroups_swapped {
+        let ngroups = num_heads / num_heads_k;
+        seqlen_q = ngroups;
+        q_batch_stride *= seqlen_q;
+        q.reshape((batch_size, num_heads_k, ngroups, head_size_og))?
+            .transpose(1, 2)?
+    } else {
+        q.to_owned()
+    };
+
     let op = FlashAttnCache {
         softmax_scale,
         context_lens: Some(context_lens.to_owned()),
         block_table: Some(block_table.to_owned()),
         alibi_slopes: None,
         softcap: None,
+        seqlenq_ngroups_swapped,
+        q_batch_stride,
     };
-    q.apply_op3(k_cache, v_cache, op)
+    let o = q.apply_op3(k_cache, v_cache, op)?;
+    let o = if seqlenq_ngroups_swapped {
+        o.transpose(1, 2)?
+            .reshape((batch_size, 1, num_heads_k * seqlen_q, head_size_og))?
+    } else {
+        o
+    };
+    Ok(o)
 }

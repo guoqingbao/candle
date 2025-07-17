@@ -5,14 +5,19 @@
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
   FP16_SWITCH(!params.is_bf16, [&] {
       HEADDIM_SWITCH(params.d, [&] {
-            if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+#ifdef FLASH_DECODING
+            if (params.num_splits <= 1 && !force_split_kernel) {
                 run_mha_fwd_<elem_type, kHeadDim, true>(params, stream);
             } else {
                 run_mha_fwd_splitkv_dispatch_<elem_type, kHeadDim, false>(params, stream);
             }
+#else
+            run_mha_fwd_<elem_type, kHeadDim, true>(params, stream);
+#endif
       });
   });
 }
+
 
 extern "C" void run_mha(
     void *q_ptr,

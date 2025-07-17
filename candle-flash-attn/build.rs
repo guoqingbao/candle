@@ -4,59 +4,53 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-const KERNEL_FILES: [&str; 29] = [
-    "kernels/flash_api.cu",
-    // "kernels/flash_fwd_hdim128_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim160_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim192_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim256_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim32_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim64_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim96_fp16_sm80.cu",
-    // "kernels/flash_fwd_hdim128_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim160_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim192_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim256_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim32_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim64_bf16_sm80.cu",
-    // "kernels/flash_fwd_hdim96_bf16_sm80.cu",
-
-    "kernels/flash_fwd_split_hdim128_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim160_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim192_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim256_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim32_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim64_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim96_fp16_sm80.cu",
-    "kernels/flash_fwd_split_hdim128_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim160_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim192_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim256_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim32_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim64_bf16_sm80.cu",
-    "kernels/flash_fwd_split_hdim96_bf16_sm80.cu",
-
-    "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim96_fp16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
-    "kernels/flash_fwd_hdim96_bf16_causal_sm80.cu",
-];
-
 fn main() -> Result<()> {
-    println!("cargo:rerun-if-changed=build.rs");
-    for kernel_file in KERNEL_FILES.iter() {
-        println!("cargo:rerun-if-changed={kernel_file}");
+    let flash_decoding_enabled = std::env::var("CARGO_FEATURE_FLASH_DECODING").is_ok();
+    // Always-included kernels
+    let mut kernel_files = vec![
+        "kernels/flash_api.cu",
+        "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim96_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim96_bf16_causal_sm80.cu",
+    ];
+
+    // Conditionally include decoding kernels
+    if flash_decoding_enabled {
+        kernel_files.extend_from_slice(&[
+            "kernels/flash_fwd_split_hdim128_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim160_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim192_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim256_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim32_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim64_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim96_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim128_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim160_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim192_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim256_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim32_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim64_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim96_bf16_sm80.cu",
+        ]);
     }
+
+    println!("cargo:rerun-if-changed=build.rs");
+    // Track changes
+    for kernel_file in &kernel_files {
+        println!("cargo:rerun-if-changed={}", kernel_file);
+    }
+
     println!("cargo:rerun-if-changed=kernels/flash_fwd_kernel.h");
     println!("cargo:rerun-if-changed=kernels/flash_fwd_launch_template.h");
     println!("cargo:rerun-if-changed=kernels/flash.h");
@@ -84,9 +78,8 @@ fn main() -> Result<()> {
         }
     };
 
-    let kernels = KERNEL_FILES.iter().collect();
     let mut builder = bindgen_cuda::Builder::default()
-        .kernel_paths(kernels)
+        .kernel_paths(kernel_files)
         .out_dir(build_dir.clone())
         .arg("-O3")
         .arg("-std=c++17")
@@ -108,6 +101,10 @@ fn main() -> Result<()> {
         if target.contains("msvc") {
             builder = builder.arg("-D_USE_MATH_DEFINES");
         }
+    }
+
+    if flash_decoding_enabled {
+        builder = builder.arg("-DFLASH_DECODING");
     }
 
     let out_file = build_dir.join("libflashattention.a");

@@ -364,6 +364,35 @@ fn mul_mat_via_q8_1(
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
 }
 
+fn quantize_q4_k(
+    src: &CudaSlice<f32>,
+    elem_count: usize,
+    dev: &CudaDevice,
+) -> Result<PaddedCudaSlice> {
+    use cudarc::driver::LaunchAsync;
+
+    let kx = elem_count;
+    let kx_padded = pad(kx, MATRIX_ROW_PADDING);
+    let num_blocks = ceil_div(kx_padded, CUDA_QUANTIZE_BLOCK_SIZE);
+    let size_in_bytes = num_blocks * GgmlDType::Q4K.type_size();
+    let dst = dev.alloc_zeros::<u8>(size_in_bytes).w()?;
+
+    let func = dev.get_or_load_func("quantize_q4_k", candle_kernels::QUANTIZED)?;
+    let blocks_per_grid = (num_blocks + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
+
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (blocks_per_grid as u32, 1, 1),
+        block_dim: (CUDA_QUANTIZE_BLOCK_SIZE as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let params = (src, &dst, num_blocks);
+    unsafe { func.launch(cfg, params) }.w()?;
+    Ok(PaddedCudaSlice {
+        inner: dst,
+        len: size_in_bytes,
+    })
+}
+
 impl QCudaStorage {
     pub fn zeros(device: &CudaDevice, el_count: usize, dtype: GgmlDType) -> Result<Self> {
         let size_in_bytes = ceil_div(el_count, dtype.block_size()) * dtype.type_size();
@@ -447,13 +476,18 @@ impl QCudaStorage {
     }
 
     pub fn quantize(&mut self, src: &CudaStorage) -> Result<()> {
-        // Run the quantization on cpu.
         let src = match &src.slice {
             crate::cuda_backend::CudaStorageSlice::F32(data) => {
+                //dedicated gpu kernel for q4k quantization
+                if self.dtype == GgmlDType::Q4K {
+                    self.data = quantize_q4_k(data, data.len(), &self.device)?;
+                    return Ok(());
+                }
                 self.device.dtoh_sync_copy(data).w()?
             }
             _ => crate::bail!("only f32 can be quantized"),
         };
+        // Run the quantization on cpu.
         let src_len = src.len();
         let src = crate::Storage::Cpu(crate::CpuStorage::F32(src));
         let mut qcpu_storage = crate::Device::Cpu.qzeros(src_len, self.dtype)?;

@@ -4329,3 +4329,121 @@ extern "C" __global__ void
         load_tiles_q6_K<mmq_y, nwarps, true>, VDR_Q6_K_Q8_1_MMQ, vec_dot_q6_K_q8_1_mul_mat>
         (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
 }
+
+typedef struct {
+    half    d;             // super-block scales/mins
+    half    dmin;
+    uint8_t scales[3*QK_K/64];
+    uint8_t qs[QK_K/2];        // 4--bit quants
+} block_q4_K_;
+
+// Unpacks the 6-bit scale and 6-bit min for a sub-block.
+__device__ void get_scale_min_k4_(int j, const uint8_t* __restrict__ q, uint8_t* __restrict__ d, uint8_t* __restrict__ m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j] >> 6) << 4);
+    }
+}
+
+extern "C" __global__ void quantize_q4_k(const float* __restrict__ x, void* __restrict__ y, const int num_blocks) {
+    // Use a grid-stride loop to allow flexible grid sizes
+    for (int block_id = blockIdx.x * blockDim.x + threadIdx.x;
+         block_id < num_blocks;
+         block_id += gridDim.x * blockDim.x) {
+
+        // Pointers to the current input and output blocks
+        const float* x_block = x + block_id * QK_K;
+        block_q4_K_* y_block = reinterpret_cast<block_q4_K_*>(y) + block_id;
+
+        // Step 1: Find min/max for each of the 8 sub-blocks of 32 floats
+        float scales_f[8];
+        float mins_f[8];
+
+        for (int i = 0; i < 8; ++i) {
+            float min_val = x_block[i * 32];
+            float max_val = x_block[i * 32];
+            for (int j = 1; j < 32; ++j) {
+                const float val = x_block[i * 32 + j];
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+            }
+
+            // The dequantization formula is `d*q - m`. So quantization is `(x+m)/d`.
+            // We store `m` as a positive value, so `m = -min_val`.
+            // The scale `d` normalizes the range `[min, max]` to `[0, 15]`.
+            const float d = (max_val - min_val) / 15.0f;
+            mins_f[i] = -min_val;
+            scales_f[i] = (d == 0.0f) ? 0.0f : d; // Avoid division by zero issues
+        }
+
+        // Step 2: Find super-block scales for the scales and mins
+        float max_scale = 0.0f;
+        float max_min = 0.0f;
+        for (int i = 0; i < 8; ++i) {
+            if (scales_f[i] > max_scale) max_scale = scales_f[i];
+            if (mins_f[i] > max_min) max_min = mins_f[i];
+        }
+
+        const float d_scale = max_scale > 0.0f ? max_scale / 63.0f : 0.0f;
+        const float d_min = max_min > 0.0f ? max_min / 63.0f : 0.0f;
+
+        y_block->d = __float2half(d_scale);
+        y_block->dmin = __float2half(d_min);
+
+        // Step 3: Quantize and pack the scales and mins
+        uint8_t packed_scales[K_SCALE_SIZE] = {0};
+        const float inv_d_scale = d_scale > 0.0f ? 1.0f / d_scale : 0.0f;
+        const float inv_d_min = d_min > 0.0f ? 1.0f / d_min : 0.0f;
+
+        for (int i = 0; i < 8; i++) {
+            const uint8_t ls = fminf(63.0f, roundf(scales_f[i] * inv_d_scale));
+            const uint8_t lm = fminf(63.0f, roundf(mins_f[i] * inv_d_min));
+
+            if (i < 4) {
+                packed_scales[i] = ls;
+                packed_scales[i + 4] = lm;
+            } else {
+                packed_scales[i + 4]  = (ls & 0xF) | ((lm & 0xF) << 4);
+                packed_scales[i - 4] |= (ls >> 4) << 6;
+                packed_scales[i]     |= (lm >> 4) << 6;
+            }
+        }
+        for(int i = 0; i < K_SCALE_SIZE; ++i) {
+            y_block->scales[i] = packed_scales[i];
+        }
+
+        // Step 4: Quantize the 256 floats to 4-bit values
+        uint8_t temp_qs[QK_K];
+        for (int i = 0; i < 8; ++i) { // Iterate over 8 sub-blocks
+            uint8_t sc, m;
+            get_scale_min_k4_(i, y_block->scales, &sc, &m);
+
+            const float d_final = __half2float(y_block->d) * sc;
+            const float m_final = __half2float(y_block->dmin) * m;
+
+            if (d_final > 1e-9) { // Only quantize if scale is non-zero
+                const float inv_d_final = 1.0f / d_final;
+                for (int j = 0; j < 32; ++j) { // Iterate within sub-block
+                    const float x_val = x_block[i * 32 + j];
+                    const float q_float = roundf((x_val + m_final) * inv_d_final);
+                    temp_qs[i * 32 + j] = fminf(15.0f, fmaxf(0.0f, q_float));
+                }
+            } else {
+                 for (int j = 0; j < 32; ++j) {
+                    temp_qs[i * 32 + j] = 0;
+                }
+            }
+        }
+
+        // Step 5: Pack the 4-bit values into bytes
+        // This packing scheme matches the reference Rust logic
+        for (int i = 0; i < QK_K / 2; i++) {
+            const int l0_idx = (i % 32) + (i / 32) * 64;
+            const int l1_idx = l0_idx + 32;
+            y_block->qs[i] = temp_qs[l0_idx] | (temp_qs[l1_idx] << 4);
+        }
+    }
+}

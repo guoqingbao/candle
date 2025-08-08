@@ -383,11 +383,11 @@ impl QTensor {
                     ))
                 }
                 _ => {
-                    panic!("Non-cuda quant gather is not implemented!");
+                    crate::bail!("Non-cuda indexed_moe_forward is not implemented!");
                 }
             },
             _ => {
-                panic!("Invalid storage!");
+                crate::bail!("indexed_moe_forward is not implemented in this platform!");
             }
         }
     }

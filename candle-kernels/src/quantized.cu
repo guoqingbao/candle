@@ -4348,6 +4348,33 @@ __device__ void get_scale_min_k4_(int j, const uint8_t* __restrict__ q, uint8_t*
     }
 }
 
+/**
+ * @brief CUDA kernel for quantizing float values into 4-bit blocks using a K-block format.
+ *
+ * This kernel processes multiple input blocks in parallel and performs:
+ *   1. Finding per-sub-block min/max values
+ *   2. Computing scales and offsets
+ *   3. Packing scales/mins into compressed form
+ *   4. Quantizing floats to 4-bit integers
+ *   5. Packing quantized values into bytes
+ *
+ * The quantization follows the formula:
+ *   dequantized_value = scale * quantized_value - min
+ * where min is stored as a positive offset.
+ *
+ * @author
+ *   Guoqing Bao
+ *   Part of the project: https://github.com/guoqingbao/vllm.rs/
+ * @param[in]  x           Pointer to the input float array of size `num_blocks * QK_K`.
+ *                         Each block contains QK_K floats, subdivided into 8 sub-blocks of 32 elements.
+ * @param[out] y           Pointer to the output buffer of type `block_q4_K_[]`.
+ *                         Stores quantized values, packed scales, and metadata.
+ * @param[in]  num_blocks  Total number of QK_K-sized blocks to process.
+ *
+ * @note
+ *   - This kernel uses a grid-stride loop for flexible execution configuration.
+ *   - The packing scheme matches the reference Rust implementation for bit layout.
+ */
 extern "C" __global__ void quantize_q4_k(const float* __restrict__ x, void* __restrict__ y, const int num_blocks) {
     // Use a grid-stride loop to allow flexible grid sizes
     for (int block_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4446,4 +4473,211 @@ extern "C" __global__ void quantize_q4_k(const float* __restrict__ x, void* __re
             y_block->qs[i] = temp_qs[l0_idx] | (temp_qs[l1_idx] << 4);
         }
     }
+}
+
+
+
+/**
+ * @brief Performs an indexed, batched matrix-vector multiplication for quantized tensors (for MoE models).
+ *
+ * This kernel handles a batch of `total_tasks` independent operations. Each task consists
+ * of multiplying a Q8_1 quantized input vector with a Q4_K quantized weight matrix selected
+ * by an index.
+ *
+ * Parallelization Strategy:
+ * - The grid is 2D: gridDim.y corresponds to the task index, and gridDim.x corresponds to the row blocks of the output matrix.
+ * - `blockIdx.y`: Identifies which task to perform from the batch (`0` to `total_tasks - 1`).
+ * - `blockIdx.x`: Used internally by `mul_mat_vec_q` to parallelize the dot products across the rows of the weight matrix.
+ *
+ * @author
+ *   Guoqing Bao
+ *   Part of the project: https://github.com/guoqingbao/vllm.rs/
+ * @param all_weights Pointer to the beginning of the weight tensor [num_experts, n, k].
+ * @param all_inputs Pointer to the beginning of the input tensor [batch * topk, k].
+ * @param indices Pointer to the expert indices for each task [batch * topk].
+ * @param all_outputs Pointer to the beginning of the output tensor [batch * topk, n].
+ * @param n The number of output features (rows in the weight matrix).
+ * @param k The number of input features (columns in the weight matrix).
+ * @param total_tasks The total number of tasks to process, typically batch_size * topk.
+ * @param k_padded The value of k padded to a multiple of MATRIX_ROW_PADDING.
+ * @param weight_expert_stride_bytes The stride in bytes to get from one expert matrix to the next.
+ * @param input_task_stride_bytes The stride in bytes to get from one quantized input vector to the next.
+ * @param output_task_stride_elems The stride in elements (f32) to get from one output vector to the next.
+ */
+template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+__device__ void indexed_moe_forward(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+
+    // `blockIdx.y` corresponds to the batch index (0 to batch_size-1)
+    const int current_batch = blockIdx.y;
+    // `blockIdx.z` corresponds to the topk index (0 to topk-1)
+    const int current_topk = blockIdx.z;
+
+    // `gridDim.z` is the number of blocks in the z-dim, which is `topk`.
+    // This correctly flattens the (batch, topk) index into a single task ID.
+    const int task_id = current_batch * gridDim.z + current_topk;
+    if (task_id >= gridDim.y * gridDim.z) {
+        return;
+    }
+    // If input_dim1 is 1, all experts in a batch use the same input vector.
+    // Otherwise, each expert has a unique input vector.
+    const int input_idx = (input_dim1 == 1) ? current_batch : task_id;
+
+    // The expert to use is found in the `indices` array at the flattened `task_id`.
+    const unsigned int expert_id = indices[task_id];
+
+    // Calculate strides
+    const size_t weight_block_size = sizeof(block_q_t);
+    const size_t input_block_size = sizeof(block_q8_1);
+    const size_t weight_expert_stride_bytes = (size_t)(n * k) / QK_K * weight_block_size;
+    const size_t input_task_stride_bytes = (size_t)k_padded / QK8_1 * input_block_size;
+    const size_t output_task_stride_elems = n;
+
+    //data offsets of current task
+    const void * current_input_ptr  = (const char *)all_inputs  + input_idx * input_task_stride_bytes;
+    const void * current_weight_ptr = (const char *)all_weights + expert_id * weight_expert_stride_bytes;
+    float * current_output_ptr = all_outputs + task_id * output_task_stride_elems;
+
+    //fixed for inner compute
+    constexpr int ncols_y = 1;
+    constexpr int nwarps = 4;
+    constexpr int rows_per_cuda_block = 1;
+
+    const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
+    const int row0 = rows_per_cuda_block * blockIdx.x; // `blockIdx.x` is the row within the task
+
+    if (row0 >= n) {
+        return;
+    }
+
+    const int blocks_per_row_x = k / qk;
+    const int blocks_per_col_y = k_padded / QK8_1;
+    constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
+
+    float tmp = 0.0f;
+
+    const block_q_t * w = (const block_q_t *) current_weight_ptr;
+    const block_q8_1 * x = (const block_q8_1 *) current_input_ptr;
+
+    for (int kbx = tid / (qi / vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+        const int kby = kbx * (qk / QK8_1);
+        const int kqs = vdr * (tid % (qi / vdr));
+        tmp += vec_dot_q_cuda(&w[kbx + row0 * blocks_per_row_x], &x[kby], kqs);
+    }
+
+    // --- Inter-warp reduction using shared memory ---
+    __shared__ float tmp_shared[nwarps - 1][WARP_SIZE];
+    if (threadIdx.y > 0) {
+        tmp_shared[threadIdx.y - 1][threadIdx.x] = tmp;
+    }
+    __syncthreads();
+
+    if (threadIdx.y == 0) {
+        for (int l = 0; l < nwarps - 1; ++l) {
+            tmp += tmp_shared[l][threadIdx.x];
+        }
+        tmp = warp_reduce_sum(tmp);
+        if (threadIdx.x == 0) {
+            current_output_ptr[row0] = tmp;
+        }
+    }
+}
+
+extern "C" __global__ void indexed_moe_forward_q2k_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK_K, QI2_K, block_q2_K, VDR_Q2_K_Q8_1_MMVQ, vec_dot_q2_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
+}
+
+extern "C" __global__ void indexed_moe_forward_q3k_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK_K, QI3_K, block_q3_K, VDR_Q3_K_Q8_1_MMVQ, vec_dot_q3_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
+}
+
+extern "C" __global__ void indexed_moe_forward_q4k_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK_K, QI4_K, block_q4_K, VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
+}
+
+extern "C" __global__ void indexed_moe_forward_q5k_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK_K, QI5_K, block_q5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
+}
+
+extern "C" __global__ void indexed_moe_forward_q6k_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
+}
+
+extern "C" __global__ void indexed_moe_forward_q8_0_q8_1(
+    const void * __restrict__ all_weights,
+    const void * __restrict__ all_inputs,
+    const unsigned int * __restrict__ indices,
+    float * __restrict__ all_outputs,
+    const int n,
+    const int k,
+    const int batch,
+    const int topk,
+    const int k_padded,
+    const int input_dim1) {
+    indexed_moe_forward<QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }

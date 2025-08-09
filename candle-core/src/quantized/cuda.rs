@@ -66,6 +66,29 @@ fn quantize_q8_1(
     Ok(())
 }
 
+fn quantize_q8_1_view(
+    src: &CudaView<f32>,
+    dst: &CudaView<u8>,
+    elem_count: usize,
+    ky: usize,
+    dev: &CudaDevice,
+) -> Result<()> {
+    use cudarc::driver::LaunchAsync;
+
+    let kx = elem_count; //this number should not exceed 65535
+    let kx_padded = pad(kx, MATRIX_ROW_PADDING);
+    let num_blocks = ceil_div(kx_padded, CUDA_QUANTIZE_BLOCK_SIZE);
+    let func = dev.get_or_load_func("quantize_q8_1", candle_kernels::QUANTIZED)?;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (num_blocks as u32, ky as u32, 1),
+        block_dim: (CUDA_QUANTIZE_BLOCK_SIZE as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let params = (src, dst, kx as i32, kx_padded as i32);
+    unsafe { func.launch(cfg, params) }.w()?;
+    Ok(())
+}
+
 fn dequantize_f32(
     data: &PaddedCudaSlice,
     dtype: GgmlDType,
@@ -591,7 +614,7 @@ fn indexed_moe_forward_fused_q8_1_input(
     weight: &CudaView<u8>,
     w_shape: &crate::Shape, //[num_experts, n, k]
     w_dtype: GgmlDType,
-    input: &CudaView<f32>,
+    input: &CudaSlice<f32>,
     in_shape: &crate::Shape, //[batch, topk or 1, k]
     ids: &CudaView<u32>,
     idx_shape: &crate::Shape, //[batch, topk]
@@ -606,11 +629,57 @@ fn indexed_moe_forward_fused_q8_1_input(
     assert!(batch == idx_shape.dims()[0], "batch dim not match!");
 
     //quant input into q8_1
+    let total_rows = batch * input_dim1;
     let k_padded = pad(k, MATRIX_ROW_PADDING);
-    let y_size_in_bytes =
-        batch * input_dim1 * k_padded * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size();
+    // Get Q8_1 metadata.
+    let q8_1_block_size = GgmlDType::Q8_1.block_size();
+    let q8_1_type_size = GgmlDType::Q8_1.type_size();
+
+    // Calculate the size of the output buffer in bytes.
+    let num_blocks_per_row = k_padded / q8_1_block_size;
+    let dst_row_size_bytes = num_blocks_per_row * q8_1_type_size;
+    let y_size_in_bytes = total_rows * dst_row_size_bytes;
     let mut input_quant = unsafe { dev.alloc::<u8>(y_size_in_bytes).w()? };
-    quantize_q8_1(input, &mut input_quant, k, batch * input_dim1, dev)?;
+
+    const CHUNK_SIZE: usize = 65535; // gridDim.y limit
+
+    if total_rows > CHUNK_SIZE {
+        let mut rows_processed = 0;
+        while rows_processed < total_rows {
+            // --- calculate the number of rows for this chunk ---
+            let remaining_rows = total_rows - rows_processed;
+            let rows_in_chunk = std::cmp::min(CHUNK_SIZE, remaining_rows);
+
+            // --- slice the source (f32) tensor by elements ---
+            let src_start_elem = rows_processed * k;
+            let src_num_elems = rows_in_chunk * k;
+            let src_chunk = input.slice(src_start_elem..(src_start_elem + src_num_elems));
+
+            // --- slice the destination (u8) tensor by bytes ---
+            let dst_start_byte = rows_processed * dst_row_size_bytes;
+            let dst_num_bytes = rows_in_chunk * dst_row_size_bytes;
+            let dst_chunk = input_quant.slice(dst_start_byte..(dst_start_byte + dst_num_bytes));
+
+            // Launch the kernel for the current chunk.
+            quantize_q8_1_view(
+                &src_chunk,
+                &dst_chunk,
+                k,
+                rows_in_chunk, // This is our gridDim.y, now <= 65535
+                dev,
+            )?;
+
+            rows_processed += rows_in_chunk;
+        }
+    } else {
+        quantize_q8_1(
+            &input.slice(0..),
+            &mut input_quant,
+            k,
+            batch * input_dim1,
+            dev,
+        )?;
+    }
 
     // output buffer
     let outsize = batch * topk * n;
@@ -681,7 +750,7 @@ impl QCudaStorage {
                 &self.data.inner.slice(0..),
                 self_shape, //[num_experts, n, k]
                 self.dtype(),
-                &input_storage.slice(0..),
+                &input_storage,
                 input_l.shape(), //[batch, topk or 1, k]
                 &ids_storage.slice(0..),
                 ids_l.shape(), //[batch, topk]

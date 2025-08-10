@@ -14,7 +14,12 @@ static inline __device__ void ggml_cuda_swap(T & a, T & b) {
 template<int order, typename T>
 static __device__ void k_argsort(const T * x, uint32_t * dst, const int ncols, int ncols_pad) {
     // bitonic sort
+    int col = threadIdx.x;
     int row = blockIdx.x;
+
+    if (col >= ncols_pad) {
+        return;
+    }
 
     const T * x_row = x + row * ncols;
     extern __shared__ int dst_row[];

@@ -4330,6 +4330,240 @@ extern "C" __global__ void
         (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
 }
 
+typedef struct {
+    half    d;             // super-block scales/mins
+    half    dmin;
+    uint8_t scales[3*QK_K/64];
+    uint8_t qs[QK_K/2];        // 4--bit quants
+} block_q4_K_;
+
+// Unpacks the 6-bit scale and 6-bit min for a sub-block.
+__device__ void get_scale_min_k4_(int j, const uint8_t* __restrict__ q, uint8_t* __restrict__ d, uint8_t* __restrict__ m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j] >> 6) << 4);
+    }
+}
+
+/**
+ * @brief CUDA kernel for quantizing float values into 4-bit blocks using a K-block format.
+ *
+ * This kernel processes multiple input blocks in parallel and performs:
+ *   1. Finding per-sub-block min/max values
+ *   2. Computing scales and offsets
+ *   3. Packing scales/mins into compressed form
+ *   4. Quantizing floats to 4-bit integers
+ *   5. Packing quantized values into bytes
+ *
+ * The quantization follows the formula:
+ *   dequantized_value = scale * quantized_value - min
+ * where min is stored as a positive offset.
+ *
+ * @author
+ *   Guoqing Bao
+ *   Part of the project: https://github.com/guoqingbao/vllm.rs/
+ * @param[in]  x           Pointer to the input float array of size `num_blocks * QK_K`.
+ *                         Each block contains QK_K floats, subdivided into 8 sub-blocks of 32 elements.
+ * @param[out] y           Pointer to the output buffer of type `block_q4_K_[]`.
+ *                         Stores quantized values, packed scales, and metadata.
+ * @param[in]  num_blocks  Total number of QK_K-sized blocks to process.
+ *
+ * @note
+ *   - This kernel uses a grid-stride loop for flexible execution configuration.
+ *   - The packing scheme matches the reference Rust implementation for bit layout.
+ */
+extern "C" __global__ void quantize_q4_k(const float* __restrict__ x, void* __restrict__ y, const int num_blocks) {
+    // Use a grid-stride loop to allow flexible grid sizes
+    for (int block_id = blockIdx.x * blockDim.x + threadIdx.x;
+         block_id < num_blocks;
+         block_id += gridDim.x * blockDim.x) {
+
+        // Pointers to the current input and output blocks
+        const float* x_block = x + block_id * QK_K;
+        block_q4_K_* y_block = reinterpret_cast<block_q4_K_*>(y) + block_id;
+
+        // Step 1: Find min/max for each of the 8 sub-blocks of 32 floats
+        float scales_f[8];
+        float mins_f[8];
+
+        for (int i = 0; i < 8; ++i) {
+            float min_val = x_block[i * 32];
+            float max_val = x_block[i * 32];
+            for (int j = 1; j < 32; ++j) {
+                const float val = x_block[i * 32 + j];
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+            }
+
+            // The dequantization formula is `d*q - m`. So quantization is `(x+m)/d`.
+            // We store `m` as a positive value, so `m = -min_val`.
+            // The scale `d` normalizes the range `[min, max]` to `[0, 15]`.
+            const float d = (max_val - min_val) / 15.0f;
+            mins_f[i] = -min_val;
+            scales_f[i] = (d == 0.0f) ? 0.0f : d; // Avoid division by zero issues
+        }
+
+        // Step 2: Find super-block scales for the scales and mins
+        float max_scale = 0.0f;
+        float max_min = 0.0f;
+        for (int i = 0; i < 8; ++i) {
+            if (scales_f[i] > max_scale) max_scale = scales_f[i];
+            if (mins_f[i] > max_min) max_min = mins_f[i];
+        }
+
+        const float d_scale = max_scale > 0.0f ? max_scale / 63.0f : 0.0f;
+        const float d_min = max_min > 0.0f ? max_min / 63.0f : 0.0f;
+
+        y_block->d = __float2half(d_scale);
+        y_block->dmin = __float2half(d_min);
+
+        // Step 3: Quantize and pack the scales and mins
+        uint8_t packed_scales[K_SCALE_SIZE] = {0};
+        const float inv_d_scale = d_scale > 0.0f ? 1.0f / d_scale : 0.0f;
+        const float inv_d_min = d_min > 0.0f ? 1.0f / d_min : 0.0f;
+
+        for (int i = 0; i < 8; i++) {
+            const uint8_t ls = fminf(63.0f, roundf(scales_f[i] * inv_d_scale));
+            const uint8_t lm = fminf(63.0f, roundf(mins_f[i] * inv_d_min));
+
+            if (i < 4) {
+                packed_scales[i] = ls;
+                packed_scales[i + 4] = lm;
+            } else {
+                packed_scales[i + 4]  = (ls & 0xF) | ((lm & 0xF) << 4);
+                packed_scales[i - 4] |= (ls >> 4) << 6;
+                packed_scales[i]     |= (lm >> 4) << 6;
+            }
+        }
+        for(int i = 0; i < K_SCALE_SIZE; ++i) {
+            y_block->scales[i] = packed_scales[i];
+        }
+
+        // Step 4: Quantize the 256 floats to 4-bit values
+        uint8_t temp_qs[QK_K];
+        for (int i = 0; i < 8; ++i) { // Iterate over 8 sub-blocks
+            uint8_t sc, m;
+            get_scale_min_k4_(i, y_block->scales, &sc, &m);
+
+            const float d_final = __half2float(y_block->d) * sc;
+            const float m_final = __half2float(y_block->dmin) * m;
+
+            if (d_final > 1e-9) { // Only quantize if scale is non-zero
+                const float inv_d_final = 1.0f / d_final;
+                for (int j = 0; j < 32; ++j) { // Iterate within sub-block
+                    const float x_val = x_block[i * 32 + j];
+                    const float q_float = roundf((x_val + m_final) * inv_d_final);
+                    temp_qs[i * 32 + j] = fminf(15.0f, fmaxf(0.0f, q_float));
+                }
+            } else {
+                 for (int j = 0; j < 32; ++j) {
+                    temp_qs[i * 32 + j] = 0;
+                }
+            }
+        }
+
+        // Step 5: Pack the 4-bit values into bytes
+        // This packing scheme matches the reference Rust logic
+        for (int i = 0; i < QK_K / 2; i++) {
+            const int l0_idx = (i % 32) + (i / 32) * 64;
+            const int l1_idx = l0_idx + 32;
+            y_block->qs[i] = temp_qs[l0_idx] | (temp_qs[l1_idx] << 4);
+        }
+    }
+}
+
+// CUDA kernel for quantizing a matrix of floats to the Q8_0 format.
+//
+// @author
+//   Guoqing Bao
+//  Part of the project: https://github.com/guoqingbao/vllm.rs/
+// Parameters:
+//   x:          Source matrix of f32 values. Assumed to be in contiguous row-major layout.
+//   y:          Destination buffer for the quantized q8_0 blocks.
+//   k:          The number of elements (columns) in a single row of the source matrix.
+//   kx_padded:  The padded row size, which must be a multiple of QK8_0.
+extern "C" __global__ void quantize_q8_0(
+    const float * __restrict__ x,
+    void * __restrict__ y,
+    const int k,
+    const int kx_padded
+) {
+    // blockIdx.x corresponds to the block index within the row.
+    // blockIdx.y corresponds to the row index.
+    // threadIdx.x corresponds to the thread index within the data block (0-31).
+    const int block_idx = blockIdx.x;
+    const int row_idx   = blockIdx.y;
+    const int tid       = threadIdx.x;
+
+    // --- Source Pointer Calculation ---
+    // This calculation assumes the source tensor 'x' is a contiguous row-major matrix.
+    // The offset to the start of the current row is (row_idx * k).
+    // The offset to the start of the current block within that row is (block_idx * QK8_0).
+    const float * const x_block_start = x + (size_t)row_idx * k + (size_t)block_idx * QK8_0;
+
+    // --- Destination Pointer Calculation ---
+    // The destination buffer has a different stride based on the padded row size.
+    // The size of one quantized row in bytes is the number of blocks per padded row
+    // multiplied by the size of a single q8_0 block.
+    const size_t dst_row_size_bytes = (size_t)(kx_padded / QK8_0) * sizeof(block_q8_0);
+    block_q8_0 * const y_block = (block_q8_0 *)((uint8_t*)y + (size_t)row_idx * dst_row_size_bytes) + block_idx;
+
+    // Determine the global element index this thread is responsible for within the original row.
+    const int current_idx_in_row = block_idx * QK8_0 + tid;
+
+    // Find the absolute maximum value (amax) in the block ---
+
+    // Statically allocated shared memory for the parallel reduction.
+    __shared__ float sdata[QK8_0];
+
+    // Each thread loads one float into shared memory.
+    // If the index is outside the original row size 'k', it's padding; load 0.
+    if (current_idx_in_row < k) {
+        sdata[tid] = fabsf(x_block_start[tid]);
+    } else {
+        sdata[tid] = 0.0f; // Padding threads must participate with a neutral value.
+    }
+    __syncthreads();
+
+    // Perform parallel reduction in shared memory to find the max value.
+    for (int s = QK8_0 / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    // Calculate and store the scaling factor 'd' ---
+
+    // Use shared memory to hold the final scale 'd' to ensure visibility for all threads.
+    __shared__ float d_shared;
+    if (tid == 0) {
+        const float amax = sdata[0];
+        // This logic now matches the CPU implementation exactly.
+        // If amax is 0, d will be 0. Otherwise, d = amax / 127.0.
+        d_shared = amax / 127.0f;
+        y_block->d = __float2half(d_shared);
+    }
+    __syncthreads(); // Ensure d_shared is written before other threads read it.
+
+    // Quantize and store the 8-bit values ---
+
+    // Calculate the inverse scale. If d is 0, iscale will be 0.
+    const float iscale = (d_shared != 0.0f) ? 1.0f / d_shared : 0.0f;
+
+    // Each thread quantizes one value. Handle padding.
+    if (current_idx_in_row < k) {
+        const float val = x_block_start[tid];
+        y_block->qs[tid] = roundf(val * iscale);
+    } else {
+        y_block->qs[tid] = 0; // Write 0 for padded elements.
+    }
+}
+
+
 
 /**
  * @brief Performs an indexed, batched matrix-vector multiplication for quantized tensors (for MoE models).
@@ -4392,7 +4626,7 @@ __device__ void indexed_moe_forward(
     // Calculate strides
     const size_t weight_block_size = sizeof(block_q_t);
     const size_t input_block_size = sizeof(block_q8_1);
-    const size_t weight_expert_stride_bytes = (size_t)(n * k) / QK_K * weight_block_size;
+    const size_t weight_expert_stride_bytes = (size_t)(n * k) / qk * weight_block_size;
     const size_t input_task_stride_bytes = (size_t)k_padded / QK8_1 * input_block_size;
     const size_t output_task_stride_elems = n;
 

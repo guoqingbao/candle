@@ -906,6 +906,14 @@ fn indexed_moe_forward_fused_q8_1_input(
         _ => crate::bail!("unsupported dtype for indexed_moe_forward {w_dtype:?}"),
     };
 
+    const GROUP_SIZE: usize = 8; // ncols_y (warps per block)
+    let use_batch_kernel = batch % GROUP_SIZE == 0;
+    let kernel_name = if use_batch_kernel {
+        format!("{}_b8", kernel_name)
+    } else {
+        kernel_name.into()
+    };
+
     const CHUNK_SIZE: usize = 8192; // avoid gridDim.y limit
     let func = dev.get_or_load_func(&kernel_name, candle_kernels::QUANTIZED)?;
 
@@ -931,12 +939,25 @@ fn indexed_moe_forward_fused_q8_1_input(
         let dst_num_elem = rows_in_chunk * topk * n;
         let dst_chunk = out.slice(dst_start_elem..(dst_start_elem + dst_num_elem));
 
-        let (nblocks, nwarps) = (n as u32, 4);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (nblocks, rows_in_chunk as u32, topk as u32),
-            block_dim: (WARP_SIZE as u32, nwarps, 1),
-            shared_mem_bytes: 0,
+        let cfg = if use_batch_kernel {
+            let rows_per_block = 1usize; // keep in sync with kernel
+            let n_blocks_x = (n + rows_per_block - 1) / rows_per_block;
+            let num_task_groups = (rows_in_chunk + GROUP_SIZE - 1) / GROUP_SIZE; // ceil_div(batch, 8)
+            let n_warps = GROUP_SIZE as u32; // 8 warps
+            cudarc::driver::LaunchConfig {
+                grid_dim: (n_blocks_x as u32, num_task_groups as u32, topk as u32),
+                block_dim: (WARP_SIZE as u32, n_warps, 1), // (32, 8)
+                shared_mem_bytes: 0,
+            }
+        } else {
+            let (nblocks, nwarps) = (n as u32, 4);
+            cudarc::driver::LaunchConfig {
+                grid_dim: (nblocks, rows_in_chunk as u32, topk as u32),
+                block_dim: (WARP_SIZE as u32, nwarps, 1),
+                shared_mem_bytes: 0,
+            }
         };
+
         let params = (
             weight,
             &src_chunk,
@@ -995,7 +1016,7 @@ impl QCudaStorage {
             );
         }
 
-        //fallback to kernel interation
+        //fallback to kernel iteration
         let (num_experts, n, k) = self_shape.dims3()?;
         let batch = input_l.shape().dims()[0];
         let input_dim1 = input_l.shape().dims()[1];

@@ -496,6 +496,7 @@ struct FlashAttnVarLen {
     pub max_seqlen_k: usize,
     pub seqlens_q: Tensor,
     pub seqlens_k: Tensor,
+    pub block_table: Option<Tensor>,
     pub alibi_slopes: Option<Tensor>,
     pub window_size_left: Option<usize>,
     pub window_size_right: Option<usize>,
@@ -555,13 +556,8 @@ impl FlashAttnVarLen {
         let q_rank = q_stride.len();
         let k_rank = k_stride.len();
         let v_rank = v_stride.len();
-        let o_rank = o_stride.len();
+        // let o_rank = o_stride.len();
 
-        if q_rank != 3 || k_rank != 3 || v_rank != 3 {
-            candle::bail!(
-                "flash-attn-varlen expects input tensors of rank 3 (q: {q_rank}, k: {k_rank}, v: {v_rank}"
-            )
-        }
         if q_stride[q_rank - 1] != 1 {
             candle::bail!("the last dim of q must be contiguous {q_stride:?}")
         }
@@ -573,23 +569,66 @@ impl FlashAttnVarLen {
         }
 
         let (total_q, num_heads, head_size_og) = q_l.shape().dims3()?;
-        let (total_k, num_heads_k, _head_size_og) = k_l.shape().dims3()?;
-        let expected_kv = (total_k, num_heads_k, head_size_og);
-        if expected_kv != k_l.shape().dims3()? {
-            candle::bail!("shape mismatch q {:?} and k {:?}", q_l.shape(), k_l.shape())
-        }
-        if expected_kv != v_l.shape().dims3()? {
-            candle::bail!("shape mismatch q {:?} and v {:?}", q_l.shape(), v_l.shape())
-        }
+
+        let (
+            page_block_size,
+            num_heads_k,
+            k_row_stride,
+            v_row_stride,
+            k_head_stride,
+            v_head_stride,
+        ) = if self.block_table.is_some() {
+            if q_rank != 3 || k_rank != 4 || v_rank != 4 {
+                candle::bail!(
+                    "flash-attn-varlen expects input tensors of rank 3,4,4 (q: {q_rank}, k: {k_rank}, v: {v_rank}"
+                )
+            }
+            let (_num_blocks, page_block_size, num_heads_k, _head_size) = k_l.shape().dims4()?;
+            // `row_stride` is the stride for the `block_size` dimension -> stride[1]
+            // `head_stride` is the stride for the `num_heads_k` dimension -> stride[2]
+            (
+                page_block_size,
+                num_heads_k,
+                k_stride[1],
+                v_stride[1],
+                k_stride[2],
+                v_stride[2],
+            )
+        } else {
+            if q_rank != 3 || k_rank != 3 || v_rank != 3 {
+                candle::bail!(
+                    "flash-attn-varlen expects input tensors of rank 3 (q: {q_rank}, k: {k_rank}, v: {v_rank}"
+                )
+            }
+            let (total_k, num_heads_k, _head_size_og) = k_l.shape().dims3()?;
+            let expected_kv = (total_k, num_heads_k, head_size_og);
+            if expected_kv != k_l.shape().dims3()? {
+                candle::bail!("shape mismatch q {:?} and k {:?}", q_l.shape(), k_l.shape())
+            }
+            if expected_kv != v_l.shape().dims3()? {
+                candle::bail!("shape mismatch q {:?} and v {:?}", q_l.shape(), v_l.shape())
+            }
+            if num_heads % num_heads_k != 0 {
+                candle::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
+            }
+            // `row_stride` is the stride for the `block_size` dimension -> stride[1]
+            // `head_stride` is the stride for the `num_heads_k` dimension -> stride[2]
+            (
+                1,
+                num_heads_k,
+                k_stride[0],
+                v_stride[0],
+                k_stride[1],
+                v_stride[1],
+            )
+        };
+
         if head_size_og > 256 {
             candle::bail!("only supports head dimension at most 256 (got {head_size_og})")
         }
         if head_size_og % 8 != 0 {
             // TODO: Handle head sizes that are not a multiple of 8 via some padding.
             candle::bail!("only supports head sizes that are a multiple of 8 (got {head_size_og})")
-        }
-        if num_heads % num_heads_k != 0 {
-            candle::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
         }
 
         let nseqlens_q = seqlens_q_layout.shape().dims1()?;
@@ -637,6 +676,27 @@ impl FlashAttnVarLen {
             std::ptr::null()
         };
 
+        let (block_table_ptr, block_table_batch_stride, _max_num_blocks_per_seq) =
+            if let Some(block_table) = &self.block_table {
+                let max_num_blocks_per_seq = block_table.dim(1)?;
+                let (block_table, block_table_layout) = block_table.storage_and_layout();
+                let block_table_batch_stride = block_table_layout.stride()[0];
+                let block_table = match &*block_table {
+                    candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
+                    _ => candle::bail!("block_table must be a cuda tensor"),
+                };
+
+                let block_table = block_table.slice(block_table_layout.start_offset()..);
+
+                (
+                    *block_table.device_ptr() as *const core::ffi::c_void,
+                    block_table_batch_stride,
+                    max_num_blocks_per_seq,
+                )
+            } else {
+                (std::ptr::null(), 0usize, 0usize)
+            };
+
         // if window_size_left > self.max_seqlen_k or None => -1
         let mut window_size_left = self
             .window_size_left
@@ -652,7 +712,7 @@ impl FlashAttnVarLen {
             .unwrap_or(-1);
 
         let head_size = round_multiple(head_size_og, 8);
-        let head_size_rounded = round_multiple(head_size, 32);
+        let head_size_rounded = round_multiple(head_size, if head_size <= 128 { 32 } else { 64 });
         let seqlen_q_rounded = round_multiple(self.max_seqlen_q, 128);
         let seqlen_k_rounded = round_multiple(self.max_seqlen_k, 128);
 
@@ -669,12 +729,29 @@ impl FlashAttnVarLen {
         } else {
             0
         };
+
+        if window_size_left >= self.max_seqlen_k as i32 {
+            window_size_left = -1;
+        }
+        if window_size_right >= self.max_seqlen_k as i32 {
+            window_size_right = -1;
+        }
         if window_size_left < 0 && window_size_right >= 0 {
             window_size_left = self.max_seqlen_k as i32;
         }
         if window_size_left >= 0 && window_size_right < 0 {
             window_size_right = self.max_seqlen_k as i32;
         }
+
+        let (k_batch_stride, v_batch_stride) = if self.block_table.is_some() {
+            (k_stride[0] as u32, v_stride[0] as u32)
+        } else {
+            (0, 0)
+        };
+
+        // if self.block_table.is_some() {
+        //     panic!("exit");
+        // }
 
         unsafe {
             let (q_ptr, _guard) = q.device_ptr(&stream);
@@ -688,25 +765,25 @@ impl FlashAttnVarLen {
                 q_ptr,
                 k_ptr,
                 v_ptr,
-                std::ptr::null(),
+                block_table_ptr,
                 dst_ptr,
                 softmax_lse_ptr,
                 /* alibi_slopes_ptr */ alibi_slopes_ptr,
                 /* cu_seqlens_q_ptr */ seqlens_q_ptr,
                 /* cu_seqlens_k_ptr */ seqlens_k_ptr,
-                /* q_batch_stride */ 0,
-                /* k_batch_stride */ 0,
-                /* v_batch_stride */ 0,
-                /* o_batch_stride */ 0,
+                /* q_batch_stride */ q_stride[0] as u32,
+                /* k_batch_stride */ k_batch_stride,
+                /* v_batch_stride */ v_batch_stride,
+                /* o_batch_stride */ o_stride[0] as u32,
                 /* alibi_slopes_batch_stride */ 0,
-                /* q_row_stride   */ q_stride[q_rank - 3] as u32,
-                /* k_row_stride   */ k_stride[k_rank - 3] as u32,
-                /* v_row_stride   */ v_stride[v_rank - 3] as u32,
-                /* o_row_stride   */ o_stride[o_rank - 3] as u32,
-                /* q_head_stride  */ q_stride[q_rank - 2] as u32,
-                /* k_head_stride  */ k_stride[k_rank - 2] as u32,
-                /* v_head_stride  */ v_stride[v_rank - 2] as u32,
-                /* o_head_stride  */ o_stride[o_rank - 2] as u32,
+                /* q_row_stride   */ q_stride[0] as u32,
+                /* k_row_stride   */ k_row_stride as u32,
+                /* v_row_stride   */ v_row_stride as u32,
+                /* o_row_stride   */ o_stride[0] as u32,
+                /* q_head_stride  */ q_stride[1] as u32,
+                /* k_head_stride  */ k_head_stride as u32,
+                /* v_head_stride  */ v_head_stride as u32,
+                /* o_head_stride  */ o_stride[1] as u32,
                 /* b */ batch_size as u32,
                 /* h */ num_heads as u32,
                 /* h_k */ num_heads_k as u32,
@@ -722,8 +799,8 @@ impl FlashAttnVarLen {
                 /* upadded_lse */ 1,
                 /* window_size_left */ window_size_left,
                 /* window_size_right */ window_size_right,
-                /* block_table_batch_stride*/ 0u32,
-                /* page_block_size */ 0i32,
+                /* block_table_batch_stride*/ block_table_batch_stride as u32,
+                /* page_block_size */ page_block_size as i32,
                 0i32,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -798,6 +875,7 @@ pub fn flash_attn_varlen(
     v: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -812,6 +890,7 @@ pub fn flash_attn_varlen(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: None,
         window_size_left,
         window_size_right,
@@ -826,6 +905,7 @@ pub fn flash_attn_varlen_softcap(
     v: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -841,6 +921,7 @@ pub fn flash_attn_varlen_softcap(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: None,
         window_size_left,
         window_size_right,
@@ -883,6 +964,7 @@ pub fn flash_attn_varlen_windowed(
     v: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -895,6 +977,7 @@ pub fn flash_attn_varlen_windowed(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: None,
         window_size_left,
         window_size_right,
@@ -909,6 +992,7 @@ pub fn flash_attn_varlen_windowed_softcap(
     v: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -922,6 +1006,7 @@ pub fn flash_attn_varlen_windowed_softcap(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: None,
         window_size_left,
         window_size_right,
@@ -959,6 +1044,7 @@ pub fn flash_attn_varlen_alibi(
     alibi_slopes: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -973,6 +1059,7 @@ pub fn flash_attn_varlen_alibi(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: Some(alibi_slopes.clone()),
         window_size_left,
         window_size_right,
@@ -1017,6 +1104,7 @@ pub fn flash_attn_varlen_alibi_windowed(
     alibi_slopes: &Tensor,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -1029,6 +1117,7 @@ pub fn flash_attn_varlen_alibi_windowed(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: Some(alibi_slopes.clone()),
         window_size_left,
         window_size_right,
@@ -1074,6 +1163,7 @@ pub fn flash_attn_varlen_alibi_windowed_softcap(
     alibi_slopes: Option<&Tensor>,
     seqlens_q: &Tensor,
     seqlens_k: &Tensor,
+    block_table: &Option<Tensor>,
     max_seqlen_q: usize,
     max_seqlen_k: usize,
     softmax_scale: f32,
@@ -1087,6 +1177,7 @@ pub fn flash_attn_varlen_alibi_windowed_softcap(
         max_seqlen_k,
         seqlens_q: seqlens_q.clone(),
         seqlens_k: seqlens_k.clone(),
+        block_table: block_table.clone(),
         alibi_slopes: alibi_slopes.cloned(),
         window_size_left,
         window_size_right,
@@ -1376,14 +1467,15 @@ impl FlashAttnCache {
         let is_bf16 = if is_bf16 { 1 } else { 0 };
         // println!("seqlen_q: {:?}, seqlen_k {:?}", seqlen_q, seqlen_k);
 
-        let num_splits = get_num_splits(
-            batch_size,
-            num_heads,
-            head_size,
-            seqlen_k,
-            seqlen_q,
-            num_sm as usize,
-        );
+        let num_splits = 1;
+        // get_num_splits(
+        //     batch_size,
+        //     num_heads,
+        //     head_size,
+        //     seqlen_k,
+        //     seqlen_q,
+        //     num_sm as usize,
+        // );
 
         let (softmax_lseaccum_ptr, oaccum_ptr) = if num_splits > 1 {
             let softmax_lse_accum = dev
@@ -1538,7 +1630,7 @@ pub fn flash_attn_with_kvcache(
     let (_, _, num_heads_k, _) = k_cache.dims4()?;
     let mut q_batch_stride = q.stride()[0];
 
-    let seqlenq_ngroups_swapped = seqlen_q == 1 && num_heads > num_heads_k && head_size_og % 8 == 0;
+    let seqlenq_ngroups_swapped = false; //seqlen_q == 1 && num_heads > num_heads_k && head_size_og % 8 == 0;
     let q = if seqlenq_ngroups_swapped {
         let ngroups = num_heads / num_heads_k;
         seqlen_q = ngroups;

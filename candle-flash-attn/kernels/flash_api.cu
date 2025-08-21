@@ -153,7 +153,10 @@ extern "C" void run_mha(
     params.window_size_left = window_size_left;
     params.window_size_right = window_size_right;
 
-    params.is_seqlens_k_cumulative = !paged_kv;
+    params.is_seqlens_k_cumulative = true;
+    if (cu_seqlens_q_ptr == nullptr) {
+        params.is_seqlens_k_cumulative = !paged_kv;
+    }
     params.num_splits = num_splits;
     if (num_splits > 1) {
         params.softmax_lseaccum_ptr = softmax_lseaccum_ptr;

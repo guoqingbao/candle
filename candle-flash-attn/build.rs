@@ -8,42 +8,66 @@ const CUTLASS_COMMIT: &str = "7d49e6c7e2f8896c47f586706e67e1fb215529dc";
 
 fn main() -> Result<()> {
     let flash_decoding_enabled = std::env::var("CARGO_FEATURE_FLASH_DECODING").is_ok();
-    // Always-included kernels
-    let mut kernel_files = vec![
-        "kernels/flash_api.cu",
-        "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim96_fp16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
-        "kernels/flash_fwd_hdim96_bf16_causal_sm80.cu",
+    let flash_context_enabled = std::env::var("CARGO_FEATURE_FLASH_CONTEXT").is_ok();
 
-        "kernels/flash_fwd_hdim128_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim160_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim192_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim256_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim32_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim64_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim96_fp16_sm80.cu",
-        "kernels/flash_fwd_hdim128_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim160_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim192_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim256_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim32_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim64_bf16_sm80.cu",
-        "kernels/flash_fwd_hdim96_bf16_sm80.cu",
-    ];
+    // Always-included kernels
+    let mut kernel_files = if !flash_context_enabled {
+        vec![
+            "kernels/flash_api.cu",
+            "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim96_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim96_bf16_causal_sm80.cu",
+
+            "kernels/flash_fwd_hdim128_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim160_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim192_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim256_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim32_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim64_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim96_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim128_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim160_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim192_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim256_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim32_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim64_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim96_bf16_sm80.cu",
+        ]
+    } else {
+        vec![
+            "kernels/flash_api.cu",
+            "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
+            "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
+
+            "kernels/flash_fwd_hdim128_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim64_fp16_sm80.cu",
+            "kernels/flash_fwd_hdim128_bf16_sm80.cu",
+            "kernels/flash_fwd_hdim64_bf16_sm80.cu",
+        ]
+    };
 
     // Conditionally include decoding kernels
-    if flash_decoding_enabled {
+    if flash_context_enabled {
+        kernel_files.extend_from_slice(&[
+            "kernels/flash_fwd_split_hdim128_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim64_fp16_sm80.cu",
+            "kernels/flash_fwd_split_hdim128_bf16_sm80.cu",
+            "kernels/flash_fwd_split_hdim64_bf16_sm80.cu",
+        ]);
+    } else if flash_decoding_enabled {
         kernel_files.extend_from_slice(&[
             "kernels/flash_fwd_split_hdim128_fp16_sm80.cu",
             "kernels/flash_fwd_split_hdim160_fp16_sm80.cu",
@@ -134,6 +158,10 @@ fn main() -> Result<()> {
     }
     if flash_decoding_enabled {
         builder = builder.arg("-DFLASH_DECODING");
+    }
+
+    if flash_context_enabled {
+        builder = builder.arg("-DFLASH_CONTEXT");
     }
 
     let out_file = build_dir.join("libflashattention.a");

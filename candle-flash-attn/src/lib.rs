@@ -1467,15 +1467,14 @@ impl FlashAttnCache {
         let is_bf16 = if is_bf16 { 1 } else { 0 };
         // println!("seqlen_q: {:?}, seqlen_k {:?}", seqlen_q, seqlen_k);
 
-        let num_splits = 1;
-        // get_num_splits(
-        //     batch_size,
-        //     num_heads,
-        //     head_size,
-        //     seqlen_k,
-        //     seqlen_q,
-        //     num_sm as usize,
-        // );
+        let num_splits = get_num_splits(
+            batch_size,
+            num_heads,
+            head_size,
+            seqlen_k,
+            seqlen_q,
+            num_sm as usize,
+        );
 
         let (softmax_lseaccum_ptr, oaccum_ptr) = if num_splits > 1 {
             let softmax_lse_accum = dev

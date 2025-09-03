@@ -4976,3 +4976,170 @@ extern "C" __global__ void indexed_moe_forward_q8_0_q8_1_b8(
     indexed_moe_forward_batch<8, 8, QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
         (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
 }
+
+/**
+ * @brief A lookup table for converting a 4-bit MXFP4 value to a 32-bit float.
+ *
+ * MXFP4 (F4E2M1) has 1 sign bit, 2 exponent bits, and 1 mantissa bit.
+ * The values are pre-calculated based on the user's provided Rust implementation logic,
+ * which appears to be a common variant of the format. Storing this in constant
+ * memory provides fast, uniform access for all threads in a warp.
+ *
+ * Index (4-bit value) -> float value
+ */
+__constant__ float d_mxfp4_to_float_lut[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+    // Note: The negative zero from the spec is treated as 0.0f here.
+    // The spec's NaN/Inf values are replaced by +/-6.0f to match the apparent
+    // logic from the sample code.
+};
+
+/**
+ * @brief Converts an 8-bit F8E8M0 scale value to a 32-bit float.
+ *
+ * F8E8M0 is an 8-bit floating-point format with 8 exponent bits and 0 mantissa bits.
+ * The conversion formula is 2^(value - bias), where the bias is 127.
+ * The value 0xFF (255) is treated as NaN, as seen in the reference code.
+ *
+ * @param scale_val The 8-bit F8E8M0 scale value.
+ * @return The corresponding 32-bit float value.
+ */
+__device__ __forceinline__ float f8e8m0_to_float(unsigned char scale_val) {
+    if (scale_val == 0xFF) {
+        return NAN;
+    }
+    // Efficiently compute 2^(scale_val - 127) using ldexpf
+    // ldexpf(x, exp) computes x * 2^exp
+    return ldexpf(1.0f, static_cast<int>(scale_val) - 127);
+}
+
+
+//----------------------------------------------------------------------------
+// MXFP4 Dequantization Kernel
+//----------------------------------------------------------------------------
+
+/**
+ * @brief Dequantizes MXFP4 weights to a specified output type (fp32, fp16, or bf16).
+ *
+ * This kernel uses a grid-stride loop pattern where each thread is responsible
+ * for dequantizing one output element. This ensures that all elements are processed
+ * regardless of the grid size.
+ *
+ * The core logic for each thread is:
+ * 1. Calculate its global output index `idx`.
+ * 2. Determine the corresponding row and column in the weight matrix.
+ * 3. Identify the weight group and find the associated scale index.
+ * 4. Fetch the F8E8M0 scale and convert it to float.
+ * 5. Fetch the packed byte containing two MXFP4 weights.
+ * 6. Extract the correct 4-bit nibble for the current element.
+ * 7. Convert the 4-bit weight to float using the lookup table.
+ * 8. Multiply the weight by the scale.
+ * 9. Cast to the target output type and store the result.
+ *
+ * @author
+ *   Guoqing Bao
+ *   Part of the project: https://github.com/guoqingbao/vllm.rs/
+ * @tparam T The output data type (float, __half, or __nv_bfloat16).
+ * @param out Pointer to the output tensor on the GPU.
+ * @param w_q Pointer to the quantized MXFP4 input weights on the GPU.
+ * @param scales Pointer to the F8E8M0 scales on the GPU.
+ * @param total_elements The total number of output elements.
+ * @param weights_per_row The number of dequantized weights in a single row (unpacked).
+ * @param packed_row_len The length of a packed row in bytes.
+ * @param groups_per_row The number of groups in a single row.
+ * @param group_size The number of weights per group.
+ */
+template <typename T>
+__device__ __forceinline__ void dequantize_mxfp4_kernel(
+    T* __restrict__ out,
+    const unsigned char* __restrict__ w_q,
+    const unsigned char* __restrict__ scales,
+    const long long total_elements,
+    const int weights_per_row,
+    const int packed_row_len,
+    const int groups_per_row,
+    const int group_size)
+{
+    // Using a grid-stride loop to process all elements, making the kernel
+    // robust to different grid sizes.
+    for (long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total_elements;
+         idx += gridDim.x * blockDim.x)
+    {
+        // 1. Calculate row and column for the current output element
+        const int row = idx / weights_per_row;
+        const int col = idx % weights_per_row;
+
+        // 2. Calculate the index for the scale factor
+        const int group_idx_in_row = col / group_size;
+        const int scale_idx = row * groups_per_row + group_idx_in_row;
+
+        // 3. Fetch and convert the scale
+        const float scale_val = f8e8m0_to_float(scales[scale_idx]);
+
+        // 4. Locate and fetch the packed byte containing the weight
+        // Each byte contains two 4-bit weights.
+        const int byte_idx_in_row = col / 2;
+        const unsigned char packed_byte = w_q[row * packed_row_len + byte_idx_in_row];
+
+        // 5. Extract the 4-bit nibble
+        // If col is even, we take the lower 4 bits. If odd, the upper 4 bits.
+        const unsigned char fp4_bits = (col % 2 == 0)
+            ? (packed_byte & 0x0F)
+            : ((packed_byte >> 4) & 0x0F);
+
+        // 6. Convert the 4-bit weight to float using the constant memory LUT
+        const float weight_val = d_mxfp4_to_float_lut[fp4_bits];
+
+        // 7. Perform dequantization and store the result
+        // The static_cast handles conversion to the target type T.
+        out[idx] = static_cast<T>(weight_val * scale_val);
+    }
+}
+
+extern "C" __global__ void dequantize_mxfp4_f16(
+    __half* __restrict__ out,
+    const unsigned char* __restrict__ w_q,
+    const unsigned char* __restrict__ scales,
+    const long long total_elements,
+    const int weights_per_row,
+    const int packed_row_len,
+    const int groups_per_row,
+    const int group_size) 
+{
+    dequantize_mxfp4_kernel<__half>(
+        out, w_q, scales,
+        total_elements, weights_per_row,
+        packed_row_len, groups_per_row, group_size);
+}
+
+extern "C" __global__ void dequantize_mxfp4_bf16(
+    __nv_bfloat16* __restrict__ out,
+    const unsigned char* __restrict__ w_q,
+    const unsigned char* __restrict__ scales,
+    const long long total_elements,
+    const int weights_per_row,
+    const int packed_row_len,
+    const int groups_per_row,
+    const int group_size) {
+    dequantize_mxfp4_kernel<__nv_bfloat16>(
+        out, w_q, scales,
+        total_elements, weights_per_row,
+        packed_row_len, groups_per_row, group_size);
+}
+
+extern "C" __global__ void dequantize_mxfp4_f32(
+        float* __restrict__ out,
+    const unsigned char* __restrict__ w_q,
+    const unsigned char* __restrict__ scales,
+    const long long total_elements,
+    const int weights_per_row,
+    const int packed_row_len,
+    const int groups_per_row,
+    const int group_size) {
+        dequantize_mxfp4_kernel<float>(
+        out, w_q, scales,
+        total_elements, weights_per_row,
+        packed_row_len, groups_per_row, group_size);
+}

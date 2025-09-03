@@ -4800,7 +4800,7 @@ extern "C" __global__ void indexed_moe_forward_q8_0_q8_1(
 // Each block handles: up to 8 batch items (one per warp) × 1 expert (grid.z)
 // blockDim = (32, 8, 1)   // 8 warps
 // grid    = (ceil_div(n, rows_per_block), ceil_div(batch, 8), topk)
-template <int ncols_y, int topk, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+template <int ncols_y, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
 __device__ __forceinline__ void indexed_moe_forward_batch(
     const void * __restrict__ all_weights,    // [num_experts, n, k] in qK
     const void * __restrict__ all_inputs,     // [batch, input_dim1, k] in q8_1
@@ -4809,6 +4809,7 @@ __device__ __forceinline__ void indexed_moe_forward_batch(
     const int n,
     const int k,
     const int batch,
+    const int topk, 
     const int k_padded,
     const int input_dim1
 ) {
@@ -4897,8 +4898,8 @@ extern "C" __global__ void indexed_moe_forward_q2k_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK_K, QI2_K, block_q2_K, VDR_Q2_K_Q8_1_MMVQ, vec_dot_q2_K_q8_1>
-        (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
+    indexed_moe_forward_batch<8, QK_K, QI2_K, block_q2_K, VDR_Q2_K_Q8_1_MMVQ, vec_dot_q2_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
 
 extern "C" __global__ void indexed_moe_forward_q3k_q8_1_b8(
@@ -4912,8 +4913,8 @@ extern "C" __global__ void indexed_moe_forward_q3k_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK_K, QI3_K, block_q3_K, VDR_Q3_K_Q8_1_MMVQ, vec_dot_q3_K_q8_1>
-        (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
+    indexed_moe_forward_batch<8, QK_K, QI3_K, block_q3_K, VDR_Q3_K_Q8_1_MMVQ, vec_dot_q3_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
 
 extern "C" __global__ void indexed_moe_forward_q4k_q8_1_b8(
@@ -4927,9 +4928,9 @@ extern "C" __global__ void indexed_moe_forward_q4k_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK_K, QI4_K, block_q4_K, VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
+    indexed_moe_forward_batch<8, QK_K, QI4_K, block_q4_K, VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
         all_weights, all_inputs, indices, all_outputs,
-        n, k, batch, k_padded, input_dim1);
+        n, k, batch, topk, k_padded, input_dim1);
 }
 
 extern "C" __global__ void indexed_moe_forward_q5k_q8_1_b8(
@@ -4943,8 +4944,8 @@ extern "C" __global__ void indexed_moe_forward_q5k_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK_K, QI5_K, block_q5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1>
-        (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
+    indexed_moe_forward_batch<8, QK_K, QI5_K, block_q5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
 
 extern "C" __global__ void indexed_moe_forward_q6k_q8_1_b8(
@@ -4958,8 +4959,8 @@ extern "C" __global__ void indexed_moe_forward_q6k_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>
-        (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
+    indexed_moe_forward_batch<8, QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
 
 extern "C" __global__ void indexed_moe_forward_q8_0_q8_1_b8(
@@ -4973,8 +4974,8 @@ extern "C" __global__ void indexed_moe_forward_q8_0_q8_1_b8(
     const int topk,
     const int k_padded,
     const int input_dim1) {
-    indexed_moe_forward_batch<8, 8, QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
-        (all_weights, all_inputs, indices, all_outputs, n, k, batch, k_padded, input_dim1);     
+    indexed_moe_forward_batch<8, QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
+        (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
 
 /**

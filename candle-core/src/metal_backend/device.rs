@@ -7,6 +7,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use super::MetalError;
 
+// iOS and macOS have different storage modes for shared buffers.
+// due to the GPU/CPU management differences.
+#[cfg(target_os = "ios")]
+pub const SHARED_BUFFER_STORAGE_MODE: MTLResourceOptions = MTLResourceOptions::StorageModeShared;
+#[cfg(not(target_os = "ios"))]
+pub const SHARED_BUFFER_STORAGE_MODE: MTLResourceOptions = MTLResourceOptions::StorageModeManaged;
+
 /// Unique identifier for cuda devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceId(usize);
@@ -255,7 +262,7 @@ impl MetalDevice {
     /// synchronization when the CPU memory is modified
     /// Used as a bridge to gather data back from the GPU
     pub fn new_buffer_managed(&self, size: NSUInteger) -> Result<Arc<Buffer>> {
-        self.allocate_buffer(size, MTLResourceOptions::StorageModeManaged, "managed")
+        self.allocate_buffer(size,SHARED_BUFFER_STORAGE_MODE, "managed")
     }
 
     /// Creates a new buffer from data.
@@ -268,12 +275,12 @@ impl MetalDevice {
         let new_buffer = self.device.new_buffer_with_data(
             data.as_ptr().cast(),
             size,
-            MTLResourceOptions::StorageModeManaged,
+           SHARED_BUFFER_STORAGE_MODE,
         );
         let mut buffers = self.buffers.write().map_err(MetalError::from)?;
 
         let subbuffers = buffers
-            .entry((size, MTLResourceOptions::StorageModeManaged))
+            .entry((size,SHARED_BUFFER_STORAGE_MODE))
             .or_insert(vec![]);
 
         let new_buffer = Arc::new(new_buffer);

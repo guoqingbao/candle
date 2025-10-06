@@ -591,7 +591,7 @@ impl<'a> Layer<'a> {
         self.cnt += 1;
     }
 
-    fn next(&mut self) -> VarBuilder {
+    fn next(&mut self) -> VarBuilder<'a> {
         let vb = self.vb.pp(self.cnt.to_string());
         self.cnt += 1;
         vb

@@ -175,7 +175,7 @@ impl GgmlType for BlockQ4_0 {
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
         let qk = Self::BLCK_SIZE;
-        if k % qk != 0 {
+        if !k.is_multiple_of(qk) {
             crate::bail!("dequantize_row_q4_0: {k} is not divisible by {qk}")
         }
 
@@ -198,7 +198,7 @@ impl GgmlType for BlockQ4_0 {
         // quantize_row_q4_0
         let qk = Self::BLCK_SIZE;
         let k = xs.len();
-        if k % qk != 0 {
+        if !k.is_multiple_of(qk) {
             crate::bail!("{k} is not divisible by {}", qk);
         };
         let nb = k / qk;
@@ -248,7 +248,7 @@ impl GgmlType for BlockQ4_0 {
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = QK8_0;
-        if n % QK8_0 != 0 {
+        if !n.is_multiple_of(QK8_0) {
             crate::bail!("vec_dot_q4_0_q8_0: {n} is not divisible by {qk}")
         }
         // Generic implementation.
@@ -278,11 +278,11 @@ impl GgmlType for BlockQ4_1 {
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         // ggml_vec_dot_q4_1_q8_1
         let qk = QK8_1;
-        if n % qk != 0 {
+        if !n.is_multiple_of(qk) {
             crate::bail!("vec_dot_q4_1_q8_1: {n} is not divisible by {qk}")
         }
         let nb = n / qk;
-        if nb % 2 != 0 {
+        if !nb.is_multiple_of(2) {
             crate::bail!("vec_dot_q4_1_q8_1: {n}, nb is not divisible by 2")
         }
 
@@ -340,7 +340,7 @@ impl GgmlType for BlockQ4_1 {
     // https://github.com/ggerganov/llama.cpp/blob/468ea24fb4633a0d681f7ac84089566c1c6190cb/ggml.c#L1545
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK4_1 != 0 {
+        if !k.is_multiple_of(QK4_1) {
             crate::bail!("dequantize_row_q4_1: {k} is not divisible by {QK4_1}");
         }
 
@@ -368,11 +368,11 @@ impl GgmlType for BlockQ5_0 {
 
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = Self::BLCK_SIZE;
-        if n % Self::BLCK_SIZE != 0 {
+        if !n.is_multiple_of(Self::BLCK_SIZE) {
             crate::bail!("vec_dot_q5_0_q8_0: {n} is not divisible by {qk}")
         }
         let nb = n / qk;
-        if nb % 2 != 0 {
+        if !nb.is_multiple_of(2) {
             crate::bail!("vec_dot_q5_0_q8_0: {n}, nb is not divisible by 2")
         }
         Self::vec_dot_unopt(n, xs, ys)
@@ -439,7 +439,7 @@ impl GgmlType for BlockQ5_0 {
     // https://github.com/ggerganov/llama.cpp/blob/468ea24fb4633a0d681f7ac84089566c1c6190cb/ggml.c#L1566
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK5_0 != 0 {
+        if !k.is_multiple_of(QK5_0) {
             crate::bail!("dequantize_row_q5_0: {k} is not divisible by {QK5_0}");
         }
 
@@ -474,11 +474,11 @@ impl GgmlType for BlockQ5_1 {
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = Self::BLCK_SIZE;
-        if n % Self::BLCK_SIZE != 0 {
+        if !n.is_multiple_of(Self::BLCK_SIZE) {
             crate::bail!("vec_dot_q5_1_q8_1: {n} is not divisible by {qk}")
         }
         let nb = n / qk;
-        if nb % 2 != 0 {
+        if !nb.is_multiple_of(2) {
             crate::bail!("vec_dot_q5_1_q8_1: {n}, nb is not divisible by 2")
         }
 
@@ -546,7 +546,7 @@ impl GgmlType for BlockQ5_1 {
     // https://github.com/ggerganov/llama.cpp/blob/468ea24fb4633a0d681f7ac84089566c1c6190cb/ggml.c#L1592
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK5_1 != 0 {
+        if !k.is_multiple_of(QK5_1) {
             crate::bail!("dequantize_row_q5_1: {k} is not divisible by {QK5_1}");
         }
 
@@ -579,7 +579,7 @@ impl GgmlType for BlockQ8_0 {
     // https://github.com/ggerganov/llama.cpp/blob/468ea24fb4633a0d681f7ac84089566c1c6190cb/ggml.c#L1619
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK8_0 != 0 {
+        if !k.is_multiple_of(QK8_0) {
             crate::bail!("dequantize_row_q8_0: {k} is not divisible by {QK8_0}");
         }
 
@@ -598,7 +598,7 @@ impl GgmlType for BlockQ8_0 {
     fn from_float(xs: &[f32], ys: &mut [Self]) -> Result<()> {
         // quantize_row_q8_0
         let k = xs.len();
-        if k % Self::BLCK_SIZE != 0 {
+        if !k.is_multiple_of(Self::BLCK_SIZE) {
             crate::bail!("{k} is not divisible by {}", Self::BLCK_SIZE);
         };
         let nb = k / Self::BLCK_SIZE;
@@ -642,7 +642,7 @@ impl GgmlType for BlockQ8_0 {
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = QK8_0;
-        if n % QK8_0 != 0 {
+        if !n.is_multiple_of(QK8_0) {
             crate::bail!("vec_dot_q8_0_q8_0: {n} is not divisible by {qk}")
         }
 
@@ -727,7 +727,7 @@ impl GgmlType for BlockQ2K {
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q2k_q8k: {n} is not divisible by {QK_K}")
         }
 
@@ -966,7 +966,7 @@ impl GgmlType for BlockQ3K {
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q3k_q8k: {n} is not divisible by {QK_K}")
         }
 
@@ -1351,7 +1351,7 @@ impl GgmlType for BlockQ4K {
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q4k_q8k: {n} is not divisible by {QK_K}")
         }
 
@@ -1614,7 +1614,7 @@ impl GgmlType for BlockQ5K {
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q5k_q8k: {n} is not divisible by {QK_K}")
         }
 
@@ -1927,7 +1927,7 @@ impl GgmlType for BlockQ6K {
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q6k_q8k: {n} is not divisible by {QK_K}")
         }
 
@@ -2146,7 +2146,7 @@ impl GgmlType for BlockQ6K {
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L1067
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK_K != 0 {
+        if !k.is_multiple_of(QK_K) {
             crate::bail!("dequantize_row_q6k: {k} is not divisible by {QK_K}")
         }
         for (idx_x, x) in xs.iter().enumerate() {
@@ -2198,7 +2198,7 @@ impl GgmlType for BlockQ8K {
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> Result<f32> {
         let qk = QK_K;
-        if n % QK_K != 0 {
+        if !n.is_multiple_of(QK_K) {
             crate::bail!("vec_dot_q8k_q8k: {n} is not divisible by {qk}")
         }
 
@@ -2218,7 +2218,7 @@ impl GgmlType for BlockQ8K {
 
     fn from_float(xs: &[f32], ys: &mut [Self]) -> Result<()> {
         let k = xs.len();
-        if k % QK_K != 0 {
+        if !k.is_multiple_of(QK_K) {
             crate::bail!("quantize_row_q8k: {k} is not divisible by {QK_K}")
         }
         for (i, y) in ys.iter_mut().enumerate() {
@@ -2257,7 +2257,7 @@ impl GgmlType for BlockQ8K {
 
     fn to_float(xs: &[Self], ys: &mut [f32]) -> Result<()> {
         let k = ys.len();
-        if k % QK_K != 0 {
+        if !k.is_multiple_of(QK_K) {
             crate::bail!("dequantize_row_q8k: {k} is not divisible by {QK_K}")
         }
         for (i, x) in xs.iter().enumerate() {
@@ -2332,10 +2332,7 @@ pub fn matmul_f16<T: GgmlType>(
     for row_idx in 0..m {
         let lhs_b = &mut lhs_b[row_idx * k_in_lhs_blocks..(row_idx + 1) * k_in_lhs_blocks];
         let lhs = &lhs[row_idx * k..(row_idx + 1) * k];
-        T::VecDotType::from_float(
-            &lhs.into_iter().map(|&x| x.to_f32()).collect::<Vec<_>>(),
-            lhs_b,
-        )?
+        T::VecDotType::from_float(&lhs.iter().map(|&x| x.to_f32()).collect::<Vec<_>>(), lhs_b)?
     }
     let lhs_b = lhs_b.as_slice();
 

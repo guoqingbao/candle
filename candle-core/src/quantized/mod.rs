@@ -227,7 +227,7 @@ impl QStorage {
         }
     }
 
-    fn data(&self) -> Result<Cow<[u8]>> {
+    fn data(&self) -> Result<Cow<'_, [u8]>> {
         match self {
             QStorage::Cpu(storage) => {
                 let data_ptr = storage.as_ptr();
@@ -464,7 +464,7 @@ fn check_shape(shape: &Shape, block_size: usize) -> Result<()> {
     if dims.is_empty() {
         crate::bail!("scalar tensor cannot be quantized {shape:?}")
     }
-    if dims[dims.len() - 1] % block_size != 0 {
+    if !dims[dims.len() - 1].is_multiple_of(block_size) {
         crate::bail!(
             "quantized tensor must have their last dim divisible by block size {shape:?} {}",
             block_size
@@ -486,7 +486,7 @@ impl QTensor {
         check_shape(shape, block_size)?;
         let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
         let elem_count = shape.elem_count();
-        if elem_count % block_size != 0 {
+        if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
                 "tensor size ({shape:?}) is not divisible by block size {}",
                 block_size
@@ -521,7 +521,7 @@ impl QTensor {
         check_shape(shape, block_size)?;
         let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
         let elem_count = shape.elem_count();
-        if elem_count % block_size != 0 {
+        if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
                 "tensor size ({shape:?}) is not divisible by block size {}",
                 block_size
@@ -563,7 +563,7 @@ impl QTensor {
         check_shape(shape, block_size)?;
         let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
         let elem_count = shape.elem_count();
-        if elem_count % block_size != 0 {
+        if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
                 "tensor size ({shape:?}) is not divisible by block size {}",
                 block_size
@@ -591,7 +591,7 @@ impl QTensor {
         check_shape(shape, block_size)?;
         let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
         let elem_count = shape.elem_count();
-        if elem_count % block_size != 0 {
+        if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
                 "tensor size ({shape:?}) is not divisible by block size {}",
                 block_size
@@ -658,11 +658,11 @@ impl QTensor {
             QStorage::Cuda(s) => match (&*x.storage(), &*ids.storage()) {
                 (Storage::Cuda(x_storage), Storage::Cuda(ids_storage)) => {
                     let (storage, out_shape) = s.indexed_moe_forward(
-                        &self.shape(),
-                        &x_storage,
-                        &x.layout(),
-                        &ids_storage,
-                        &ids.layout(),
+                        self.shape(),
+                        x_storage,
+                        x.layout(),
+                        ids_storage,
+                        ids.layout(),
                     )?;
                     Ok(crate::tensor::from_storage(
                         Storage::Cuda(storage),

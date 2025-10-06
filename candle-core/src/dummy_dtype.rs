@@ -52,7 +52,7 @@ macro_rules! dummy_with_dtype {
                 )
             }
 
-            fn cpu_storage_ref(_data: &[Self]) -> crate::CpuStorageRef {
+            fn cpu_storage_ref(_data: &[Self]) -> crate::CpuStorageRef<'_> {
                 panic!(
                     "{} is a dummy type and does not support storage",
                     stringify!($ty)

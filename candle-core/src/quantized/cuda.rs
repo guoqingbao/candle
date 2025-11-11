@@ -510,6 +510,31 @@ fn indexed_moe_forward_fused_q8_1_input(
     ))
 }
 
+fn quantize_q6_k(
+    src: &CudaSlice<f32>,
+    dst: &CudaSlice<u8>,
+    elem_count: usize,
+    dev: &CudaDevice,
+) -> Result<()> {
+    use cudarc::driver::LaunchAsync;
+
+    assert!(
+        elem_count % CUDA_QUANTIZE_BLOCK_SIZE == 0,
+        "invalid tensor for quantization!"
+    );
+    let nb_k = elem_count / CUDA_QUANTIZE_BLOCK_SIZE; // Number of blocks along the k-dimension
+    let func = dev.get_or_load_func("quantize_q6_k", candle_kernels::QUANTIZED)?;
+
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (nb_k as u32, 1, 1),
+        block_dim: (64 as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let params = (src, dst, 1, elem_count);
+    unsafe { func.launch(cfg, params) }.w()?;
+    Ok(())
+}
+
 impl QCudaStorage {
     pub fn indexed_moe_forward(
         &self,
@@ -569,6 +594,11 @@ impl QCudaStorage {
 
     pub fn device(&self) -> &CudaDevice {
         &self.device
+    }
+
+    pub fn device_ptr(&self) -> Result<*const u8> {
+        use cudarc::driver::DevicePtr;
+        Ok(*self.data.inner.device_ptr() as *const u8)
     }
 
     pub fn dequantize(&self, elem_count: usize) -> Result<CudaStorage> {
@@ -635,8 +665,12 @@ impl QCudaStorage {
                 //dedicated gpu kernel for q4k quantization
                 if self.dtype == GgmlDType::Q4K {
                     return quantize_q4_k(&data, &self.data.inner, data.len(), &self.device);
+                } else if self.dtype == GgmlDType::Q6K {
+                    return quantize_q6_k(&data, &self.data.inner, data.len(), &self.device);
                 } else if self.dtype == GgmlDType::Q8_0 {
                     return quantize_q8_0(&data, &self.data.inner, data.len(), 1, &self.device);
+                } else if self.dtype == GgmlDType::Q8_1 {
+                    return quantize_q8_1(&data, &mut self.data.inner, data.len(), 1, &self.device);
                 }
                 self.device.dtoh_sync_copy(data).w()?
             }

@@ -4564,6 +4564,188 @@ extern "C" __global__ void quantize_q8_0(
 }
 
 
+/**
+ * @brief CUDA kernel to quantize one block of 256 floats into the Q6_K format.
+ *
+ * Each CUDA block of 64 threads processes one Q6_K block (256 floats).
+ * @author
+ *   Guoqing Bao
+ *   Part of the project: https://github.com/guoqingbao/vllm.rs/
+ * @param xx   Input tensor pointer (float*).
+ * @param vy   Output tensor pointer (void*, assumed to be block_q6_K*).
+ * @param n    Number of rows in the input tensor.
+ * @param k    Number of columns (features) in the input tensor (must be a multiple of QK_K).
+ */
+extern "C" __global__ void quantize_q6_k(const float * __restrict__ xx, void * __restrict__ vy, int n, int k) {
+    
+    // --- Shared Memory ---
+    // Shared memory for finding the block-level max absolute value
+    __shared__ float s_block_max[64];
+    // Shared memory for finding the 16 sub-block max absolute values
+    __shared__ float s_sub_max[64];
+    // Shared memory for storing the 16 quantized sub-block scales
+    __shared__ int8_t s_scales[16];
+    // Shared memory for the block-level inverse scale (id)
+    __shared__ float s_id;
+
+    // --- Thread and Block Indexing ---
+    const int tid = threadIdx.x; // Thread ID (0-63)
+    
+    // blockIdx.x maps to the k-dimension (column blocks)
+    // blockIdx.y maps to the n-dimension (rows)
+    const int i_block = blockIdx.x; // Block index along the k-dimension (0 to k/QK_K - 1)
+    const int i_row   = blockIdx.y; // Row index (0 to n - 1)
+
+    // Pointers to the current block's input and output
+    const float * x = xx + i_row * k + i_block * QK_K;
+    block_q6_K * y = ((block_q6_K *) vy) + i_row * (k / QK_K) + i_block;
+
+    // --- 1. Find Block-Level Max Absolute Value (amax) ---
+    // Each thread loads 4 values and finds its local max
+    float my_max = 0.0f;
+    my_max = fmaxf(my_max, fabsf(x[tid +   0]));
+    my_max = fmaxf(my_max, fabsf(x[tid +  64]));
+    my_max = fmaxf(my_max, fabsf(x[tid + 128]));
+    my_max = fmaxf(my_max, fabsf(x[tid + 192]));
+    s_block_max[tid] = my_max;
+    __syncthreads();
+
+    // Parallel reduction in shared memory to find the block's amax
+    for (int s = 32; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_block_max[tid] = fmaxf(s_block_max[tid], s_block_max[tid + s]);
+        }
+        __syncthreads();
+    }
+    // amax is now in s_block_max[0]
+
+    // --- 2. Calculate and Store Block-Level Scale (d) and Inverse Scale (id) ---
+    if (tid == 0) {
+        const float amax = s_block_max[0];
+        // Dequant logic: y = d * (sc * q_s)
+        // Max possible value is d * (127 * 31)
+        const float d = amax / (127.0f * 31.0f);
+        y->d = __float2half_rn(d);
+        s_id = (d > 0.0f) ? (1.0f / d) : 0.0f;
+    }
+    __syncthreads();
+    
+    // All threads load the inverse scale
+    const float id = s_id;
+
+    // --- 3. Find and Store Sub-Block Scales (sc) ---
+    // 64 threads, 16 sub-blocks. 4 threads per sub-block.
+    const int j = tid / 4;       // Sub-block index (0-15)
+    const int i_in_sub = tid % 4; // Thread's index within the sub-block (0-3)
+
+    // Each thread loads 4 values from its assigned sub-block
+    // (j*16) is the start of the sub-block
+    // (i_in_sub * 4) is not right. (i_in_sub) is the offset.
+    // Each thread loads 4 values:
+    const float v0 = fabsf(x[j*16 + i_in_sub +  0] * id);
+    const float v1 = fabsf(x[j*16 + i_in_sub +  4] * id);
+    const float v2 = fabsf(x[j*16 + i_in_sub +  8] * id);
+    const float v3 = fabsf(x[j*16 + i_in_sub + 12] * id);
+    
+    // Find max of the 4 scaled values
+    s_sub_max[tid] = fmaxf(fmaxf(v0, v1), fmaxf(v2, v3));
+    __syncthreads();
+
+    // The first thread in each group of 4 reduces its group's max
+    if (i_in_sub == 0) {
+        // Find max among the 4 threads for this sub-block
+        const float s_amax = fmaxf(fmaxf(s_sub_max[tid], s_sub_max[tid+1]), 
+                                   fmaxf(s_sub_max[tid+2], s_sub_max[tid+3]));
+
+        // Quantize the sub-block scale
+        // Logic: f_scaled = sc * q_s. Max f_scaled is s_amax. Max q_s is 31.
+        // So, sc = s_amax / 31.0
+        const float sc_f = roundf(s_amax / 31.0f);
+
+        // Clamp to 8-bit signed integer range and store
+        const int8_t sc_val = (int8_t)fminf(fmaxf(sc_f, -128.0f), 127.0f);
+        s_scales[j] = sc_val;
+        y->scales[j] = sc_val;
+    }
+    __syncthreads();
+
+    // --- 4. Quantize Values and Pack into ql and qh ---
+    // Use the same thread mapping as the dequantization kernel
+    const int ip = tid / 32;       // 0 or 1 (for first or second 128 values)
+    const int il = tid - 32 * ip; // 0-31
+
+    // Calculate indices for the 4 values this thread will quantize
+    const int val_idx_0 = 128*ip + il +  0;
+    const int val_idx_1 = 128*ip + il + 32;
+    const int val_idx_2 = 128*ip + il + 64;
+    const int val_idx_3 = 128*ip + il + 96;
+
+    // Find the corresponding sub-block scales
+    // This logic matches the 'is' and 'sc[0/2/4/6]' access in the dequant kernel
+    const int is = 8*ip + il/16;
+    const int sc_idx_0 = is + 0;
+    const int sc_idx_1 = is + 2;
+    const int sc_idx_2 = is + 4;
+    const int sc_idx_3 = is + 6;
+
+    // Get scales from shared memory
+    const float sc_0 = (float)s_scales[sc_idx_0];
+    const float sc_1 = (float)s_scales[sc_idx_1];
+    const float sc_2 = (float)s_scales[sc_idx_2];
+    const float sc_3 = (float)s_scales[sc_idx_3];
+
+    // Calculate inverse scales
+    const float isc_0 = (sc_0 != 0.0f) ? 1.0f / sc_0 : 0.0f;
+    const float isc_1 = (sc_1 != 0.0f) ? 1.0f / sc_1 : 0.0f;
+    const float isc_2 = (sc_2 != 0.0f) ? 1.0f / sc_2 : 0.0f;
+    const float isc_3 = (sc_3 != 0.0f) ? 1.0f / sc_3 : 0.0f;
+
+    // Quantize the 4 values
+    // val_q = (x * id) / sc = x / d / sc
+    // This value should be in the range [-31, 31]
+    const float val_q_0 = x[val_idx_0] * id * isc_0;
+    const float val_q_1 = x[val_idx_1] * id * isc_1;
+    const float val_q_2 = x[val_idx_2] * id * isc_2;
+    const float val_q_3 = x[val_idx_3] * id * isc_3;
+
+    // Round and clamp to 6-bit signed range [-32, 31]
+    const int8_t q_s_0 = (int8_t)fminf(fmaxf(roundf(val_q_0), -32.0f), 31.0f);
+    const int8_t q_s_1 = (int8_t)fminf(fmaxf(roundf(val_q_1), -32.0f), 31.0f);
+    const int8_t q_s_2 = (int8_t)fminf(fmaxf(roundf(val_q_2), -32.0f), 31.0f);
+    const int8_t q_s_3 = (int8_t)fminf(fmaxf(roundf(val_q_3), -32.0f), 31.0f);
+
+    // Shift to 6-bit unsigned range [0, 63]
+    const uint8_t q_val_0 = (uint8_t)(q_s_0 + 32);
+    const uint8_t q_val_1 = (uint8_t)(q_s_1 + 32);
+    const uint8_t q_val_2 = (uint8_t)(q_s_2 + 32);
+    const uint8_t q_val_3 = (uint8_t)(q_s_3 + 32);
+
+    // Pack the 6-bit values into ql and qh
+    // This is the reverse of the dequantization packing
+    
+    // Pack lower 4 bits into ql
+    // ql[0]  = (q_val_0 lower 4 bits) | (q_val_2 lower 4 bits << 4)
+    // ql[32] = (q_val_1 lower 4 bits) | (q_val_3 lower 4 bits << 4)
+    const uint8_t ql_0  = (q_val_0 & 0x0F) | ((q_val_2 & 0x0F) << 4);
+    const uint8_t ql_32 = (q_val_1 & 0x0F) | ((q_val_3 & 0x0F) << 4);
+
+    // Pack upper 2 bits into qh
+    // qh[0] = (q_val_0 upper 2 bits) << 0 |
+    //         (q_val_1 upper 2 bits) << 2 |
+    //         (q_val_2 upper 2 bits) << 4 |
+    //         (q_val_3 upper 2 bits) << 6
+    const uint8_t qh_0 = ((q_val_0 >> 4) & 0x03) << 0 |
+                         ((q_val_1 >> 4) & 0x03) << 2 |
+                         ((q_val_2 >> 4) & 0x03) << 4 |
+                         ((q_val_3 >> 4) & 0x03) << 6;
+
+    // Write to global memory
+    y->ql[64*ip + il +  0] = ql_0;
+    y->ql[64*ip + il + 32] = ql_32;
+    y->qh[32*ip + il]      = qh_0;
+}
+
+
 
 /**
  * @brief Performs an indexed, batched matrix-vector multiplication for quantized tensors (for MoE models).

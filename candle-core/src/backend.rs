@@ -149,6 +149,9 @@ pub trait BackendDevice: Sized + std::fmt::Debug + Clone {
     fn same_device(&self, _: &Self) -> bool;
 
     fn zeros_impl(&self, _shape: &Shape, _dtype: DType) -> Result<Self::Storage>;
+    fn empty_impl(&self, _shape: &Shape, _dtype: DType, _sync_alloc: bool)
+        -> Result<Self::Storage>;
+    fn ones_impl(&self, _shape: &Shape, _dtype: DType) -> Result<Self::Storage>;
 
     /// # Safety
     /// This function is unsafe as it doesn't initialize the underlying data store.

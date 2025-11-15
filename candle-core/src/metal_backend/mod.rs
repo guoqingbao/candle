@@ -1971,7 +1971,7 @@ impl BackendDevice for MetalDevice {
 
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {
         let size = shape.elem_count() * dtype.size_in_bytes();
-        let buffer = self.allocate_zeros(size)?;
+        let buffer = self.allocate_zeros(size, false)?;
         Ok(MetalStorage::new(
             buffer,
             self.clone(),
@@ -1980,8 +1980,15 @@ impl BackendDevice for MetalDevice {
         ))
     }
 
-    fn empty_impl(&self, shape: &Shape, dtype: DType, _sync_alloc: bool) -> Result<MetalStorage> {
-        self.zeros_impl(shape, dtype)
+    fn empty_impl(&self, shape: &Shape, dtype: DType, sync_alloc: bool) -> Result<MetalStorage> {
+        let size = shape.elem_count() * dtype.size_in_bytes();
+        let buffer = self.allocate_zeros(size, sync_alloc)?;
+        Ok(MetalStorage::new(
+            buffer,
+            self.clone(),
+            shape.elem_count(),
+            dtype,
+        ))
     }
 
     fn ones_impl(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {

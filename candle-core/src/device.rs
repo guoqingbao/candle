@@ -440,7 +440,7 @@ impl Device {
                 Ok(Storage::Cuda(storage))
             }
             Device::Metal(device) => {
-                let storage = device.zeros_impl(shape, dtype)?;
+                let storage = device.empty_impl(shape, dtype, sync_alloc)?;
                 Ok(Storage::Metal(storage))
             }
         }

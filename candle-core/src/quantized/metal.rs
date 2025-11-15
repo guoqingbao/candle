@@ -13,7 +13,7 @@ pub struct QMetalStorage {
 impl QMetalStorage {
     pub fn zeros(device: &MetalDevice, elem_count: usize, dtype: GgmlDType) -> Result<Self> {
         let size = elem_count * dtype.type_size() / dtype.block_size();
-        let buffer = device.allocate_zeros(size)?;
+        let buffer = device.allocate_zeros(size, false)?;
         Ok(Self {
             buffer,
             device: device.clone(),

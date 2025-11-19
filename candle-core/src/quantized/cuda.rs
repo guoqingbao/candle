@@ -577,7 +577,7 @@ impl QCudaStorage {
         let size_in_bytes = ceil_div(el_count, dtype.block_size()) * dtype.type_size();
         let padded_size_in_bytes =
             ceil_div(el_count + MATRIX_ROW_PADDING, dtype.block_size()) * dtype.type_size();
-        let inner = device.alloc_zeros::<u8>(padded_size_in_bytes)?;
+        let inner = device.alloc_zeros::<u8>(padded_size_in_bytes, false)?;
         Ok(QCudaStorage {
             data: PaddedCudaSlice {
                 inner,

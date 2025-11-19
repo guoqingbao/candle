@@ -147,8 +147,9 @@ impl FlashAttn {
         let seqlen_k_rounded = round_multiple(seqlen_k, 128);
 
         let elem_count = out_shape.elem_count();
-        let dst = unsafe { dev.alloc::<T>(elem_count)? };
-        let softmax_lse = dev.alloc_zeros::<f32>(b_sz * 128 * num_heads * seqlen_q)?;
+        let dst = unsafe { dev.alloc::<T>(elem_count) };
+        let softmax_lse = dev
+            .alloc_zeros::<f32>(b_sz * 128 * num_heads * seqlen_q, false);
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 
@@ -718,7 +719,7 @@ impl FlashAttnVarLen {
 
         let elem_count = out_shape.elem_count();
         let dst = unsafe { dev.alloc::<T>(elem_count) }.w()?;
-        let softmax_lse = dev.alloc_zeros::<f32>(num_heads * total_q).w()?;
+        let softmax_lse = dev.alloc_zeros::<f32>(num_heads * total_q, false).w()?;
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 
@@ -1461,7 +1462,7 @@ impl FlashAttnCache {
         let elem_count = out_shape.elem_count();
         let dst = unsafe { dev.alloc::<T>(elem_count) }.w()?;
         let softmax_lse = dev
-            .alloc_zeros::<f32>(num_heads * batch_size * seqlen_q)
+            .alloc_zeros::<f32>(num_heads * batch_size * seqlen_q, false)
             .w()?;
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
@@ -1478,11 +1479,12 @@ impl FlashAttnCache {
 
         let (softmax_lseaccum_ptr, oaccum_ptr) = if num_splits > 1 {
             let softmax_lse_accum = dev
-                .alloc_zeros::<f32>(num_splits * batch_size * num_heads * seqlen_q)
+                .alloc_zeros::<f32>(num_splits * batch_size * num_heads * seqlen_q, false)
                 .w()?;
             let out_accum = dev
                 .alloc_zeros::<f32>(
                     num_splits * batch_size * num_heads * seqlen_q * head_size_rounded,
+                    false,
                 )
                 .w()?;
 

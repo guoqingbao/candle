@@ -242,11 +242,7 @@ impl crate::backend::BackendDevice for CudaDevice {
         fail!()
     }
 
-    fn zeros_impl(&self, _shape: &Shape, _dtype: DType) -> Result<Self::Storage> {
-        Err(Error::NotCompiledWithCudaSupport)
-    }
-
-    fn empty_impl(
+    fn zeros_impl(
         &self,
         _shape: &Shape,
         _dtype: DType,

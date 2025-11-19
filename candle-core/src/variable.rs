@@ -25,7 +25,7 @@ impl std::ops::Deref for Var {
 
 impl Var {
     pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
-        let inner = Tensor::zeros_impl(shape, dtype, device, true)?;
+        let inner = Tensor::zeros_impl(shape, dtype, device, false, true)?;
         Ok(Self(inner))
     }
 

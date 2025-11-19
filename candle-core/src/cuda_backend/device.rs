@@ -317,91 +317,53 @@ impl BackendDevice for CudaDevice {
         self.id == rhs.id
     }
 
-    fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<CudaStorage> {
+    fn zeros_impl(&self, shape: &Shape, dtype: DType, sync_alloc: bool) -> Result<CudaStorage> {
         let elem_count = shape.elem_count();
         let slice = match dtype {
             DType::U8 => {
-                let data = self.alloc_zeros::<u8>(elem_count)?;
+                let data = self.alloc_zeros::<u8>(elem_count, sync_alloc)?;
                 CudaStorageSlice::U8(data)
             }
             DType::U32 => {
-                let data = self.alloc_zeros::<u32>(elem_count)?;
+                let data = self.alloc_zeros::<u32>(elem_count, sync_alloc)?;
                 CudaStorageSlice::U32(data)
             }
             DType::I16 => {
-                let data = self.alloc_zeros::<i16>(elem_count)?;
+                let data = self.alloc_zeros::<i16>(elem_count, sync_alloc)?;
                 CudaStorageSlice::I16(data)
             }
             DType::I32 => {
-                let data = self.alloc_zeros::<i32>(elem_count)?;
+                let data = self.alloc_zeros::<i32>(elem_count, sync_alloc)?;
                 CudaStorageSlice::I32(data)
             }
             DType::I64 => {
-                let data = self.alloc_zeros::<i64>(elem_count)?;
+                let data = self.alloc_zeros::<i64>(elem_count, sync_alloc)?;
                 CudaStorageSlice::I64(data)
             }
             DType::BF16 => {
-                let data = self.alloc_zeros::<bf16>(elem_count)?;
+                let data = self.alloc_zeros::<bf16>(elem_count, sync_alloc)?;
                 CudaStorageSlice::BF16(data)
             }
             DType::F16 => {
-                let data = self.alloc_zeros::<f16>(elem_count)?;
+                let data = self.alloc_zeros::<f16>(elem_count, sync_alloc)?;
                 CudaStorageSlice::F16(data)
             }
             DType::F32 => {
-                let data = self.alloc_zeros::<f32>(elem_count)?;
+                let data = self.alloc_zeros::<f32>(elem_count, sync_alloc)?;
                 CudaStorageSlice::F32(data)
             }
             DType::F64 => {
-                let data = self.alloc_zeros::<f64>(elem_count)?;
+                let data = self.alloc_zeros::<f64>(elem_count, sync_alloc)?;
                 CudaStorageSlice::F64(data)
             }
             DType::F8E4M3 => {
-                let data = self.alloc_zeros::<F8E4M3>(elem_count)?;
+                let data = self.alloc_zeros::<F8E4M3>(elem_count, sync_alloc)?;
                 CudaStorageSlice::F8E4M3(data)
             }
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
                 return Err(
                     CudaError::InternalError("Dummy types not supported in CUDA backend").into(),
                 )
-            }
-        };
-        Ok(CudaStorage {
-            slice,
-            device: self.clone(),
-        })
-    }
-
-    fn empty_impl(&self, shape: &Shape, dtype: DType, sync_alloc: bool) -> Result<CudaStorage> {
-        let elem_count = shape.elem_count();
-        let slice = match dtype {
-            DType::U8 => {
-                let data = self.alloc_empty::<u8>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::U8(data)
-            }
-            DType::U32 => {
-                let data = self.alloc_empty::<u32>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::U32(data)
-            }
-            DType::I64 => {
-                let data = self.alloc_empty::<i64>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::I64(data)
-            }
-            DType::BF16 => {
-                let data = self.alloc_empty::<bf16>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::BF16(data)
-            }
-            DType::F16 => {
-                let data = self.alloc_empty::<f16>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::F16(data)
-            }
-            DType::F32 => {
-                let data = self.alloc_empty::<f32>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::F32(data)
-            }
-            DType::F64 => {
-                let data = self.alloc_empty::<f64>(elem_count, sync_alloc).w()?;
-                CudaStorageSlice::F64(data)
             }
         };
         Ok(CudaStorage {

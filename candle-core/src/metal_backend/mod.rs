@@ -894,7 +894,9 @@ impl BackendStorage for MetalStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = self
+                .device()
+                .zeros_impl(kernel_l.shape(), kernel.dtype(), false)?;
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -902,7 +904,9 @@ impl BackendStorage for MetalStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         };
         let res_l = Layout::contiguous((b, l_out, n)).transpose(1, 2)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = self
+            .device()
+            .zeros_impl(res_l.shape(), res.dtype(), false)?;
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -1085,7 +1089,9 @@ impl BackendStorage for MetalStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = self
+                .device()
+                .zeros_impl(kernel_l.shape(), kernel.dtype(), false)?;
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -1095,7 +1101,9 @@ impl BackendStorage for MetalStorage {
         let res_l = Layout::contiguous((b, h_out, w_out, n))
             .transpose(1, 2)?
             .transpose(1, 3)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = self
+            .device()
+            .zeros_impl(res_l.shape(), res.dtype(), false)?;
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -1341,7 +1349,7 @@ impl BackendStorage for MetalStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<Self> {
-        let mut acc = self.device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = self.device.zeros_impl(l.shape(), self.dtype(), false)?;
         self.copy_strided_src(&mut acc, 0, l)?;
         if !ids_l.is_contiguous() || !src_l.is_contiguous() {
             return Err(crate::Error::RequiresContiguous { op: "scatter-add" }.bt());
@@ -1450,7 +1458,7 @@ impl BackendStorage for MetalStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<Self> {
-        let mut acc = self.device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = self.device.zeros_impl(l.shape(), self.dtype(), false)?;
         self.copy_strided_src(&mut acc, 0, l)?;
         if !ids_l.is_contiguous() || !src_l.is_contiguous() {
             return Err(crate::Error::RequiresContiguous { op: "index-add" }.bt());

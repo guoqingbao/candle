@@ -216,15 +216,19 @@ impl MetalDevice {
     }
 
     pub fn allocate_zeros(&self, size_in_bytes: usize, shared: bool) -> Result<Arc<Buffer>> {
-        let buffer = self.allocate_buffer(
-            size_in_bytes as NSUInteger,
-            if shared {
-                MTLResourceOptions::StorageModeShared
-            } else {
-                MTLResourceOptions::StorageModePrivate
-            },
-            "allocate_zeros",
-        )?;
+        let buffer = if shared {
+            let new_buffer = self.device.new_buffer(
+                size_in_bytes as NSUInteger,
+                MTLResourceOptions::StorageModeShared,
+            );
+            Arc::new(new_buffer)
+        } else {
+            self.allocate_buffer(
+                size_in_bytes as NSUInteger,
+                MTLResourceOptions::StorageModePrivate,
+                "allocate_zeros",
+            )?
+        };
         let command_buffer = self.command_buffer()?;
         command_buffer.set_label("zeros");
         let blit = command_buffer.new_blit_command_encoder();

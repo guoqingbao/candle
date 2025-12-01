@@ -109,7 +109,7 @@ pub(crate) fn launch_conv2d<
         Some(CandleAlgo::Count) => A::CUDNN_CONVOLUTION_FWD_ALGO_COUNT,
     };
     let workspace_size = conv2d.get_workspace_size(alg)?;
-    let mut workspace = dev.cuda_stream().alloc_zeros::<u8>(workspace_size)?;
+    let mut workspace = dev.cuda_device().alloc_zeros::<u8>(workspace_size, false)?;
     unsafe {
         conv2d.launch::<CudaSlice<u8>, _, _, _>(
             alg,

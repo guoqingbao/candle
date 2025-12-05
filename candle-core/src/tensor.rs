@@ -3163,6 +3163,7 @@ impl Tensor {
             is_variable: false,
             dtype: self.dtype,
             device: self.device.clone(),
+            cpu_offload_buffer: None,
         };
         Ok(Tensor(Arc::new(tensor_)))
     }

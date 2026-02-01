@@ -96,6 +96,10 @@ fn main() -> Result<()> {
         .out_dir(&build_dir)
         .with_cutlass(None) // ✅ Auto-fetch CUTLASS from GitHub
         .arg("-O3")
+        .arg("-fmad=false")       // Disable FMA rounding non-determinism
+        .arg("-ftz=false")        // Preserve subnormals (critical for attention)
+//        .arg("-prec-div")         // Enable precise division
+//        .arg("-prec-sqrt")        // Enable precise square-root
         .arg("-std=c++17")
         .arg("-U__CUDA_NO_HALF_OPERATORS__")
         .arg("-U__CUDA_NO_HALF_CONVERSIONS__")

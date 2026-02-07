@@ -10,11 +10,10 @@ fn main() {
         .source_dir("src") // Scan src/ for .cu files
         .arg("-fmad=false")       // Disable FMA rounding non-determinism
         .arg("-ftz=false")        // Preserve subnormals (critical for attention)
+        .arg("-prec-div=true")         // Enable precise division
+        .arg("-prec-sqrt=true")        // Enable precise square-root
         .build_ptx()
         .expect("Failed to compile CUDA kernels")
         .write("src/lib.rs")
         .expect("Failed to write PTX bindings");
-//        .arg("-prec-div")         // Enable precise division
-//        .arg("-prec-sqrt")        // Enable precise square-root
-
 }

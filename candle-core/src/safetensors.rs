@@ -174,27 +174,12 @@ fn convert_<T: WithDType>(view: &st::TensorView<'_>, device: &Device) -> Result<
 }
 
 fn convert_slice_f8e4m3(data: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
-    let tensor = convert_slice::<u8>(data, shape, device)?;
-    let storage = tensor.storage().try_clone(tensor.layout())?;
-    Ok(crate::tensor::from_storage_with_dtype(
-        storage,
-        shape,
-        DType::F8E4M3,
-        crate::op::BackpropOp::none(),
-        false,
-    ))
+    // FP8 is stored as raw bytes; retag dtype without cloning GPU storage.
+    Ok(convert_slice::<u8>(data, shape, device)?.reinterpret_dtype(DType::F8E4M3))
 }
 
 fn convert_slice_f8e8m0(data: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
-    let tensor = convert_slice::<u8>(data, shape, device)?;
-    let storage = tensor.storage().try_clone(tensor.layout())?;
-    Ok(crate::tensor::from_storage_with_dtype(
-        storage,
-        shape,
-        DType::F8E8M0,
-        crate::op::BackpropOp::none(),
-        false,
-    ))
+    Ok(convert_slice::<u8>(data, shape, device)?.reinterpret_dtype(DType::F8E8M0))
 }
 
 fn convert_back_<T: WithDType>(mut vs: Vec<T>) -> Vec<u8> {

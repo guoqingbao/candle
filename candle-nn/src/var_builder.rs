@@ -716,8 +716,23 @@ impl Backend for ShardedSafeTensors {
         shape[dim] = block_size;
 
         let view_dtype: DType = view_dtype.try_into()?;
-        let raw: Vec<u8> = iterator.into_iter().flatten().cloned().collect();
-        Tensor::from_raw_buffer(&raw, view_dtype, &shape, dev)?.to_dtype(dtype)
+        // Pack shard bytes with memcpy-sized copies (not per-byte Iterator::cloned).
+        // Contiguous dim-0 shards are often a single slice → upload directly from mmap.
+        let byte_len = iterator.remaining_byte_len();
+        let mut chunks = Vec::new();
+        for chunk in iterator {
+            chunks.push(chunk);
+        }
+        let tensor = if chunks.len() == 1 {
+            Tensor::from_raw_buffer(chunks[0], view_dtype, &shape, dev)?
+        } else {
+            let mut raw = Vec::with_capacity(byte_len);
+            for chunk in chunks {
+                raw.extend_from_slice(chunk);
+            }
+            Tensor::from_raw_buffer(&raw, view_dtype, &shape, dev)?
+        };
+        tensor.to_dtype(dtype)
     }
 
     fn contains_tensor(&self, name: &str) -> bool {

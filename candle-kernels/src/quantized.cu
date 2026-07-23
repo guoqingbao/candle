@@ -5614,12 +5614,8 @@ __constant__ float d_mxfp4_to_float_lut[16] = {
  * @return The corresponding 32-bit float value.
  */
 __device__ __forceinline__ float f8e8m0_to_float(unsigned char scale_val) {
-    if (scale_val == 0xFF) {
-        return NAN;
-    }
-    // Efficiently compute 2^(scale_val - 127) using ldexpf
-    // ldexpf(x, exp) computes x * 2^exp
-    return ldexpf(1.0f, static_cast<int>(scale_val) - 127);
+    unsigned char b = (scale_val >= 0xFF) ? 0xFD : scale_val;
+    return __uint_as_float((unsigned int)b << 23);
 }
 
 

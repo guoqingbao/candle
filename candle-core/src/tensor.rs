@@ -2272,6 +2272,23 @@ impl Tensor {
         }
     }
 
+    /// Retag `dtype` while sharing the underlying storage (no copy).
+    ///
+    /// Used for formats like F8E4M3/F8E8M0 that are stored as U8 byte buffers.
+    pub(crate) fn reinterpret_dtype(&self, dtype: DType) -> Tensor {
+        let tensor_ = Tensor_ {
+            id: TensorId::new(),
+            storage: self.storage.clone(),
+            layout: self.layout.clone(),
+            op: BackpropOp::none(),
+            is_variable: false,
+            dtype,
+            device: self.device.clone(),
+            cpu_offload_buffer: self.cpu_offload_buffer.clone(),
+        };
+        Tensor(Arc::new(tensor_))
+    }
+
     /// If the target device is the same as the tensor device, only a shallow copy is performed.
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device().same_device(device) {

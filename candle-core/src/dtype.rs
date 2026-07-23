@@ -115,29 +115,32 @@ impl DType {
     }
 }
 
-/// Decode an F8E8M0 byte to f32: value = 2^(byte - 127).
+/// Decode an unsigned F8E8M0 / UE8M0 scale byte to f32: value = 2^(byte - 127).
+///
+/// Matches DeepSeek V4-Flash / MXFP8 block scales (`scale_fmt: "ue8m0"`):
+/// - Uses `f32::from_bits(byte << 23)` for finite exponent-only values.
+/// - Saturates byte 0xFF to 0xFD so the result stays finite (2^128 would overflow f32).
 pub fn f8e8m0_decode(v: u8) -> f32 {
-    if v == 0xFF {
-        f32::NAN
-    } else {
-        f32::from_bits((v as u32) << 23)
-    }
+    let b = if v >= 0xFF { 0xFD } else { v };
+    f32::from_bits((b as u32) << 23)
 }
 
 /// Decode an F8E4M3 byte to f32.
+///
 /// Format: 1 sign + 4 exponent (bias=7) + 3 mantissa bits.
-/// NaN values: 0x7F and 0xFF (when all exponent bits and all mantissa bits are 1).
+/// Matches CUDA `__nv_cvt_fp8_to_halfraw(..., __NV_E4M3)`: bytes 0x7F and
+/// 0xFF (all exponent + mantissa bits set) are NaN.
 pub fn f8e4m3_decode(v: u8) -> f32 {
     let sign = (v >> 7) & 1;
     let exp = (v >> 3) & 0xF;
     let mant = v & 0x7;
-    // NaN: exponent=0xF, mantissa=0x7
+    // NaN: exponent=0xF, mantissa=0x7 (hardware E4M3 / cuda_fp8).
     if exp == 0xF && mant == 0x7 {
         return f32::NAN;
     }
     let sign_f = if sign == 1 { -1.0f32 } else { 1.0f32 };
     if exp == 0 {
-        // Subnormal: value = (-1)^sign * 2^(1-bias) * (0.mantissa) = (-1)^sign * 2^-6 * (mant/8)
+        // Subnormal: value = (-1)^sign * 2^(1-bias) * (0.mantissa)
         sign_f * (mant as f32) * (1.0f32 / 64.0) * (1.0f32 / 8.0)
     } else {
         // Normal: value = (-1)^sign * 2^(exp-bias) * (1 + mantissa/8)

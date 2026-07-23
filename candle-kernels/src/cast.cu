@@ -172,12 +172,81 @@ CAST_OP(__half, __half, cast_f16_f16)
 
 CAST_THROUGH_OP(__half, uint8_t,  float, cast_f16_u8)
 CAST_OP(__half, uint32_t, cast_f16_u32)
-CAST_OP(__half, float,    cast_f16_f32)
 CAST_OP(__half, double,   cast_f16_f64)
 CAST_OP(uint8_t,  __half, cast_u8_f16 )
 CAST_OP(uint32_t, __half, cast_u32_f16)
-CAST_OP(float,    __half, cast_f32_f16)
 CAST_OP(double,   __half, cast_f64_f16)
+
+// Vectorized f16->f32 cast: 8 half elements per float4 load
+extern "C" __global__ void cast_f16_f32(
+    const size_t numel, const size_t num_dims, const size_t *info,
+    const __half *inp, float *out) {
+    const size_t *dims = info;
+    const size_t *strides = info + num_dims;
+    if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
+        if (numel >= 8 && is_aligned_16(inp)) {
+            const size_t vec_numel = numel / 8;
+            const float4 *inp4 = reinterpret_cast<const float4*>(inp);
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < vec_numel; i += blockDim.x * gridDim.x) {
+                float4 v = inp4[i];
+                const __half *hp = reinterpret_cast<const __half*>(&v);
+                float *outp = out + i * 8;
+                #pragma unroll
+                for (int j = 0; j < 8; j++) {
+                    outp[j] = __half2float(hp[j]);
+                }
+            }
+            const size_t tail_start = vec_numel * 8;
+            for (unsigned int i = tail_start + blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+                out[i] = __half2float(inp[i]);
+            }
+        } else {
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+                out[i] = __half2float(inp[i]);
+            }
+        }
+    } else {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
+            out[i] = __half2float(inp[strided_i]);
+        }
+    }
+}
+
+// Vectorized f32->f16 cast: 4 f32 elements per float4 load
+extern "C" __global__ void cast_f32_f16(
+    const size_t numel, const size_t num_dims, const size_t *info,
+    const float *inp, __half *out) {
+    const size_t *dims = info;
+    const size_t *strides = info + num_dims;
+    if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
+        if (numel >= 4 && is_aligned_16(inp)) {
+            const size_t vec_numel = numel / 4;
+            const float4 *inp4 = reinterpret_cast<const float4*>(inp);
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < vec_numel; i += blockDim.x * gridDim.x) {
+                float4 v = inp4[i];
+                __half *outp = out + i * 4;
+                outp[0] = __float2half_rn(v.x);
+                outp[1] = __float2half_rn(v.y);
+                outp[2] = __float2half_rn(v.z);
+                outp[3] = __float2half_rn(v.w);
+            }
+            const size_t tail_start = vec_numel * 4;
+            for (unsigned int i = tail_start + blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+                out[i] = __float2half_rn(inp[i]);
+            }
+        } else {
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+                out[i] = __float2half_rn(inp[i]);
+            }
+        }
+    } else {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
+            out[i] = __float2half_rn(inp[strided_i]);
+        }
+    }
+}
 #endif
 
 CAST_OP(uint32_t, uint32_t, cast_u32_u32)
@@ -210,10 +279,19 @@ CAST_OP(double, int64_t,  cast_f64_i64 )
 CAST_OP(double, float,    cast_f64_f32)
 CAST_OP(double, double,   cast_f64_f64)
 
-// F8_E8M0 (power-of-two exponent-only scale) to F32/BF16
-// Decode: value = 2^(byte - 127) = reinterpret(byte << 23) as float; 0xFF = NaN
+// F8_E8M0 / UE8M0 (power-of-two exponent-only scale) to F32/BF16/F16
+// Decode: value = 2^(byte - 127) = reinterpret(byte << 23) as float.
+// Saturate 0xFF -> 0xFD so 2^128 does not overflow f32 (DeepSeek V4 / MXFP8).
 __device__ __forceinline__ float e8m0_to_f32(uint8_t v) {
-    return (v == 0xFF) ? __uint_as_float(0x7FC00000u) : __uint_as_float((unsigned int)v << 23);
+    uint8_t b = (v >= 0xFF) ? 0xFD : v;
+    return __uint_as_float((unsigned int)b << 23);
+}
+
+// Hardware E4M3 decode via CUDA FP8 cast. Matches tensor-core / Cutlass
+// semantics: bytes 0x7F / 0xFF become NaN (not the software E4M3FN max).
+__device__ __forceinline__ float e4m3_to_f32(uint8_t v) {
+    __half_raw hr = __nv_cvt_fp8_to_halfraw(v, __NV_E4M3);
+    return __half2float(*reinterpret_cast<const __half *>(&hr));
 }
 
 extern "C" __global__ void cast_f8e8m0_f32(
@@ -250,9 +328,26 @@ extern "C" __global__ void cast_f8e8m0_bf16(
         }
     }
 }
+
+extern "C" __global__ void cast_f8e8m0_f16(
+    const size_t numel, const size_t num_dims, const size_t *info,
+    const uint8_t *inp, __half *out) {
+    const size_t *dims = info;
+    const size_t *strides = info + num_dims;
+    if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            out[i] = __float2half_rn(e8m0_to_f32(inp[i]));
+        }
+    } else {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
+            out[i] = __float2half_rn(e8m0_to_f32(inp[strided_i]));
+        }
+    }
+}
 #endif
 
-// F8_E4M3 to F32/BF16 using CUDA intrinsics
+// F8_E4M3 to F32/BF16/F16 using CUDA hardware FP8 cast.
 extern "C" __global__ void cast_f8e4m3_f32(
     const size_t numel, const size_t num_dims, const size_t *info,
     const uint8_t *inp, float *out) {
@@ -260,14 +355,12 @@ extern "C" __global__ void cast_f8e4m3_f32(
     const size_t *strides = info + num_dims;
     if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
-            __half_raw hr = __nv_cvt_fp8_to_halfraw(inp[i], __NV_E4M3);
-            out[i] = __half2float(*reinterpret_cast<const __half*>(&hr));
+            out[i] = e4m3_to_f32(inp[i]);
         }
     } else {
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
             unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
-            __half_raw hr = __nv_cvt_fp8_to_halfraw(inp[strided_i], __NV_E4M3);
-            out[i] = __half2float(*reinterpret_cast<const __half*>(&hr));
+            out[i] = e4m3_to_f32(inp[strided_i]);
         }
     }
 }
@@ -280,14 +373,29 @@ extern "C" __global__ void cast_f8e4m3_bf16(
     const size_t *strides = info + num_dims;
     if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
-            __half_raw hr = __nv_cvt_fp8_to_halfraw(inp[i], __NV_E4M3);
-            out[i] = __float2bfloat16_rn(__half2float(*reinterpret_cast<const __half*>(&hr)));
+            out[i] = __float2bfloat16_rn(e4m3_to_f32(inp[i]));
         }
     } else {
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
             unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
-            __half_raw hr = __nv_cvt_fp8_to_halfraw(inp[strided_i], __NV_E4M3);
-            out[i] = __float2bfloat16_rn(__half2float(*reinterpret_cast<const __half*>(&hr)));
+            out[i] = __float2bfloat16_rn(e4m3_to_f32(inp[strided_i]));
+        }
+    }
+}
+
+extern "C" __global__ void cast_f8e4m3_f16(
+    const size_t numel, const size_t num_dims, const size_t *info,
+    const uint8_t *inp, __half *out) {
+    const size_t *dims = info;
+    const size_t *strides = info + num_dims;
+    if (info == nullptr || is_contiguous(num_dims, dims, strides)) {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            out[i] = __float2half_rn(e4m3_to_f32(inp[i]));
+        }
+    } else {
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {
+            unsigned strided_i = get_strided_index(i, num_dims, dims, strides);
+            out[i] = __float2half_rn(e4m3_to_f32(inp[strided_i]));
         }
     }
 }

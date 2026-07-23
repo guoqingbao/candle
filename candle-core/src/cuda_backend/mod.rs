@@ -1245,10 +1245,7 @@ impl CudaStorage {
         let (kernel_name, out_dtype) = match dtype {
             DType::F32 => ("cast_f8e8m0_f32", DType::F32),
             DType::BF16 => ("cast_f8e8m0_bf16", DType::BF16),
-            DType::F16 => {
-                let f32_storage = self.to_dtype_from_f8e8m0(layout, DType::F32)?;
-                return f32_storage.to_dtype(layout, DType::F16);
-            }
+            DType::F16 => ("cast_f8e8m0_f16", DType::F16),
             _ => {
                 let f32_storage = self.to_dtype_from_f8e8m0(layout, DType::F32)?;
                 return f32_storage.to_dtype(layout, dtype);
@@ -1261,6 +1258,12 @@ impl CudaStorage {
                 let params = (el, dims.len(), &ds, *inp, &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 CudaStorageSlice::BF16(out)
+            }
+            DType::F16 => {
+                let out = unsafe { dev.alloc::<half::f16>(el) }.w()?;
+                let params = (el, dims.len(), &ds, *inp, &out);
+                unsafe { func.launch(cfg, params) }.w()?;
+                CudaStorageSlice::F16(out)
             }
             DType::F32 => {
                 let out = unsafe { dev.alloc::<f32>(el) }.w()?;
@@ -1276,7 +1279,8 @@ impl CudaStorage {
         })
     }
 
-    /// Convert F8E4M3 (U8-backed) storage to another dtype using E4M3-aware kernels.
+    /// Convert F8E4M3 (U8-backed) storage to another dtype using CUDA
+    /// `__nv_cvt_fp8_to_halfraw` hardware casts (NaN on 0x7F/0xFF).
     pub(crate) fn to_dtype_from_f8e4m3(&self, layout: &Layout, dtype: DType) -> Result<Self> {
         let shape = layout.shape();
         let dims = shape.dims();
@@ -1299,10 +1303,7 @@ impl CudaStorage {
         let (kernel_name, out_dtype) = match dtype {
             DType::F32 => ("cast_f8e4m3_f32", DType::F32),
             DType::BF16 => ("cast_f8e4m3_bf16", DType::BF16),
-            DType::F16 => {
-                let f32_storage = self.to_dtype_from_f8e4m3(layout, DType::F32)?;
-                return f32_storage.to_dtype(layout, DType::F16);
-            }
+            DType::F16 => ("cast_f8e4m3_f16", DType::F16),
             _ => {
                 let f32_storage = self.to_dtype_from_f8e4m3(layout, DType::F32)?;
                 return f32_storage.to_dtype(layout, dtype);
@@ -1315,6 +1316,12 @@ impl CudaStorage {
                 let params = (el, dims.len(), &ds, *inp, &out);
                 unsafe { func.launch(cfg, params) }.w()?;
                 CudaStorageSlice::BF16(out)
+            }
+            DType::F16 => {
+                let out = unsafe { dev.alloc::<half::f16>(el) }.w()?;
+                let params = (el, dims.len(), &ds, *inp, &out);
+                unsafe { func.launch(cfg, params) }.w()?;
+                CudaStorageSlice::F16(out)
             }
             DType::F32 => {
                 let out = unsafe { dev.alloc::<f32>(el) }.w()?;

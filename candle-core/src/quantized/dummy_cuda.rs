@@ -44,6 +44,13 @@ impl QCudaStorage {
         0
     }
 
+    // Keep the quantized-storage interface identical when CUDA is disabled.
+    // Metal builds still type-check the common QStorage::data implementation,
+    // even though this dummy backend can never be instantiated successfully.
+    pub fn data(&self) -> Result<Vec<u8>> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
+
     pub fn fwd(
         &self,
         _self_shape: &crate::Shape,

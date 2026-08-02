@@ -448,14 +448,15 @@ fn quantize_q4_k(
     let kx_padded = pad(kx, MATRIX_ROW_PADDING);
     let num_blocks = ceil_div(kx_padded, CUDA_QUANTIZE_BLOCK_SIZE);
     let func = dev.get_or_load_func("quantize_q4_k", candle_kernels::QUANTIZED)?;
-    let blocks_per_grid = (num_blocks + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
-
     let cfg = cudarc::driver::LaunchConfig {
-        grid_dim: (blocks_per_grid as u32, 1, 1),
-        block_dim: (CUDA_QUANTIZE_BLOCK_SIZE as u32, 1, 1),
+        // The canonical K-quant search is deliberately implemented per
+        // 256-value block. Launch one CUDA thread per block so every output
+        // block is covered without relying on a partial-block reduction.
+        grid_dim: (num_blocks as u32, 1, 1),
+        block_dim: (1, 1, 1),
         shared_mem_bytes: 0,
     };
-    let params = (src, dst, num_blocks);
+    let params = (src, dst, num_blocks, elem_count);
     unsafe { func.launch(cfg, params) }.w()?;
     Ok(())
 }
@@ -477,7 +478,7 @@ fn quantize_q6_k(
 
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (nb_k as u32, 1, 1),
-        block_dim: (64 as u32, 1, 1),
+        block_dim: (1, 1, 1),
         shared_mem_bytes: 0,
     };
     let params = (src, dst, 1, elem_count);
@@ -541,6 +542,12 @@ impl QCudaStorage {
     pub fn device_ptr(&self) -> Result<*const u8> {
         use cudarc::driver::DevicePtr;
         Ok(*self.data.inner.device_ptr() as *const u8)
+    }
+
+    pub fn data(&self) -> Result<Vec<u8>> {
+        self.device
+            .dtoh_sync_copy(&self.data.inner.slice(..self.data.len))
+            .w()
     }
 
     pub fn dequantize(&self, elem_count: usize) -> Result<CudaStorage> {
@@ -616,7 +623,6 @@ impl QCudaStorage {
     pub fn quantize(&mut self, src: &CudaStorage) -> Result<()> {
         let src = match &src.slice {
             crate::cuda_backend::CudaStorageSlice::F32(data) => {
-                //dedicated gpu kernel for q4k quantization
                 if self.dtype == GgmlDType::Q4K {
                     return quantize_q4_k(&data, &self.data.inner, data.len(), &self.device);
                 } else if self.dtype == GgmlDType::Q6K {

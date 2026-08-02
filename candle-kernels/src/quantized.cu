@@ -4375,103 +4375,114 @@ __device__ void get_scale_min_k4_(int j, const uint8_t* __restrict__ q, uint8_t*
  *   - This kernel uses a grid-stride loop for flexible execution configuration.
  *   - The packing scheme matches the reference Rust implementation for bit layout.
  */
-extern "C" __global__ void quantize_q4_k(const float* __restrict__ x, void* __restrict__ y, const int num_blocks) {
-    // Use a grid-stride loop to allow flexible grid sizes
-    for (int block_id = blockIdx.x * blockDim.x + threadIdx.x;
-         block_id < num_blocks;
-         block_id += gridDim.x * blockDim.x) {
 
-        // Pointers to the current input and output blocks
-        const float* x_block = x + block_id * QK_K;
-        block_q4_K_* y_block = reinterpret_cast<block_q4_K_*>(y) + block_id;
+// Canonical K-quant helper matching Candle's CPU `make_qkx1_quants`.
+// Rust f32::round() is ties-away-from-zero.  Do not use CUDA's generic
+// roundf here: its lowered instruction may use the device's tie-to-even mode
+// on exact half-way values, which changes Q6_K levels for regularly spaced
+// negative inputs.
+__device__ __forceinline__ int kquant_nearest_int(float x) {
+    return (int)(x >= 0.0f ? floorf(x + 0.5f) : ceilf(x - 0.5f));
+}
 
-        // Step 1: Find min/max for each of the 8 sub-blocks of 32 floats
-        float scales_f[8];
-        float mins_f[8];
+__device__ void make_qkx1_quants_cuda(
+    const float* x, const int nmax, float* scale_out, float* min_out) {
+    int l[32] = {0};
+    float min_val = x[0];
+    float max_val = x[0];
+    for (int i = 1; i < 32; ++i) {
+        min_val = fminf(min_val, x[i]);
+        max_val = fmaxf(max_val, x[i]);
+    }
+    if (max_val == min_val) {
+        *scale_out = 0.0f;
+        *min_out = 0.0f;
+        return;
+    }
+    min_val = fminf(min_val, 0.0f);
+    float iscale = nmax / (max_val - min_val);
+    float scale = 1.0f / iscale;
+    for (int it = 0; it < 5; ++it) {
+        float sumlx = 0.0f;
+        float suml2 = 0.0f;
+        bool changed = false;
+        for (int i = 0; i < 32; ++i) {
+            int li = max(0, min(nmax, kquant_nearest_int(iscale * (x[i] - min_val))));
+            changed |= li != l[i];
+            l[i] = li;
+            sumlx += (x[i] - min_val) * li;
+            suml2 += li * li;
+        }
+        if (suml2 == 0.0f) {
+            *scale_out = 0.0f;
+            *min_out = 0.0f;
+            return;
+        }
+        scale = sumlx / suml2;
+        float sum = 0.0f;
+        for (int i = 0; i < 32; ++i) sum += x[i] - scale * l[i];
+        min_val = fminf(sum / 32.0f, 0.0f);
+        iscale = 1.0f / scale;
+        if (!changed) break;
+    }
+    *scale_out = scale;
+    *min_out = -min_val;
+}
 
-        for (int i = 0; i < 8; ++i) {
-            float min_val = x_block[i * 32];
-            float max_val = x_block[i * 32];
-            for (int j = 1; j < 32; ++j) {
-                const float val = x_block[i * 32 + j];
-                if (val < min_val) min_val = val;
-                if (val > max_val) max_val = val;
+extern "C" __global__ void quantize_q4_k(
+    const float* __restrict__ x, void* __restrict__ y,
+    const int num_blocks, const int elem_count) {
+    const int block_id = blockIdx.x;
+    if (threadIdx.x != 0 || block_id >= num_blocks) return;
+    const float* x_block = x + block_id * QK_K;
+    block_q4_K_* y_block = reinterpret_cast<block_q4_K_*>(y) + block_id;
+
+    float scales_f[8], mins_f[8];
+    for (int i = 0; i < 8; ++i) {
+        make_qkx1_quants_cuda(x_block + i * 32, 15, &scales_f[i], &mins_f[i]);
+    }
+    float max_scale = 0.0f, max_min = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        max_scale = fmaxf(max_scale, scales_f[i]);
+        max_min = fmaxf(max_min, mins_f[i]);
+    }
+    const float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+    const float inv_min = max_min > 0.0f ? 63.0f / max_min : 0.0f;
+    uint8_t packed[K_SCALE_SIZE] = {0};
+    for (int j = 0; j < 8; ++j) {
+        const uint8_t ls = (uint8_t)min(63, kquant_nearest_int(inv_scale * scales_f[j]));
+        const uint8_t lm = (uint8_t)min(63, kquant_nearest_int(inv_min * mins_f[j]));
+        if (j < 4) {
+            packed[j] = ls;
+            packed[j + 4] = lm;
+        } else {
+            packed[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
+            packed[j - 4] |= (ls >> 4) << 6;
+            packed[j] |= (lm >> 4) << 6;
+        }
+    }
+    for (int j = 0; j < K_SCALE_SIZE; ++j) y_block->scales[j] = packed[j];
+    y_block->d = __float2half(max_scale / 63.0f);
+    y_block->dmin = __float2half(max_min / 63.0f);
+
+    uint8_t l[QK_K] = {0};
+    const int valid = elem_count - block_id * QK_K;
+    for (int j = 0; j < 8; ++j) {
+        uint8_t sc, mn;
+        get_scale_min_k4_(j, packed, &sc, &mn);
+        const float d = __half2float(y_block->d) * sc;
+        const float dm = __half2float(y_block->dmin) * mn;
+        if (d != 0.0f) {
+            for (int ii = 0; ii < 32; ++ii) {
+                const int idx = j * 32 + ii;
+                const float value = idx < valid ? x_block[idx] : 0.0f;
+                l[idx] = (uint8_t)max(0, min(15, kquant_nearest_int((value + dm) / d)));
             }
-
-            // The dequantization formula is `d*q - m`. So quantization is `(x+m)/d`.
-            // We store `m` as a positive value, so `m = -min_val`.
-            // The scale `d` normalizes the range `[min, max]` to `[0, 15]`.
-            const float d = (max_val - min_val) / 15.0f;
-            mins_f[i] = -min_val;
-            scales_f[i] = (d == 0.0f) ? 0.0f : d; // Avoid division by zero issues
         }
-
-        // Step 2: Find super-block scales for the scales and mins
-        float max_scale = 0.0f;
-        float max_min = 0.0f;
-        for (int i = 0; i < 8; ++i) {
-            if (scales_f[i] > max_scale) max_scale = scales_f[i];
-            if (mins_f[i] > max_min) max_min = mins_f[i];
-        }
-
-        const float d_scale = max_scale > 0.0f ? max_scale / 63.0f : 0.0f;
-        const float d_min = max_min > 0.0f ? max_min / 63.0f : 0.0f;
-
-        y_block->d = __float2half(d_scale);
-        y_block->dmin = __float2half(d_min);
-
-        // Step 3: Quantize and pack the scales and mins
-        uint8_t packed_scales[K_SCALE_SIZE] = {0};
-        const float inv_d_scale = d_scale > 0.0f ? 1.0f / d_scale : 0.0f;
-        const float inv_d_min = d_min > 0.0f ? 1.0f / d_min : 0.0f;
-
-        for (int i = 0; i < 8; i++) {
-            const uint8_t ls = fminf(63.0f, roundf(scales_f[i] * inv_d_scale));
-            const uint8_t lm = fminf(63.0f, roundf(mins_f[i] * inv_d_min));
-
-            if (i < 4) {
-                packed_scales[i] = ls;
-                packed_scales[i + 4] = lm;
-            } else {
-                packed_scales[i + 4]  = (ls & 0xF) | ((lm & 0xF) << 4);
-                packed_scales[i - 4] |= (ls >> 4) << 6;
-                packed_scales[i]     |= (lm >> 4) << 6;
-            }
-        }
-        for(int i = 0; i < K_SCALE_SIZE; ++i) {
-            y_block->scales[i] = packed_scales[i];
-        }
-
-        // Step 4: Quantize the 256 floats to 4-bit values
-        uint8_t temp_qs[QK_K];
-        for (int i = 0; i < 8; ++i) { // Iterate over 8 sub-blocks
-            uint8_t sc, m;
-            get_scale_min_k4_(i, y_block->scales, &sc, &m);
-
-            const float d_final = __half2float(y_block->d) * sc;
-            const float m_final = __half2float(y_block->dmin) * m;
-
-            if (d_final > 1e-9) { // Only quantize if scale is non-zero
-                const float inv_d_final = 1.0f / d_final;
-                for (int j = 0; j < 32; ++j) { // Iterate within sub-block
-                    const float x_val = x_block[i * 32 + j];
-                    const float q_float = roundf((x_val + m_final) * inv_d_final);
-                    temp_qs[i * 32 + j] = fminf(15.0f, fmaxf(0.0f, q_float));
-                }
-            } else {
-                 for (int j = 0; j < 32; ++j) {
-                    temp_qs[i * 32 + j] = 0;
-                }
-            }
-        }
-
-        // Step 5: Pack the 4-bit values into bytes
-        // This packing scheme matches the reference Rust logic
-        for (int i = 0; i < QK_K / 2; i++) {
-            const int l0_idx = (i % 32) + (i / 32) * 64;
-            const int l1_idx = l0_idx + 32;
-            y_block->qs[i] = temp_qs[l0_idx] | (temp_qs[l1_idx] << 4);
-        }
+    }
+    for (int j = 0; j < QK_K; j += 64) {
+        const int offset = (j / 64) * 32;
+        for (int i = 0; i < 32; ++i) y_block->qs[offset + i] = l[j + i] | (l[j + 32 + i] << 4);
     }
 }
 
@@ -4576,173 +4587,136 @@ extern "C" __global__ void quantize_q8_0(
  * @param n    Number of rows in the input tensor.
  * @param k    Number of columns (features) in the input tensor (must be a multiple of QK_K).
  */
-extern "C" __global__ void quantize_q6_k(const float * __restrict__ xx, void * __restrict__ vy, int n, int k) {
-    
-    // --- Shared Memory ---
-    // Shared memory for finding the block-level max absolute value
-    __shared__ float s_block_max[64];
-    // Shared memory for finding the 16 sub-block max absolute values
-    __shared__ float s_sub_max[64];
-    // Shared memory for storing the 16 quantized sub-block scales
-    __shared__ int8_t s_scales[16];
-    // Shared memory for the block-level inverse scale (id)
-    __shared__ float s_id;
 
-    // --- Thread and Block Indexing ---
-    const int tid = threadIdx.x; // Thread ID (0-63)
-    
-    // blockIdx.x maps to the k-dimension (column blocks)
-    // blockIdx.y maps to the n-dimension (rows)
-    const int i_block = blockIdx.x; // Block index along the k-dimension (0 to k/QK_K - 1)
-    const int i_row   = blockIdx.y; // Row index (0 to n - 1)
-
-    // Pointers to the current block's input and output
-    const float * x = xx + i_row * k + i_block * QK_K;
-    block_q6_K * y = ((block_q6_K *) vy) + i_row * (k / QK_K) + i_block;
-
-    // --- 1. Find Block-Level Max Absolute Value (amax) ---
-    // Each thread loads 4 values and finds its local max
-    float my_max = 0.0f;
-    my_max = fmaxf(my_max, fabsf(x[tid +   0]));
-    my_max = fmaxf(my_max, fabsf(x[tid +  64]));
-    my_max = fmaxf(my_max, fabsf(x[tid + 128]));
-    my_max = fmaxf(my_max, fabsf(x[tid + 192]));
-    s_block_max[tid] = my_max;
-    __syncthreads();
-
-    // Parallel reduction in shared memory to find the block's amax
-    for (int s = 32; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_block_max[tid] = fmaxf(s_block_max[tid], s_block_max[tid + s]);
+// Canonical Q6_K quantization matching Candle's CPU make_qx_quants(16,32,1).
+__device__ float make_qx_quants_q6_cuda(const float* x, int8_t* levels) {
+    float max_value = 0.0f, amax = 0.0f;
+    for (int i = 0; i < 16; ++i) {
+        const float value = x[i];
+        if (fabsf(value) > amax) { amax = fabsf(value); max_value = value; }
+    }
+    if (amax == 0.0f) {
+        for (int i = 0; i < 16; ++i) levels[i] = 32;
+        return 0.0f;
+    }
+    // Keep the CPU reference's scalar f32 operation order.  Allowing the
+    // compiler to contract these expressions into FMAs changes the discrete
+    // level-search decisions on near-boundary Q6_K sub-blocks.
+    float iscale = __fdiv_rn(-32.0f, max_value);
+    float sumlx = 0.0f, suml2 = 0.0f;
+    for (int i = 0; i < 16; ++i) {
+        int l = max(-32, min(31, kquant_nearest_int(iscale * x[i])));
+        levels[i] = (int8_t)(l + 32);
+        const float w = __fmul_rn(x[i], x[i]);
+        // Candle's CPU make_qx_quants uses the weighted least-squares
+        // numerator w*x*l (rmse_type=1 means w=x*x).  Omitting the x here
+        // changes every sub-block scale and produces materially wrong Q6_K
+        // tensors even though the packed layout is otherwise valid.
+        sumlx = __fadd_rn(sumlx, __fmul_rn(__fmul_rn(w, x[i]), (float)l));
+        suml2 = __fadd_rn(suml2, __fmul_rn(__fmul_rn(w, (float)l), (float)l));
+    }
+    float scale = suml2 != 0.0f ? __fdiv_rn(sumlx, suml2) : 0.0f;
+    float best = __fmul_rn(scale, sumlx);
+    for (int it = 0; it < 3 && scale != 0.0f; ++it) {
+        iscale = __fdiv_rn(1.0f, scale);
+        float slx = 0.0f, sl2 = 0.0f;
+        bool changed = false;
+        for (int i = 0; i < 16; ++i) {
+            const int old_l = (int)levels[i] - 32;
+            const int l = max(-32, min(31, kquant_nearest_int(iscale * x[i])));
+            changed |= l != old_l;
+            const float w = __fmul_rn(x[i], x[i]);
+            slx = __fadd_rn(slx, __fmul_rn(__fmul_rn(w, x[i]), (float)l));
+            sl2 = __fadd_rn(sl2, __fmul_rn(__fmul_rn(w, (float)l), (float)l));
         }
-        __syncthreads();
+        if (!changed || sl2 == 0.0f || __fmul_rn(slx, slx) <= __fmul_rn(best, sl2)) break;
+        for (int i = 0; i < 16; ++i) {
+            levels[i] = (int8_t)(32 + max(-32, min(31, kquant_nearest_int(iscale * x[i]))));
+        }
+        sumlx = slx;
+        suml2 = sl2;
+        scale = __fdiv_rn(sumlx, suml2);
+        best = __fmul_rn(scale, sumlx);
     }
-    // amax is now in s_block_max[0]
-
-    // --- 2. Calculate and Store Block-Level Scale (d) and Inverse Scale (id) ---
-    if (tid == 0) {
-        const float amax = s_block_max[0];
-        // Dequant logic: y = d * (sc * q_s)
-        // Max possible value is d * (127 * 31)
-        const float d = amax / (127.0f * 31.0f);
-        y->d = __float2half_rn(d);
-        s_id = (d > 0.0f) ? (1.0f / d) : 0.0f;
+    for (int it = 0; it < 5 && suml2 != 0.0f; ++it) {
+        int changed_count = 0;
+        for (int i = 0; i < 16; ++i) {
+            const float w = __fmul_rn(x[i], x[i]);
+            const int old_l = (int)levels[i] - 32;
+            float slx = __fsub_rn(sumlx, __fmul_rn(__fmul_rn(w, x[i]), (float)old_l));
+            float sl2 = __fsub_rn(suml2, __fmul_rn(__fmul_rn(w, (float)old_l), (float)old_l));
+            if (slx > 0.0f) {
+                int new_l = max(-32, min(31, kquant_nearest_int(__fdiv_rn(__fmul_rn(x[i], sl2), slx))));
+                if (new_l != old_l) {
+                    slx = __fadd_rn(slx, __fmul_rn(__fmul_rn(w, x[i]), (float)new_l));
+                    sl2 = __fadd_rn(sl2, __fmul_rn(__fmul_rn(w, (float)new_l), (float)new_l));
+                    if (sl2 > 0.0f &&
+                        __fmul_rn(__fmul_rn(slx, slx), suml2) >
+                            __fmul_rn(__fmul_rn(sumlx, sumlx), sl2)) {
+                        levels[i] = (int8_t)(new_l + 32);
+                        sumlx = slx;
+                        suml2 = sl2;
+                        scale = __fdiv_rn(sumlx, suml2);
+                        best = __fmul_rn(scale, sumlx);
+                        changed_count++;
+                    }
+                }
+            }
+        }
+        if (changed_count == 0) break;
     }
-    __syncthreads();
-    
-    // All threads load the inverse scale
-    const float id = s_id;
+    return scale;
+}
 
-    // --- 3. Find and Store Sub-Block Scales (sc) ---
-    // 64 threads, 16 sub-blocks. 4 threads per sub-block.
-    const int j = tid / 4;       // Sub-block index (0-15)
-    const int i_in_sub = tid % 4; // Thread's index within the sub-block (0-3)
+extern "C" __global__ void quantize_q6_k(
+    const float* __restrict__ xx, void* __restrict__ vy, int n, int k) {
+    const int i_block = blockIdx.x;
+    const int i_row = blockIdx.y;
+    if (threadIdx.x != 0 || i_row >= n || i_block >= k / QK_K) return;
+    const float* x = xx + i_row * k + i_block * QK_K;
+    block_q6_K* y = ((block_q6_K*)vy) + i_row * (k / QK_K) + i_block;
 
-    // Each thread loads 4 values from its assigned sub-block
-    // (j*16) is the start of the sub-block
-    // (i_in_sub * 4) is not right. (i_in_sub) is the offset.
-    // Each thread loads 4 values:
-    const float v0 = fabsf(x[j*16 + i_in_sub +  0] * id);
-    const float v1 = fabsf(x[j*16 + i_in_sub +  4] * id);
-    const float v2 = fabsf(x[j*16 + i_in_sub +  8] * id);
-    const float v3 = fabsf(x[j*16 + i_in_sub + 12] * id);
-    
-    // Find max of the 4 scaled values
-    s_sub_max[tid] = fmaxf(fmaxf(v0, v1), fmaxf(v2, v3));
-    __syncthreads();
-
-    // The first thread in each group of 4 reduces its group's max
-    if (i_in_sub == 0) {
-        // Find max among the 4 threads for this sub-block
-        const float s_amax = fmaxf(fmaxf(s_sub_max[tid], s_sub_max[tid+1]), 
-                                   fmaxf(s_sub_max[tid+2], s_sub_max[tid+3]));
-
-        // Quantize the sub-block scale
-        // Logic: f_scaled = sc * q_s. Max f_scaled is s_amax. Max q_s is 31.
-        // So, sc = s_amax / 31.0
-        const float sc_f = roundf(s_amax / 31.0f);
-
-        // Clamp to 8-bit signed integer range and store
-        const int8_t sc_val = (int8_t)fminf(fmaxf(sc_f, -128.0f), 127.0f);
-        s_scales[j] = sc_val;
-        y->scales[j] = sc_val;
+    int8_t levels[QK_K];
+    float sub_scales[QK_K / 16];
+    float max_scale = 0.0f, max_abs_scale = 0.0f;
+    for (int ib = 0; ib < QK_K / 16; ++ib) {
+        sub_scales[ib] = make_qx_quants_q6_cuda(x + ib * 16, levels + ib * 16);
+        if (fabsf(sub_scales[ib]) > max_abs_scale) {
+            max_abs_scale = fabsf(sub_scales[ib]);
+            max_scale = sub_scales[ib];
+        }
     }
-    __syncthreads();
-
-    // --- 4. Quantize Values and Pack into ql and qh ---
-    // Use the same thread mapping as the dequantization kernel
-    const int ip = tid / 32;       // 0 or 1 (for first or second 128 values)
-    const int il = tid - 32 * ip; // 0-31
-
-    // Calculate indices for the 4 values this thread will quantize
-    const int val_idx_0 = 128*ip + il +  0;
-    const int val_idx_1 = 128*ip + il + 32;
-    const int val_idx_2 = 128*ip + il + 64;
-    const int val_idx_3 = 128*ip + il + 96;
-
-    // Find the corresponding sub-block scales
-    // This logic matches the 'is' and 'sc[0/2/4/6]' access in the dequant kernel
-    const int is = 8*ip + il/16;
-    const int sc_idx_0 = is + 0;
-    const int sc_idx_1 = is + 2;
-    const int sc_idx_2 = is + 4;
-    const int sc_idx_3 = is + 6;
-
-    // Get scales from shared memory
-    const float sc_0 = (float)s_scales[sc_idx_0];
-    const float sc_1 = (float)s_scales[sc_idx_1];
-    const float sc_2 = (float)s_scales[sc_idx_2];
-    const float sc_3 = (float)s_scales[sc_idx_3];
-
-    // Calculate inverse scales
-    const float isc_0 = (sc_0 != 0.0f) ? 1.0f / sc_0 : 0.0f;
-    const float isc_1 = (sc_1 != 0.0f) ? 1.0f / sc_1 : 0.0f;
-    const float isc_2 = (sc_2 != 0.0f) ? 1.0f / sc_2 : 0.0f;
-    const float isc_3 = (sc_3 != 0.0f) ? 1.0f / sc_3 : 0.0f;
-
-    // Quantize the 4 values
-    // val_q = (x * id) / sc = x / d / sc
-    // This value should be in the range [-31, 31]
-    const float val_q_0 = x[val_idx_0] * id * isc_0;
-    const float val_q_1 = x[val_idx_1] * id * isc_1;
-    const float val_q_2 = x[val_idx_2] * id * isc_2;
-    const float val_q_3 = x[val_idx_3] * id * isc_3;
-
-    // Round and clamp to 6-bit signed range [-32, 31]
-    const int8_t q_s_0 = (int8_t)fminf(fmaxf(roundf(val_q_0), -32.0f), 31.0f);
-    const int8_t q_s_1 = (int8_t)fminf(fmaxf(roundf(val_q_1), -32.0f), 31.0f);
-    const int8_t q_s_2 = (int8_t)fminf(fmaxf(roundf(val_q_2), -32.0f), 31.0f);
-    const int8_t q_s_3 = (int8_t)fminf(fmaxf(roundf(val_q_3), -32.0f), 31.0f);
-
-    // Shift to 6-bit unsigned range [0, 63]
-    const uint8_t q_val_0 = (uint8_t)(q_s_0 + 32);
-    const uint8_t q_val_1 = (uint8_t)(q_s_1 + 32);
-    const uint8_t q_val_2 = (uint8_t)(q_s_2 + 32);
-    const uint8_t q_val_3 = (uint8_t)(q_s_3 + 32);
-
-    // Pack the 6-bit values into ql and qh
-    // This is the reverse of the dequantization packing
-    
-    // Pack lower 4 bits into ql
-    // ql[0]  = (q_val_0 lower 4 bits) | (q_val_2 lower 4 bits << 4)
-    // ql[32] = (q_val_1 lower 4 bits) | (q_val_3 lower 4 bits << 4)
-    const uint8_t ql_0  = (q_val_0 & 0x0F) | ((q_val_2 & 0x0F) << 4);
-    const uint8_t ql_32 = (q_val_1 & 0x0F) | ((q_val_3 & 0x0F) << 4);
-
-    // Pack upper 2 bits into qh
-    // qh[0] = (q_val_0 upper 2 bits) << 0 |
-    //         (q_val_1 upper 2 bits) << 2 |
-    //         (q_val_2 upper 2 bits) << 4 |
-    //         (q_val_3 upper 2 bits) << 6
-    const uint8_t qh_0 = ((q_val_0 >> 4) & 0x03) << 0 |
-                         ((q_val_1 >> 4) & 0x03) << 2 |
-                         ((q_val_2 >> 4) & 0x03) << 4 |
-                         ((q_val_3 >> 4) & 0x03) << 6;
-
-    // Write to global memory
-    y->ql[64*ip + il +  0] = ql_0;
-    y->ql[64*ip + il + 32] = ql_32;
-    y->qh[32*ip + il]      = qh_0;
+    if (max_scale == 0.0f) {
+        y->d = __float2half(0.0f);
+        for (int i = 0; i < QK_K / 16; ++i) y->scales[i] = 0;
+    } else {
+        const float iscale = __fdiv_rn(-128.0f, max_scale);
+        y->d = __float2half(__fdiv_rn(1.0f, iscale));
+        for (int i = 0; i < QK_K / 16; ++i) {
+            y->scales[i] = (int8_t)min(127, kquant_nearest_int(iscale * sub_scales[i]));
+        }
+        for (int j = 0; j < QK_K / 16; ++j) {
+            const float d = __half2float(y->d) * y->scales[j];
+            if (d == 0.0f) continue;
+            for (int i = 0; i < 16; ++i) {
+                const int q = max(-32, min(31, kquant_nearest_int(x[j * 16 + i] / d)));
+                levels[j * 16 + i] = (int8_t)(q + 32);
+            }
+        }
+    }
+    for (int j = 0; j < QK_K; j += 128) {
+        for (int i = 0; i < 32; ++i) {
+            const int q1 = levels[j + i];
+            const int q2 = levels[j + i + 32];
+            const int q3 = levels[j + i + 64];
+            const int q4 = levels[j + i + 96];
+            const int ql = (j / 2) + i;
+            y->ql[ql] = (q1 & 0xF) | ((q3 & 0xF) << 4);
+            y->ql[ql + 32] = (q2 & 0xF) | ((q4 & 0xF) << 4);
+            y->qh[(j / 4) + i] = ((q1 >> 4) & 3) | (((q2 >> 4) & 3) << 2) |
+                                 (((q3 >> 4) & 3) << 4) | (((q4 >> 4) & 3) << 6);
+        }
+    }
 }
 
 

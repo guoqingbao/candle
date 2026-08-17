@@ -12,11 +12,14 @@ pub const DEFAULT_ALIGNMENT: u64 = 32;
 const GGML_TYPE_IQ2_XXS: u32 = 16;
 const GGML_TYPE_IQ2_XS: u32 = 17;
 const GGML_TYPE_IQ3_XXS: u32 = 18;
+const GGML_TYPE_IQ4_NL: u32 = 20;
 const GGML_TYPE_IQ4_XS: u32 = 23;
 const QK_K: usize = 256;
+const QK_IQ4_NL: usize = 32;
 const BLOCK_SIZE_IQ2_XXS: usize = 66;
 const BLOCK_SIZE_IQ2_XS: usize = 74;
 const BLOCK_SIZE_IQ3_XXS: usize = 98;
+const BLOCK_SIZE_IQ4_NL: usize = 18;
 const BLOCK_SIZE_IQ4_XS: usize = 136;
 
 const KSIGNS_IQ2XS: [u8; 128] = [
@@ -475,15 +478,28 @@ impl TensorInfo {
     }
 }
 
-fn compat_target_dtype() -> Result<GgmlDType> {
+fn compat_target_dtype(shape: &crate::Shape) -> Result<GgmlDType> {
     let target = std::env::var("CANDLE_GGUF_COMPAT_TARGET")
         .or_else(|_| std::env::var("VLLM_RS_GGUF_COMPAT_TARGET"))
         .unwrap_or_else(|_| "q4_k".to_string())
         .to_ascii_lowercase();
-    match target.as_str() {
-        "q8_0" | "q8" => Ok(GgmlDType::Q8_0),
-        "q4_k" | "q4k" | "q4_k_m" => Ok(GgmlDType::Q4K),
+    let target = match target.as_str() {
+        "q8_0" | "q8" => GgmlDType::Q8_0,
+        "q4_k" | "q4k" | "q4_k_m" => GgmlDType::Q4K,
         other => crate::bail!("unsupported GGUF compat target {other:?}, expected q8_0 or q4_k"),
+    };
+
+    // Q4_K uses 256-element blocks, while IQ4_NL uses 32-element blocks.
+    // Keep the configured Q4_K conversion for normal matrix weights, but
+    // use Q8_0 for narrow tensors which cannot be represented as Q4_K.
+    if shape
+        .dims()
+        .last()
+        .is_some_and(|dim| dim % target.block_size() == 0)
+    {
+        Ok(target)
+    } else {
+        Ok(GgmlDType::Q8_0)
     }
 }
 
@@ -492,7 +508,16 @@ fn compat_type_size(src_ggml_dtype: u32) -> Result<usize> {
         GGML_TYPE_IQ2_XXS => Ok(BLOCK_SIZE_IQ2_XXS),
         GGML_TYPE_IQ2_XS => Ok(BLOCK_SIZE_IQ2_XS),
         GGML_TYPE_IQ3_XXS => Ok(BLOCK_SIZE_IQ3_XXS),
+        GGML_TYPE_IQ4_NL => Ok(BLOCK_SIZE_IQ4_NL),
         GGML_TYPE_IQ4_XS => Ok(BLOCK_SIZE_IQ4_XS),
+        _ => crate::bail!("unsupported compat dtype for tensor {src_ggml_dtype}"),
+    }
+}
+
+fn compat_block_size(src_ggml_dtype: u32) -> Result<usize> {
+    match src_ggml_dtype {
+        GGML_TYPE_IQ4_NL => Ok(QK_IQ4_NL),
+        GGML_TYPE_IQ2_XXS | GGML_TYPE_IQ2_XS | GGML_TYPE_IQ3_XXS | GGML_TYPE_IQ4_XS => Ok(QK_K),
         _ => crate::bail!("unsupported compat dtype for tensor {src_ggml_dtype}"),
     }
 }
@@ -506,12 +531,13 @@ fn read_compat_qtensor<R: std::io::Seek + std::io::Read>(
     device: &Device,
 ) -> Result<QTensor> {
     let tensor_elems = shape.elem_count();
-    if tensor_elems % QK_K != 0 {
+    let src_block_size = compat_block_size(src_ggml_dtype)?;
+    if tensor_elems % src_block_size != 0 {
         crate::bail!(
-            "the number of elements {tensor_elems} is not divisible by the compat block size {QK_K}"
+            "the number of elements {tensor_elems} is not divisible by the compat block size {src_block_size}"
         )
     }
-    let size_in_bytes = tensor_elems / QK_K * compat_type_size(src_ggml_dtype)?;
+    let size_in_bytes = tensor_elems / src_block_size * compat_type_size(src_ggml_dtype)?;
     let mut raw_data = vec![0u8; size_in_bytes];
     reader.seek(std::io::SeekFrom::Start(offset))?;
     reader.read_exact(&mut raw_data)?;
@@ -519,6 +545,7 @@ fn read_compat_qtensor<R: std::io::Seek + std::io::Read>(
         GGML_TYPE_IQ2_XXS => dequantize_iq2_xxs(&raw_data, tensor_elems)?,
         GGML_TYPE_IQ2_XS => dequantize_iq2_xs(&raw_data, tensor_elems)?,
         GGML_TYPE_IQ3_XXS => dequantize_iq3_xxs(&raw_data, tensor_elems)?,
+        GGML_TYPE_IQ4_NL => dequantize_iq4_nl(&raw_data, tensor_elems)?,
         GGML_TYPE_IQ4_XS => dequantize_iq4_xs(&raw_data, tensor_elems)?,
         _ => crate::bail!("unsupported compat dtype for tensor {src_ggml_dtype}"),
     };
@@ -1209,6 +1236,28 @@ fn dequantize_iq4_xs(raw: &[u8], elem_count: usize) -> Result<Vec<f32>> {
     Ok(out)
 }
 
+fn dequantize_iq4_nl(raw: &[u8], elem_count: usize) -> Result<Vec<f32>> {
+    if elem_count % QK_IQ4_NL != 0 {
+        crate::bail!("IQ4_NL tensor element count {elem_count} is not divisible by {QK_IQ4_NL}");
+    }
+    if raw.len() != elem_count / QK_IQ4_NL * BLOCK_SIZE_IQ4_NL {
+        crate::bail!("IQ4_NL buffer size mismatch: got {}", raw.len());
+    }
+
+    let mut out = vec![0f32; elem_count];
+    for (block_idx, block) in raw.chunks_exact(BLOCK_SIZE_IQ4_NL).enumerate() {
+        let d = f16::from_bits(le_u16(&block[0..2])).to_f32();
+        let qs = &block[2..];
+        let base = block_idx * QK_IQ4_NL;
+        for j in 0..16 {
+            let q = qs[j];
+            out[base + j] = d * KVALUES_IQ4NL[(q & 0x0f) as usize] as f32;
+            out[base + 16 + j] = d * KVALUES_IQ4NL[(q >> 4) as usize] as f32;
+        }
+    }
+    Ok(out)
+}
+
 fn le_u16(bytes: &[u8]) -> u16 {
     u16::from_le_bytes([bytes[0], bytes[1]])
 }
@@ -1573,8 +1622,18 @@ impl Content {
 
             dimensions.reverse();
             let raw_ggml_dtype = reader.read_u32::<LittleEndian>()?;
-            let ggml_dtype = GgmlDType::from_u32(raw_ggml_dtype)?;
-            let src_ggml_dtype: Option<u32> = None;
+            let (ggml_dtype, src_ggml_dtype) = if raw_ggml_dtype == GGML_TYPE_IQ4_NL {
+                // Candle does not have a native IQ4_NL CUDA/Metal matmul
+                // path.  Preserve the source dtype and transparently
+                // dequantize/requantize it to the configured compatible type
+                // when the tensor is first read.
+                (
+                    compat_target_dtype(&crate::Shape::from(dimensions.clone()))?,
+                    Some(raw_ggml_dtype),
+                )
+            } else {
+                (GgmlDType::from_u32(raw_ggml_dtype)?, None)
+            };
             let offset = reader.read_u64::<LittleEndian>()?;
             tensor_infos.insert(
                 tensor_name,

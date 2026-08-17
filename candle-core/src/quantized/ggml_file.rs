@@ -193,8 +193,23 @@ pub fn qtensor_from_ggml(
         GgmlDType::IQ3_XXS => {
             from_raw_data::<k_quants::BlockIQ3XXS>(raw_data, size_in_bytes, dims, device)
         }
+        GgmlDType::IQ1_S => {
+            from_raw_data::<k_quants::BlockIQ1S>(raw_data, size_in_bytes, dims, device)
+        }
+        GgmlDType::IQ4_NL => {
+            from_raw_data::<k_quants::BlockIQ4NL>(raw_data, size_in_bytes, dims, device)
+        }
+        GgmlDType::IQ3_S => {
+            from_raw_data::<k_quants::BlockIQ3S>(raw_data, size_in_bytes, dims, device)
+        }
+        GgmlDType::IQ2_S => {
+            from_raw_data::<k_quants::BlockIQ2S>(raw_data, size_in_bytes, dims, device)
+        }
         GgmlDType::IQ4_XS => {
             from_raw_data::<k_quants::BlockIQ4XS>(raw_data, size_in_bytes, dims, device)
+        }
+        GgmlDType::IQ1_M => {
+            from_raw_data::<k_quants::BlockIQ1M>(raw_data, size_in_bytes, dims, device)
         }
         _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
     }

@@ -164,7 +164,17 @@ fn dequantize_f32(
         GgmlDType::IQ2_XXS => ("dequantize_block_iq2_xxs_f32", true, 32, nb),
         GgmlDType::IQ2_XS => ("dequantize_block_iq2_xs_f32", true, 32, nb),
         GgmlDType::IQ3_XXS => ("dequantize_block_iq3_xxs_f32", true, 32, nb),
+        GgmlDType::IQ1_S => ("dequantize_block_iq1_s_f32", true, 32, nb),
+        GgmlDType::IQ4_NL => (
+            "dequantize_block_iq4_nl_f32",
+            true,
+            32,
+            ceil_div(elem_count, GgmlDType::IQ4_NL.block_size()),
+        ),
+        GgmlDType::IQ3_S => ("dequantize_block_iq3_s_f32", true, 32, nb),
+        GgmlDType::IQ2_S => ("dequantize_block_iq2_s_f32", true, 32, nb),
         GgmlDType::IQ4_XS => ("dequantize_block_iq4_xs_f32", true, 32, nb),
+        GgmlDType::IQ1_M => ("dequantize_block_iq1_m_f32", true, 32, nb),
         _ => crate::bail!("unsupported dtype for dequantize {dtype:?}"),
     };
     let func = dev.get_or_load_func(kernel_name, candle_kernels::QUANTIZED)?;
@@ -225,7 +235,17 @@ fn dequantize_f16(
         GgmlDType::IQ2_XXS => ("dequantize_block_iq2_xxs_f16", true, 32, nb),
         GgmlDType::IQ2_XS => ("dequantize_block_iq2_xs_f16", true, 32, nb),
         GgmlDType::IQ3_XXS => ("dequantize_block_iq3_xxs_f16", true, 32, nb),
+        GgmlDType::IQ1_S => ("dequantize_block_iq1_s_f16", true, 32, nb),
+        GgmlDType::IQ4_NL => (
+            "dequantize_block_iq4_nl_f16",
+            true,
+            32,
+            ceil_div(elem_count, GgmlDType::IQ4_NL.block_size()),
+        ),
+        GgmlDType::IQ3_S => ("dequantize_block_iq3_s_f16", true, 32, nb),
+        GgmlDType::IQ2_S => ("dequantize_block_iq2_s_f16", true, 32, nb),
         GgmlDType::IQ4_XS => ("dequantize_block_iq4_xs_f16", true, 32, nb),
+        GgmlDType::IQ1_M => ("dequantize_block_iq1_m_f16", true, 32, nb),
         _ => crate::bail!("unsupported dtype for dequantize {dtype:?}"),
     };
     let func = dev.get_or_load_func(kernel_name, candle_kernels::QUANTIZED)?;
@@ -573,7 +593,12 @@ impl QCudaStorage {
                 | GgmlDType::IQ2_XXS
                 | GgmlDType::IQ2_XS
                 | GgmlDType::IQ3_XXS
+                | GgmlDType::IQ1_S
+                | GgmlDType::IQ4_NL
+                | GgmlDType::IQ3_S
+                | GgmlDType::IQ2_S
                 | GgmlDType::IQ4_XS
+                | GgmlDType::IQ1_M
         );
         if fast_kernel {
             return dequantize_f32(&self.data, self.dtype, elem_count, self.device());
@@ -609,7 +634,12 @@ impl QCudaStorage {
             GgmlDType::IQ3_XXS => {
                 deq::<crate::quantized::BlockIQ3XXS>(&buffer, block_len, &mut out)?
             }
+            GgmlDType::IQ1_S => deq::<crate::quantized::BlockIQ1S>(&buffer, block_len, &mut out)?,
+            GgmlDType::IQ4_NL => deq::<crate::quantized::BlockIQ4NL>(&buffer, block_len, &mut out)?,
+            GgmlDType::IQ3_S => deq::<crate::quantized::BlockIQ3S>(&buffer, block_len, &mut out)?,
+            GgmlDType::IQ2_S => deq::<crate::quantized::BlockIQ2S>(&buffer, block_len, &mut out)?,
             GgmlDType::IQ4_XS => deq::<crate::quantized::BlockIQ4XS>(&buffer, block_len, &mut out)?,
+            GgmlDType::IQ1_M => deq::<crate::quantized::BlockIQ1M>(&buffer, block_len, &mut out)?,
         }
 
         self.device
@@ -667,7 +697,15 @@ impl QCudaStorage {
     ) -> Result<(CudaStorage, crate::Shape)> {
         let is_iq = matches!(
             self.dtype,
-            GgmlDType::IQ2_XXS | GgmlDType::IQ2_XS | GgmlDType::IQ3_XXS | GgmlDType::IQ4_XS
+            GgmlDType::IQ2_XXS
+                | GgmlDType::IQ2_XS
+                | GgmlDType::IQ3_XXS
+                | GgmlDType::IQ1_S
+                | GgmlDType::IQ4_NL
+                | GgmlDType::IQ3_S
+                | GgmlDType::IQ2_S
+                | GgmlDType::IQ4_XS
+                | GgmlDType::IQ1_M
         );
         if is_iq {
             return self.dequantize_matmul(self_shape, storage, layout);
@@ -786,6 +824,15 @@ fn indexed_moe_forward_fused_q8_1_input(
         GgmlDType::Q5K => "indexed_moe_forward_q5k_q8_1",
         GgmlDType::Q6K => "indexed_moe_forward_q6k_q8_1",
         GgmlDType::Q8_0 => "indexed_moe_forward_q8_0_q8_1",
+        GgmlDType::IQ2_XXS => "indexed_moe_forward_iq2_xxs_q8_1",
+        GgmlDType::IQ2_XS => "indexed_moe_forward_iq2_xs_q8_1",
+        GgmlDType::IQ3_XXS => "indexed_moe_forward_iq3_xxs_q8_1",
+        GgmlDType::IQ4_XS => "indexed_moe_forward_iq4_xs_q8_1",
+        GgmlDType::IQ1_S => "indexed_moe_forward_iq1_s_q8_1",
+        GgmlDType::IQ4_NL => "indexed_moe_forward_iq4_nl_q8_1",
+        GgmlDType::IQ3_S => "indexed_moe_forward_iq3_s_q8_1",
+        GgmlDType::IQ2_S => "indexed_moe_forward_iq2_s_q8_1",
+        GgmlDType::IQ1_M => "indexed_moe_forward_iq1_m_q8_1",
         _ => crate::bail!("unsupported dtype for indexed_moe_forward {w_dtype:?}"),
     };
 
@@ -884,6 +931,15 @@ impl QCudaStorage {
                 | GgmlDType::Q4K
                 | GgmlDType::Q5K
                 | GgmlDType::Q6K
+                | GgmlDType::IQ2_XXS
+                | GgmlDType::IQ2_XS
+                | GgmlDType::IQ3_XXS
+                | GgmlDType::IQ4_XS
+                | GgmlDType::IQ1_S
+                | GgmlDType::IQ4_NL
+                | GgmlDType::IQ3_S
+                | GgmlDType::IQ2_S
+                | GgmlDType::IQ1_M
         ) {
             let input_storage = input.as_cuda_slice::<f32>()?;
             let ids_storage = ids.as_cuda_slice::<u32>()?;
@@ -1036,7 +1092,15 @@ impl QCudaStorage {
         let use_dequant_path = FORCE_DMMV.load(std::sync::atomic::Ordering::Relaxed)
             || matches!(
                 self.dtype,
-                GgmlDType::IQ2_XXS | GgmlDType::IQ2_XS | GgmlDType::IQ3_XXS | GgmlDType::IQ4_XS
+                GgmlDType::IQ2_XXS
+                    | GgmlDType::IQ2_XS
+                    | GgmlDType::IQ3_XXS
+                    | GgmlDType::IQ1_S
+                    | GgmlDType::IQ4_NL
+                    | GgmlDType::IQ3_S
+                    | GgmlDType::IQ2_S
+                    | GgmlDType::IQ4_XS
+                    | GgmlDType::IQ1_M
             );
         let out = if use_dequant_path {
             let data_f32 = self.dequantize(n * k)?;

@@ -159,7 +159,12 @@ pub enum GgmlDType {
     IQ2_XXS,
     IQ2_XS,
     IQ3_XXS,
+    IQ1_S,
+    IQ4_NL,
+    IQ3_S,
+    IQ2_S,
     IQ4_XS,
+    IQ1_M,
 }
 
 impl GgmlDType {
@@ -182,7 +187,12 @@ impl GgmlDType {
             16 => Self::IQ2_XXS,
             17 => Self::IQ2_XS,
             18 => Self::IQ3_XXS,
+            19 => Self::IQ1_S,
+            20 => Self::IQ4_NL,
+            21 => Self::IQ3_S,
+            22 => Self::IQ2_S,
             23 => Self::IQ4_XS,
+            29 => Self::IQ1_M,
             // https://github.com/ggerganov/ggml/blob/29d87fc6676e7ed0cdfdec0804b06001d9c2bb44/include/ggml.h#L389
             30 => Self::BF16,
             _ => crate::bail!("unknown dtype for tensor {u}"),
@@ -209,7 +219,12 @@ impl GgmlDType {
             Self::IQ2_XXS => 16,
             Self::IQ2_XS => 17,
             Self::IQ3_XXS => 18,
+            Self::IQ1_S => 19,
+            Self::IQ4_NL => 20,
+            Self::IQ3_S => 21,
+            Self::IQ2_S => 22,
             Self::IQ4_XS => 23,
+            Self::IQ1_M => 29,
             // https://github.com/ggerganov/ggml/blob/29d87fc6676e7ed0cdfdec0804b06001d9c2bb44/include/ggml.h#L389
             Self::BF16 => 30,
         }
@@ -244,10 +259,18 @@ impl GgmlDType {
                 BlockIQ3XXS::zeros();
                 elem_count / BlockIQ3XXS::BLCK_SIZE
             ]),
+            Self::IQ1_S => Box::new(vec![BlockIQ1S::zeros(); elem_count / BlockIQ1S::BLCK_SIZE]),
+            Self::IQ4_NL => Box::new(vec![
+                BlockIQ4NL::zeros();
+                elem_count / BlockIQ4NL::BLCK_SIZE
+            ]),
+            Self::IQ3_S => Box::new(vec![BlockIQ3S::zeros(); elem_count / BlockIQ3S::BLCK_SIZE]),
+            Self::IQ2_S => Box::new(vec![BlockIQ2S::zeros(); elem_count / BlockIQ2S::BLCK_SIZE]),
             Self::IQ4_XS => Box::new(vec![
                 BlockIQ4XS::zeros();
                 elem_count / BlockIQ4XS::BLCK_SIZE
             ]),
+            Self::IQ1_M => Box::new(vec![BlockIQ1M::zeros(); elem_count / BlockIQ1M::BLCK_SIZE]),
             Self::BF16 => Box::new(vec![bf16::zeros(); elem_count]),
         }
     }
@@ -273,7 +296,12 @@ impl GgmlDType {
             Self::IQ2_XXS => std::mem::size_of::<BlockIQ2XXS>(),
             Self::IQ2_XS => std::mem::size_of::<BlockIQ2XS>(),
             Self::IQ3_XXS => std::mem::size_of::<BlockIQ3XXS>(),
+            Self::IQ1_S => std::mem::size_of::<BlockIQ1S>(),
+            Self::IQ4_NL => std::mem::size_of::<BlockIQ4NL>(),
+            Self::IQ3_S => std::mem::size_of::<BlockIQ3S>(),
+            Self::IQ2_S => std::mem::size_of::<BlockIQ2S>(),
             Self::IQ4_XS => std::mem::size_of::<BlockIQ4XS>(),
+            Self::IQ1_M => std::mem::size_of::<BlockIQ1M>(),
         }
     }
 
@@ -297,7 +325,12 @@ impl GgmlDType {
             | Self::IQ2_XXS
             | Self::IQ2_XS
             | Self::IQ3_XXS
+            | Self::IQ1_S
+            | Self::IQ3_S
+            | Self::IQ2_S
             | Self::IQ4_XS => k_quants::QK_K,
+            Self::IQ4_NL => 32,
+            Self::IQ1_M => k_quants::QK_K,
         }
     }
 }

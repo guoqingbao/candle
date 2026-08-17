@@ -189,6 +189,57 @@ pub struct BlockIQ4XS {
 }
 const _: () = assert!(2 + 2 + QK_K / 64 + QK_K / 2 == std::mem::size_of::<BlockIQ4XS>());
 
+// The newer IQ formats are kept as native raw blocks. CUDA has dedicated
+// dequantization/GEMM support for them; the CPU quantizer intentionally does
+// not synthesize these formats.
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIQ1S {
+    pub(crate) d: f16,
+    pub(crate) qs: [u8; QK_K / 8],
+    pub(crate) qh: [u16; QK_K / 32],
+}
+const _: () = assert!(2 + QK_K / 8 + QK_K / 32 * 2 == std::mem::size_of::<BlockIQ1S>());
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIQ3S {
+    pub(crate) d: f16,
+    pub(crate) qs: [u8; QK_K / 4],
+    pub(crate) qh: [u8; QK_K / 32],
+    pub(crate) signs: [u8; QK_K / 8],
+    pub(crate) scales: [u8; QK_K / 64],
+}
+const _: () =
+    assert!(2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64 == std::mem::size_of::<BlockIQ3S>());
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIQ2S {
+    pub(crate) d: f16,
+    pub(crate) qs: [u8; QK_K / 4],
+    pub(crate) qh: [u8; QK_K / 32],
+    pub(crate) scales: [u8; QK_K / 32],
+}
+const _: () = assert!(2 + QK_K / 4 + QK_K / 32 + QK_K / 32 == std::mem::size_of::<BlockIQ2S>());
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIQ4NL {
+    pub(crate) d: f16,
+    pub(crate) qs: [u8; 16],
+}
+const _: () = assert!(2 + 16 == std::mem::size_of::<BlockIQ4NL>());
+
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIQ1M {
+    pub(crate) qs: [u8; QK_K / 8],
+    pub(crate) qh: [u8; QK_K / 16],
+    pub(crate) scales: [u8; QK_K / 32],
+}
+const _: () = assert!(QK_K / 8 + QK_K / 16 + QK_K / 32 == std::mem::size_of::<BlockIQ1M>());
+
 pub(crate) const KSIGNS_IQ2XS: [u8; 128] = [
     0, 129, 130, 3, 132, 5, 6, 135, 136, 9, 10, 139, 12, 141, 142, 15, 144, 17, 18, 147, 20, 149,
     150, 23, 24, 153, 154, 27, 156, 29, 30, 159, 160, 33, 34, 163, 36, 165, 166, 39, 40, 169, 170,
@@ -1260,6 +1311,38 @@ impl GgmlType for BlockIQ4XS {
         iq_vec_dot_q8k(n, xs, ys)
     }
 }
+
+macro_rules! impl_native_iq_raw {
+    ($block:ty, $dtype:expr, $blck:expr, $name:literal) => {
+        impl GgmlType for $block {
+            const DTYPE: GgmlDType = $dtype;
+            const BLCK_SIZE: usize = $blck;
+            type VecDotType = BlockQ8K;
+
+            fn to_float(_xs: &[Self], _ys: &mut [f32]) -> Result<()> {
+                crate::bail!(concat!($name, " CPU dequantization is not implemented"))
+            }
+
+            fn from_float(_xs: &[f32], _ys: &mut [Self]) -> Result<()> {
+                crate::bail!(concat!($name, " quantization from float is not supported"))
+            }
+
+            fn vec_dot(_n: usize, _xs: &[Self], _ys: &[Self::VecDotType]) -> Result<f32> {
+                crate::bail!(concat!($name, " CPU dot product is not implemented"))
+            }
+
+            fn vec_dot_unopt(_n: usize, _xs: &[Self], _ys: &[Self::VecDotType]) -> Result<f32> {
+                crate::bail!(concat!($name, " CPU dot product is not implemented"))
+            }
+        }
+    };
+}
+
+impl_native_iq_raw!(BlockIQ1S, GgmlDType::IQ1_S, QK_K, "IQ1_S");
+impl_native_iq_raw!(BlockIQ3S, GgmlDType::IQ3_S, QK_K, "IQ3_S");
+impl_native_iq_raw!(BlockIQ2S, GgmlDType::IQ2_S, QK_K, "IQ2_S");
+impl_native_iq_raw!(BlockIQ4NL, GgmlDType::IQ4_NL, 32, "IQ4_NL");
+impl_native_iq_raw!(BlockIQ1M, GgmlDType::IQ1_M, QK_K, "IQ1_M");
 
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;

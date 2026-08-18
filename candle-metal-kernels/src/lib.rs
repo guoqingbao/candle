@@ -2264,7 +2264,12 @@ pub enum GgmlDType {
     IQ2_XXS,
     IQ2_XS,
     IQ3_XXS,
+    IQ1_S,
+    IQ4_NL,
+    IQ3_S,
+    IQ2_S,
     IQ4_XS,
+    IQ1_M,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2342,6 +2347,16 @@ pub fn call_quantized_matmul_mv_t(
             let align = 4;
             (nth0, nth1, align)
         }
+        GgmlDType::IQ1_S
+        | GgmlDType::IQ4_NL
+        | GgmlDType::IQ3_S
+        | GgmlDType::IQ2_S
+        | GgmlDType::IQ1_M => {
+            let nth0 = 2;
+            let nth1 = 32;
+            let align = 4;
+            (nth0, nth1, align)
+        }
         GgmlDType::Q6K => {
             let nth0 = 2;
             let nth1 = 32;
@@ -2391,7 +2406,12 @@ pub fn call_quantized_matmul_mv_t(
         GgmlDType::IQ2_XXS => "kernel_mul_mv_iq2_xxs_f32",
         GgmlDType::IQ2_XS => "kernel_mul_mv_iq2_xs_f32",
         GgmlDType::IQ3_XXS => "kernel_mul_mv_iq3_xxs_f32",
+        GgmlDType::IQ1_S => "kernel_mul_mv_iq1_s_f32",
+        GgmlDType::IQ4_NL => "kernel_mul_mv_iq4_nl_f32",
+        GgmlDType::IQ3_S => "kernel_mul_mv_iq3_s_f32",
+        GgmlDType::IQ2_S => "kernel_mul_mv_iq2_s_f32",
         GgmlDType::IQ4_XS => "kernel_mul_mv_iq4_xs_f32",
+        GgmlDType::IQ1_M => "kernel_mul_mv_iq1_m_f32",
     };
 
     let pipeline = kernels.load_pipeline(device, Source::Quantized, name)?;
@@ -2503,7 +2523,12 @@ pub fn call_quantized_matmul_mm_t(
         GgmlDType::IQ2_XXS => "kernel_mul_mm_iq2_xxs_f32",
         GgmlDType::IQ2_XS => "kernel_mul_mm_iq2_xs_f32",
         GgmlDType::IQ3_XXS => "kernel_mul_mm_iq3_xxs_f32",
+        GgmlDType::IQ1_S => "kernel_mul_mm_iq1_s_f32",
+        GgmlDType::IQ4_NL => "kernel_mul_mm_iq4_nl_f32",
+        GgmlDType::IQ3_S => "kernel_mul_mm_iq3_s_f32",
+        GgmlDType::IQ2_S => "kernel_mul_mm_iq2_s_f32",
         GgmlDType::IQ4_XS => "kernel_mul_mm_iq4_xs_f32",
+        GgmlDType::IQ1_M => "kernel_mul_mm_iq1_m_f32",
     };
 
     let pipeline = kernels.load_pipeline(device, Source::Quantized, name)?;

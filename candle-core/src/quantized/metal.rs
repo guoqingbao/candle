@@ -145,6 +145,26 @@ impl QMetalStorage {
                 let vec: Vec<crate::quantized::BlockIQ4XS> = read_to_vec(&buffer, block_len);
                 crate::quantized::BlockIQ4XS::to_float(&vec, &mut out)?;
             }
+            GgmlDType::IQ1_S => {
+                let vec: Vec<crate::quantized::BlockIQ1S> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIQ1S::to_float(&vec, &mut out)?;
+            }
+            GgmlDType::IQ4_NL => {
+                let vec: Vec<crate::quantized::BlockIQ4NL> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIQ4NL::to_float(&vec, &mut out)?;
+            }
+            GgmlDType::IQ3_S => {
+                let vec: Vec<crate::quantized::BlockIQ3S> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIQ3S::to_float(&vec, &mut out)?;
+            }
+            GgmlDType::IQ2_S => {
+                let vec: Vec<crate::quantized::BlockIQ2S> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIQ2S::to_float(&vec, &mut out)?;
+            }
+            GgmlDType::IQ1_M => {
+                let vec: Vec<crate::quantized::BlockIQ1M> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIQ1M::to_float(&vec, &mut out)?;
+            }
         }
 
         let buffer = self.device.new_buffer_with_data(&out)?;
@@ -381,6 +401,11 @@ impl From<GgmlDType> for candle_metal_kernels::GgmlDType {
             GgmlDType::IQ2_XS => candle_metal_kernels::GgmlDType::IQ2_XS,
             GgmlDType::IQ3_XXS => candle_metal_kernels::GgmlDType::IQ3_XXS,
             GgmlDType::IQ4_XS => candle_metal_kernels::GgmlDType::IQ4_XS,
+            GgmlDType::IQ1_S => candle_metal_kernels::GgmlDType::IQ1_S,
+            GgmlDType::IQ4_NL => candle_metal_kernels::GgmlDType::IQ4_NL,
+            GgmlDType::IQ3_S => candle_metal_kernels::GgmlDType::IQ3_S,
+            GgmlDType::IQ2_S => candle_metal_kernels::GgmlDType::IQ2_S,
+            GgmlDType::IQ1_M => candle_metal_kernels::GgmlDType::IQ1_M,
         }
     }
 }

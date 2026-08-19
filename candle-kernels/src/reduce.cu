@@ -199,12 +199,22 @@ __device__ void layernorm(const T * x, T * dst, const T * alpha, const T * beta,
         __shared__ float2 s_sum[32];
         int warp_id = threadIdx.x / WARP_SIZE;
         int lane_id = threadIdx.x % WARP_SIZE;
+        const int nwarps = block_size / WARP_SIZE;
+        if (tid < 32) {
+            s_sum[tid] = make_float2(0.f, 0.f);
+        }
+        __syncthreads();
         if (lane_id == 0) {
             s_sum[warp_id] = mean_var;
         }
         __syncthreads();
-        mean_var = s_sum[lane_id];
+        mean_var = (lane_id < nwarps) ? s_sum[lane_id] : make_float2(0.f, 0.f);
         mean_var = warp_reduce_sum(mean_var);
+        if (warp_id == 0 && lane_id == 0) {
+            s_sum[0] = mean_var;
+        }
+        __syncthreads();
+        mean_var = s_sum[0];
     }
 
     const float mean = mean_var.x / ncols;
@@ -252,25 +262,36 @@ __device__ void rmsnorm(const T * x, T * dst, const T * alpha, const int ncols, 
 
     for (int col = tid; col < ncols; col += block_size) {
         const float xi = static_cast<float>(x[row*ncols + col]);
-        tmp += xi * xi;
+        tmp = fmaf(xi, xi, tmp);
     }
 
     // sum up partial sums
     tmp = warp_reduce_sum(tmp);
     if (block_size > WARP_SIZE) {
+        // Only the live warps write. Zero the rest so a block size other than
+        // 1024 cannot fold uninitialized shared memory into the variance.
         __shared__ float s_sum[32];
         int warp_id = threadIdx.x / WARP_SIZE;
         int lane_id = threadIdx.x % WARP_SIZE;
+        const int nwarps = block_size / WARP_SIZE;
+        if (tid < 32) {
+            s_sum[tid] = 0.0f;
+        }
+        __syncthreads();
         if (lane_id == 0) {
             s_sum[warp_id] = tmp;
         }
         __syncthreads();
-        tmp = s_sum[lane_id];
+        tmp = (lane_id < nwarps) ? s_sum[lane_id] : 0.0f;
         tmp = warp_reduce_sum(tmp);
+        if (warp_id == 0 && lane_id == 0) {
+            s_sum[0] = tmp;
+        }
+        __syncthreads();
+        tmp = s_sum[0];
     }
 
-    const float mean = tmp / ncols;
-    const float scale = rsqrtf(mean + eps);
+    const float scale = rsqrtf(tmp / static_cast<float>(ncols) + eps);
 
     if (alpha == nullptr) {
       for (int col = tid; col < ncols; col += block_size) {

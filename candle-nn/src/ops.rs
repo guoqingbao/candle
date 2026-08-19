@@ -488,10 +488,11 @@ impl candle::CustomOp2 for RmsNorm {
                             v * v
                         })
                         .sum::<f32>();
-                    let m = (sum2 / dim_m1 as f32 + eps).sqrt();
-                    let m = T::from_f32(m).unwrap_or_else(T::nan);
+                    // Match the CUDA kernel: x * rsqrt(mean(x^2)+eps) * alpha.
+                    let scale = (sum2 / dim_m1 as f32 + eps).sqrt().recip();
+                    let scale = T::from_f32(scale).unwrap_or_else(T::nan);
                     for ((d, s), alpha) in dst.iter_mut().zip(src.iter()).zip(alpha) {
-                        *d = *s / m * *alpha
+                        *d = *s * scale * *alpha
                     }
                 });
             let storage = candle::WithDType::to_cpu_storage_owned(dst);
@@ -634,7 +635,7 @@ pub fn rms_norm_slow(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
     let hidden_size = x.dim(D::Minus1)?;
     let x = x.to_dtype(internal_dtype)?;
     let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-    let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+    let x_normed = x.broadcast_mul(&(norm_x + eps as f64)?.sqrt()?.recip()?)?;
     x_normed.to_dtype(x_dtype)?.broadcast_mul(alpha)
 }
 

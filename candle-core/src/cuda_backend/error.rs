@@ -15,6 +15,9 @@ pub enum CudaError {
     #[error(transparent)]
     Curand(#[from] cudarc::curand::result::CurandError),
 
+    #[error("failed to set cuBLAS workspace, status {0:?}")]
+    BlasWorkspace(cudarc::cublas::sys::cublasStatus_t),
+
     #[error("missing kernel '{module_name}'")]
     MissingKernel { module_name: String },
 

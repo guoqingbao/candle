@@ -26,11 +26,74 @@ impl DeviceId {
 struct CudaRng(cudarc::curand::CudaRng);
 unsafe impl Send for CudaRng {}
 
+/// Persistent cuBLAS workspace allocated with `cuMemAlloc` (outside any memory
+/// pool / stream-ordered allocator).
+///
+/// Without a user-provided workspace, cuBLAS allocates its internal workspace
+/// lazily via stream-ordered allocation. When that first happens *during CUDA
+/// graph capture*, the workspace becomes a graph-owned memory node whose
+/// address is cached in the cuBLAS handle and baked into every subsequently
+/// captured graph. With `AUTO_FREE_ON_LAUNCH` graph pools the address is
+/// recycled once the owning graph replays, so workspace-writing kernels (e.g.
+/// split-K `dot_kernel`) corrupt unrelated tensors on replay.
+///
+/// Setting a stable workspace up front (per handle/stream) avoids any
+/// workspace allocation during capture. This mirrors what PyTorch does for
+/// CUDA graph support.
+struct BlasWorkspace {
+    ptr: cudarc::driver::sys::CUdeviceptr,
+    size: usize,
+}
+
+// The workspace is a plain device allocation shared by all clones of the
+// device; it is only read/written by cuBLAS on the device's own stream.
+unsafe impl Send for BlasWorkspace {}
+unsafe impl Sync for BlasWorkspace {}
+
+impl BlasWorkspace {
+    /// 32 MiB matches the upper range of common cuBLAS workspace configs and
+    /// is large enough for split-K reductions used by skinny decode matmuls.
+    const SIZE: usize = 32 * 1024 * 1024;
+
+    fn new(device: &cudarc::driver::CudaDevice) -> Result<Self> {
+        use cudarc::driver::result;
+        device.bind_to_thread().w()?;
+        let ptr = unsafe { result::malloc_sync(Self::SIZE) }.w()?;
+        Ok(Self {
+            ptr,
+            size: Self::SIZE,
+        })
+    }
+
+    fn attach(&self, blas: &cudarc::cublas::CudaBlas) -> Result<()> {
+        let status = unsafe {
+            cudarc::cublas::sys::lib().cublasSetWorkspace_v2(
+                *blas.handle(),
+                self.ptr as *mut core::ffi::c_void,
+                self.size,
+            )
+        };
+        if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            return Err(CudaError::BlasWorkspace(status)).w();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BlasWorkspace {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = cudarc::driver::result::free_sync(self.ptr);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CudaDevice {
     id: DeviceId,
     device: Arc<cudarc::driver::CudaDevice>,
     pub(crate) blas: Arc<cudarc::cublas::CudaBlas>,
+    blas_workspace: Arc<BlasWorkspace>,
     curand: Arc<Mutex<CudaRng>>,
 }
 
@@ -179,11 +242,14 @@ impl CudaDevice {
     pub fn new_with_stream(ordinal: usize) -> Result<Self> {
         let device = cudarc::driver::CudaDevice::new_with_stream(ordinal).w()?;
         let blas = cudarc::cublas::CudaBlas::new(device.clone()).w()?;
+        let blas_workspace = BlasWorkspace::new(&device)?;
+        blas_workspace.attach(&blas)?;
         let curand = cudarc::curand::CudaRng::new(299792458, device.clone()).w()?;
         Ok(Self {
             id: DeviceId::new(),
             device,
             blas: Arc::new(blas),
+            blas_workspace: Arc::new(blas_workspace),
             curand: Arc::new(Mutex::new(CudaRng(curand))),
         })
     }
@@ -195,11 +261,14 @@ impl BackendDevice for CudaDevice {
     fn new(ordinal: usize) -> Result<Self> {
         let device = cudarc::driver::CudaDevice::new(ordinal).w()?;
         let blas = cudarc::cublas::CudaBlas::new(device.clone()).w()?;
+        let blas_workspace = BlasWorkspace::new(&device)?;
+        blas_workspace.attach(&blas)?;
         let curand = cudarc::curand::CudaRng::new(299792458, device.clone()).w()?;
         Ok(Self {
             id: DeviceId::new(),
             device,
             blas: Arc::new(blas),
+            blas_workspace: Arc::new(blas_workspace),
             curand: Arc::new(Mutex::new(CudaRng(curand))),
         })
     }

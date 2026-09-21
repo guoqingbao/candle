@@ -357,7 +357,6 @@ impl Map1Any for FastReduce<'_> {
             dims.push(src_dims[dim_idx]);
             stride.push(src_stride[dim_idx]);
         }
-        let el_to_sum_per_block = src_el / dst_el;
         let (name, check_empty, return_index) = match self.1 {
             ReduceOp::Sum => ("fast_sum", false, false),
             ReduceOp::Min => ("fast_min", true, false),
@@ -365,6 +364,17 @@ impl Map1Any for FastReduce<'_> {
             ReduceOp::ArgMin => ("fast_argmin", true, true),
             ReduceOp::ArgMax => ("fast_argmax", true, true),
         };
+        if check_empty && layout.shape().elem_count() == 0 {
+            Err(crate::Error::EmptyTensor { op: "reduce" }.bt())?
+        }
+        if dst_el == 0 {
+            return if return_index {
+                Ok(S::U32(unsafe { dev.alloc::<u32>(0) }.w()?))
+            } else {
+                Ok(wrap(unsafe { dev.alloc::<T>(0) }.w()?))
+            };
+        }
+        let el_to_sum_per_block = src_el / dst_el;
         // For small reductions (e.g. MoE topk sum with el_to_sum=8), use a one-thread-per-output
         // kernel to avoid launching millions of blocks each doing almost nothing.
         let use_small_reduce = el_to_sum_per_block <= 32 && !return_index && name == "fast_sum";
@@ -393,21 +403,33 @@ impl Map1Any for FastReduce<'_> {
         let ds =
             SlicePtrOrNull::params_from_vec(dev, [dims.as_slice(), stride.as_slice()].concat())?;
         let src = &src.slice(layout.start_offset()..);
-        if check_empty && layout.shape().elem_count() == 0 {
-            Err(crate::Error::EmptyTensor { op: "reduce" }.bt())?
-        }
         let func = dev.get_or_load_func(&kernel_name::<T>(kernel_name_str), kernels::REDUCE)?;
+        let kernel_numel = if use_small_reduce { dst_el } else { src_el };
         if return_index {
             // SAFETY: filled in by the follow up kernel.
             let out = unsafe { dev.alloc::<u32>(dst_el) }.w()?;
-            let params = (src_el, el_to_sum_per_block, src_dims.len(), &ds, src, &out);
+            let params = (
+                kernel_numel,
+                el_to_sum_per_block,
+                src_dims.len(),
+                &ds,
+                src,
+                &out,
+            );
             // SAFETY: ffi.
             unsafe { func.launch(cfg, params) }.w()?;
             Ok(S::U32(out))
         } else {
             // SAFETY: filled in by the follow up kernel.
             let out = unsafe { dev.alloc::<T>(dst_el) }.w()?;
-            let params = (src_el, el_to_sum_per_block, src_dims.len(), &ds, src, &out);
+            let params = (
+                kernel_numel,
+                el_to_sum_per_block,
+                src_dims.len(),
+                &ds,
+                src,
+                &out,
+            );
             // SAFETY: ffi.
             unsafe { func.launch(cfg, params) }.w()?;
             Ok(wrap(out))

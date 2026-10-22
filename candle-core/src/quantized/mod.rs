@@ -405,6 +405,47 @@ fn check_shape(shape: &Shape, block_size: usize) -> Result<()> {
 }
 
 impl QTensor {
+    /// Concatenate two-dimensional quantized CUDA tensors by rows without
+    /// dequantizing or requantizing their payload. GGUF rows contain an
+    /// integral number of blocks, so this preserves every checkpoint bit.
+    pub fn cat_rows(tensors: &[&QTensor]) -> Result<Self> {
+        let first = tensors
+            .first()
+            .ok_or_else(|| crate::Error::Msg("cannot concatenate zero quantized tensors".into()))?;
+        let (mut rows, cols) = first.shape.dims2()?;
+        let dtype = first.dtype();
+        for tensor in &tensors[1..] {
+            let (tensor_rows, tensor_cols) = tensor.shape.dims2()?;
+            if tensor_cols != cols || tensor.dtype() != dtype {
+                crate::bail!(
+                    "incompatible quantized row concatenation: {:?} {:?} versus {:?} {:?}",
+                    first.shape,
+                    dtype,
+                    tensor.shape,
+                    tensor.dtype()
+                )
+            }
+            rows += tensor_rows;
+        }
+        let storage = match &first.storage {
+            QStorage::Cuda(_) => {
+                let storages = tensors
+                    .iter()
+                    .map(|tensor| match &tensor.storage {
+                        QStorage::Cuda(storage) => Ok(storage),
+                        _ => crate::bail!("quantized row concatenation requires one CUDA device"),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                QStorage::Cuda(cuda::QCudaStorage::cat_rows(&storages)?)
+            }
+            _ => crate::bail!("quantized row concatenation is currently CUDA-only"),
+        };
+        Ok(Self {
+            storage,
+            shape: Shape::from((rows, cols)),
+        })
+    }
+
     pub fn new<S: Into<Shape>>(storage: QStorage, shape: S) -> Result<Self> {
         let shape = shape.into();
         check_shape(&shape, storage.block_size())?;
@@ -770,7 +811,25 @@ impl crate::CustomOp1 for QTensor {
 impl crate::Module for QMatMul {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
-            Self::QTensor(t) => xs.apply_op1_no_bwd(t.as_ref()),
+            Self::QTensor(t) => {
+                // Packed MMVQ/MMQ is ideal for decode and small batches, but
+                // leaves tensor cores mostly idle for a large prompt.  Match
+                // llama.cpp's CUDA policy: once M is large, dequantize the
+                // weights to F16 and use the vendor tensor-core GEMM.  The
+                // legacy CUDA path quantizes activations to Q8_1 first, so F16
+                // activations do not reduce their numerical precision.
+                //
+                // Keep this dispatch in candle rather than in a model so all
+                // GGUF tensor types supported by dequantize_f16 benefit.  CPU,
+                // Metal, and the packed small-M path are unchanged.
+                let k = xs.dims().last().copied().unwrap_or(0);
+                let m = if k == 0 { 0 } else { xs.elem_count() / k };
+                if matches!(t.device(), Device::Cuda(_)) && m >= 64 {
+                    self.forward_via_f16(xs)
+                } else {
+                    xs.apply_op1_no_bwd(t.as_ref())
+                }
+            }
             Self::Tensor(w) => {
                 let w = match *xs.dims() {
                     [b1, b2, _, _] => w.broadcast_left((b1, b2))?.t()?,

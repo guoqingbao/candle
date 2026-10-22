@@ -4,7 +4,7 @@ use crate::{backend::BackendDevice, cuda_backend::WrapErr};
 use crate::{CudaDevice, CudaStorage, Result};
 use half::f16;
 
-use cudarc::driver::{CudaSlice, CudaView, DeviceSlice};
+use cudarc::driver::{sys, CudaSlice, CudaView, DeviceSlice};
 
 #[derive(Clone, Debug)]
 struct PaddedCudaSlice {
@@ -357,11 +357,24 @@ fn mul_mat_vec_via_q8_1(
         GgmlDType::Q6K => "mul_mat_vec_q6_K_q8_1_cuda",
         _ => crate::bail!("unsupported dtype for quantized matmul {dtype:?}"),
     };
-    let kernel_name = format!("{kernel_name}{b_size}");
+    let is_k_quant = matches!(
+        dtype,
+        GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K
+    );
+    let major = dev
+        .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .unwrap_or(8);
+    let use_volta_turing_w2 = b_size == 1 && is_k_quant && major == 7;
+    let kernel_name = if use_volta_turing_w2 {
+        format!("{kernel_name}{b_size}_w2")
+    } else {
+        format!("{kernel_name}{b_size}")
+    };
     let func = dev.get_or_load_func(&kernel_name, candle_kernels::QUANTIZED)?;
     let dst = unsafe { dev.alloc::<f32>(nrows * b_size).w()? };
     // https://github.com/ggerganov/llama.cpp/blob/facb8b56f8fd3bb10a693bf0943ae9d69d0828ef/ggml-cuda/mmvq.cu#L98
     let (nblocks, nwarps) = match b_size {
+        1 if use_volta_turing_w2 => (nrows as u32, 2),
         1 => (nrows as u32, 4),
         2..=4 => ((nrows as u32 + 1) / 2, 4),
         5..=8 => ((nrows as u32 + 1) / 2, 2),
@@ -507,6 +520,30 @@ fn quantize_q6_k(
 }
 
 impl QCudaStorage {
+    pub(crate) fn cat_rows(storages: &[&Self]) -> Result<Self> {
+        let first = storages
+            .first()
+            .ok_or_else(|| crate::Error::Msg("cannot concatenate zero quantized tensors".into()))?;
+        if storages.iter().any(|s| s.dtype != first.dtype) {
+            crate::bail!("cannot concatenate quantized CUDA tensors with different dtypes")
+        }
+        let len = storages.iter().map(|s| s.data.len).sum::<usize>();
+        let padding = MATRIX_ROW_PADDING * first.dtype.type_size() / first.dtype.block_size();
+        let mut inner = unsafe { first.device.alloc::<u8>(len + padding).w()? };
+        let mut offset = 0usize;
+        for storage in storages {
+            let src = storage.data.inner.slice(..storage.data.len);
+            let mut dst = inner.slice_mut(offset..offset + storage.data.len);
+            first.device.dtod_copy(&src, &mut dst).w()?;
+            offset += storage.data.len;
+        }
+        Ok(Self {
+            data: PaddedCudaSlice { inner, len },
+            dtype: first.dtype,
+            device: first.device.clone(),
+        })
+    }
+
     pub fn zeros(device: &CudaDevice, el_count: usize, dtype: GgmlDType) -> Result<Self> {
         let size_in_bytes = ceil_div(el_count, dtype.block_size()) * dtype.type_size();
         let padded_size_in_bytes =

@@ -1,6 +1,58 @@
 use crate::utils::{BufferOffset, EncoderProvider};
 use crate::{set_params, DType, Kernels, MetalKernelError, Source};
 use metal::{Buffer, ComputeCommandEncoderRef, Device, MTLResourceOptions, MTLSize};
+use std::sync::Arc;
+
+/// Temporary storage used by the multi-block Metal argsort. Keeping these
+/// buffers in Candle's allocator lets repeated sorts reuse the same storage.
+pub struct MlxSortScratch {
+    values_0: Arc<Buffer>,
+    values_1: Arc<Buffer>,
+    indices_0: Arc<Buffer>,
+    indices_1: Arc<Buffer>,
+    partitions: Arc<Buffer>,
+}
+
+impl MlxSortScratch {
+    pub fn new(
+        values_0: Arc<Buffer>,
+        values_1: Arc<Buffer>,
+        indices_0: Arc<Buffer>,
+        indices_1: Arc<Buffer>,
+        partitions: Arc<Buffer>,
+    ) -> Self {
+        Self {
+            values_0,
+            values_1,
+            indices_0,
+            indices_1,
+            partitions,
+        }
+    }
+
+    fn allocate(device: &Device, dtype: DType, nrows: usize, ncols: usize, nblocks: usize) -> Self {
+        let el_count = nrows * ncols;
+        let bytes_len = (el_count * dtype.size_in_bytes()) as u64;
+        Self {
+            values_0: Arc::new(
+                device.new_buffer(bytes_len, MTLResourceOptions::StorageModePrivate),
+            ),
+            values_1: Arc::new(
+                device.new_buffer(bytes_len, MTLResourceOptions::StorageModePrivate),
+            ),
+            indices_0: Arc::new(
+                device.new_buffer(el_count as u64 * 4, MTLResourceOptions::StorageModePrivate),
+            ),
+            indices_1: Arc::new(
+                device.new_buffer(el_count as u64 * 4, MTLResourceOptions::StorageModePrivate),
+            ),
+            partitions: Arc::new(device.new_buffer(
+                (nrows * (nblocks + 1)) as u64 * 4,
+                MTLResourceOptions::StorageModePrivate,
+            )),
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn call_arg_sort(
@@ -56,6 +108,7 @@ pub fn multi_block_sort(
     ep: impl EncoderProvider,
     kernels: &Kernels,
     dtype: DType,
+    asc: bool,
     bn: usize,
     tn: usize,
     nblocks: usize,
@@ -63,35 +116,29 @@ pub fn multi_block_sort(
     ncols: usize,
     src: BufferOffset,
     dst: &Buffer,
+    scratch: &MlxSortScratch,
 ) -> Result<(), MetalKernelError> {
     let dtype_str = mlx_dtype_str(dtype);
-    // Do allocations
-    let el_count = nrows * ncols;
-    let bytes_len = (el_count * dtype.size_in_bytes()) as u64;
-    let mut dev_vals_0 = device.new_buffer(bytes_len, MTLResourceOptions::StorageModePrivate);
-    let mut dev_vals_1 = device.new_buffer(bytes_len, MTLResourceOptions::StorageModePrivate);
-    let mut dev_idxs_0 =
-        device.new_buffer(el_count as u64 * 4, MTLResourceOptions::StorageModePrivate);
-    let mut dev_idxs_1 =
-        device.new_buffer(el_count as u64 * 4, MTLResourceOptions::StorageModePrivate);
-    let mut block_partitions = device.new_buffer(
-        (nrows * (nblocks + 1)) as u64 * 4,
-        MTLResourceOptions::StorageModePrivate,
-    );
+    let dev_vals_0 = scratch.values_0.as_ref();
+    let dev_vals_1 = scratch.values_1.as_ref();
+    let dev_idxs_0 = scratch.indices_0.as_ref();
+    let dev_idxs_1 = scratch.indices_1.as_ref();
+    let block_partitions = scratch.partitions.as_ref();
     // Prepare command encoder
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     // Do blockwise sort
     {
-        let name = format!("sort_mbsort_{dtype_str}_uint32_bn{bn}_tn{tn}");
+        let direction = if asc { "" } else { "desc_" };
+        let name = format!("sort_mbsort_{direction}{dtype_str}_uint32_bn{bn}_tn{tn}");
         let pipeline = kernels.load_pipeline(device, Source::MlxSort, name)?;
         encoder.set_compute_pipeline_state(&pipeline);
         set_params!(
             encoder,
             (
                 &src,
-                &mut dev_vals_0,
-                &mut dev_idxs_0,
+                dev_vals_0,
+                dev_idxs_0,
                 /* size_sorted_axis */ ncols as i32,
                 /* stride_sorted_axis */ 1i32,
                 /* nc_dim */ 1i32,
@@ -115,18 +162,19 @@ pub fn multi_block_sort(
     let mut ping = false;
     let mut merge_tiles = 2;
     let n_thr_per_group = usize::min(nblocks + 1, 1024);
-    let partition_name = format!("partition_mbsort_{dtype_str}_uint32_bn{bn}_tn{tn}");
-    let merge_name = format!("merge_mbsort_float32_uint32_bn{bn}_tn{tn}");
+    let direction = if asc { "" } else { "desc_" };
+    let partition_name = format!("partition_mbsort_{direction}{dtype_str}_uint32_bn{bn}_tn{tn}");
+    let merge_name = format!("merge_mbsort_{direction}{dtype_str}_uint32_bn{bn}_tn{tn}");
     while merge_tiles / 2 < nblocks {
         let (dev_vals_in, dev_vals_out) = if ping {
-            (&mut dev_vals_1, &mut dev_vals_0)
+            (dev_vals_1, dev_vals_0)
         } else {
-            (&mut dev_vals_0, &mut dev_vals_1)
+            (dev_vals_0, dev_vals_1)
         };
         let (dev_idxs_in, dev_idxs_out) = if ping {
-            (&mut dev_idxs_1, &mut dev_idxs_0)
+            (dev_idxs_1, dev_idxs_0)
         } else {
-            (&mut dev_idxs_0, &mut dev_idxs_1)
+            (dev_idxs_0, dev_idxs_1)
         };
         ping = !ping;
         // Do partition
@@ -137,9 +185,9 @@ pub fn multi_block_sort(
             set_params!(
                 encoder,
                 (
-                    &mut block_partitions,
-                    &mut *dev_vals_in,
-                    &mut *dev_idxs_in,
+                    block_partitions,
+                    dev_vals_in,
+                    dev_idxs_in,
                     /* size_sorted_axis */ ncols as i32,
                     /* merge_tiles */ merge_tiles as i32,
                     /* n_blocks */ nblocks as i32
@@ -164,11 +212,11 @@ pub fn multi_block_sort(
             set_params!(
                 encoder,
                 (
-                    &block_partitions,
-                    &*dev_vals_in,
-                    &*dev_idxs_in,
-                    &*dev_vals_out,
-                    &*dev_idxs_out,
+                    block_partitions,
+                    dev_vals_in,
+                    dev_idxs_in,
+                    dev_vals_out,
+                    dev_idxs_out,
                     /* size_sorted_axis */ ncols as i32,
                     /* merge_tiles */ merge_tiles as i32,
                     /* n_blocks */ nblocks as i32
@@ -188,11 +236,7 @@ pub fn multi_block_sort(
         }
         merge_tiles *= 2;
     }
-    let dev_idxs_out = if ping {
-        &mut dev_idxs_1
-    } else {
-        &mut dev_idxs_0
-    };
+    let dev_idxs_out = if ping { dev_idxs_1 } else { dev_idxs_0 };
     // Copy output with appropriate strides
     let copy_kernel = match dtype {
         DType::U8 => crate::copy2d::U8,
@@ -225,6 +269,7 @@ pub fn block_sort(
     ep: impl EncoderProvider,
     kernels: &Kernels,
     dtype: DType,
+    asc: bool,
     bn: usize,
     tn: usize,
     nrows: usize,
@@ -233,7 +278,8 @@ pub fn block_sort(
     dst: &Buffer,
 ) -> Result<(), MetalKernelError> {
     let dtype_str = mlx_dtype_str(dtype);
-    let name = format!("carg_block_sort_{dtype_str}_uint32_bn{bn}_tn{tn}");
+    let direction = if asc { "" } else { "desc_" };
+    let name = format!("carg_block_sort_{direction}{dtype_str}_uint32_bn{bn}_tn{tn}");
     let pipeline = kernels.load_pipeline(device, Source::MlxSort, name)?;
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
@@ -272,10 +318,12 @@ pub fn call_mlx_arg_sort(
     ep: impl EncoderProvider,
     kernels: &Kernels,
     dtype: DType,
+    asc: bool,
     nrows: usize,
     ncols: usize,
     src: BufferOffset,
     dst: &Buffer,
+    scratch: Option<&MlxSortScratch>,
 ) -> Result<(), MetalKernelError> {
     let tn = 8;
     let bn = match ncols.div_ceil(tn) {
@@ -286,11 +334,21 @@ pub fn call_mlx_arg_sort(
     let n_per_block = bn * tn;
     let n_blocks = ncols.div_ceil(n_per_block);
     if n_blocks > 1 {
+        let owned_scratch;
+        let scratch = match scratch {
+            Some(scratch) => scratch,
+            None => {
+                owned_scratch = MlxSortScratch::allocate(device, dtype, nrows, ncols, n_blocks);
+                &owned_scratch
+            }
+        };
         multi_block_sort(
-            device, ep, kernels, dtype, bn, tn, n_blocks, nrows, ncols, src, dst,
+            device, ep, kernels, dtype, asc, bn, tn, n_blocks, nrows, ncols, src, dst, scratch,
         )?
     } else {
-        block_sort(device, ep, kernels, dtype, bn, tn, nrows, ncols, src, dst)?
+        block_sort(
+            device, ep, kernels, dtype, asc, bn, tn, nrows, ncols, src, dst,
+        )?
     }
     Ok(())
 }

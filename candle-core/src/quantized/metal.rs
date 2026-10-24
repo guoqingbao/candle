@@ -11,6 +11,43 @@ pub struct QMetalStorage {
 }
 
 impl QMetalStorage {
+    pub(crate) fn cat_rows(storages: &[&Self]) -> Result<Self> {
+        let first = storages
+            .first()
+            .ok_or_else(|| crate::Error::Msg("cannot concatenate zero quantized tensors".into()))?;
+        if storages.iter().any(|storage| {
+            storage.dtype != first.dtype
+                || storage.device.device().registry_id() != first.device.device().registry_id()
+        }) {
+            crate::bail!(
+                "cannot concatenate quantized Metal tensors with different dtypes or devices"
+            )
+        }
+
+        let byte_len = storages
+            .iter()
+            .map(|storage| storage.buffer.length())
+            .sum::<u64>() as usize;
+        let buffer = first.device.allocate_zeros(byte_len, false)?;
+        let command_buffer = first.device.command_buffer()?;
+        let blit = command_buffer.new_blit_command_encoder();
+        blit.set_label("quantized_row_concat");
+        let mut offset = 0;
+        for storage in storages {
+            let length = storage.buffer.length();
+            blit.copy_from_buffer(&storage.buffer, 0, &buffer, offset, length);
+            offset += length;
+        }
+        blit.end_encoding();
+        first.device.wait_until_completed()?;
+
+        Ok(Self {
+            buffer,
+            device: first.device.clone(),
+            dtype: first.dtype,
+        })
+    }
+
     pub fn zeros(device: &MetalDevice, elem_count: usize, dtype: GgmlDType) -> Result<Self> {
         let size = elem_count * dtype.type_size() / dtype.block_size();
         let buffer = device.allocate_zeros(size, false)?;
@@ -230,7 +267,7 @@ impl QMetalStorage {
         let dst_shape = Shape::from(dst_shape);
         let device = storage.device().clone();
         let dst = device.new_buffer(dst_shape.elem_count(), DType::F32, "qmatmul")?;
-        let command_buffer = device.command_buffer()?;
+        let command_buffer = device.command_encoder()?;
         // In some cases it would be better to use the mm variant, though it has its drawbacks
         // around memory alignemnt.
         for batch_id in 0..m {
@@ -248,7 +285,8 @@ impl QMetalStorage {
             )
             .map_err(MetalError::from)?;
         }
-        let dst_storage = crate::MetalStorage::new(dst, device, dst_shape.elem_count(), DType::F32);
+        let dst_storage =
+            crate::MetalStorage::new(dst, device.clone(), dst_shape.elem_count(), DType::F32);
         Ok((dst_storage, dst_shape))
     }
 
@@ -292,7 +330,7 @@ impl QMetalStorage {
         let dst_shape = Shape::from(dst_shape);
         let device = storage.device().clone();
         let dst = device.new_buffer(dst_shape.elem_count(), DType::F32, "qmatmul")?;
-        let command_buffer = device.command_buffer()?;
+        let command_buffer = device.command_encoder()?;
 
         assert_eq!(storage.dtype(), DType::F32);
 
@@ -340,7 +378,8 @@ impl QMetalStorage {
         )
         .map_err(MetalError::from)?;
 
-        let dst_storage = crate::MetalStorage::new(dst, device, dst_shape.elem_count(), DType::F32);
+        let dst_storage =
+            crate::MetalStorage::new(dst, device.clone(), dst_shape.elem_count(), DType::F32);
         Ok((dst_storage, dst_shape))
     }
 

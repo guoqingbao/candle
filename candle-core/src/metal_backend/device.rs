@@ -1,6 +1,8 @@
 use crate::{DType, InferenceMode, Result};
 use candle_metal_kernels::Kernels;
-use metal::{Buffer, CommandBuffer, CommandQueue, MTLResourceOptions, NSUInteger};
+use metal::{
+    Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, MTLResourceOptions, NSUInteger,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -41,6 +43,7 @@ pub(crate) struct Commands {
     command_buffer_index: usize,
     /// The maximum amount of [compute command encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder?language=objc) per [command buffer](https://developer.apple.com/documentation/metal/mtlcommandbuffer?language=objc)
     compute_per_buffer: usize,
+    current_encoder: Option<ComputeCommandEncoder>,
 }
 
 impl Commands {
@@ -49,17 +52,19 @@ impl Commands {
         command_buffer.enqueue();
         let compute_per_buffer = match std::env::var("CANDLE_METAL_COMPUTE_PER_BUFFER") {
             Ok(val) => val.parse()?,
-            _ => 50,
+            _ => 512,
         };
         Ok(Self {
             command_queue,
             command_buffer,
             command_buffer_index: 0,
             compute_per_buffer,
+            current_encoder: None,
         })
     }
 
     pub fn command_buffer(&mut self) -> Result<(bool, CommandBuffer)> {
+        self.end_current_encoder();
         let mut command_buffer = self.command_buffer.to_owned();
         let mut flushed = false;
         if self.command_buffer_index > self.compute_per_buffer {
@@ -73,7 +78,31 @@ impl Commands {
         Ok((flushed, command_buffer))
     }
 
+    pub fn command_encoder(&mut self) -> Result<bool> {
+        let mut flushed = false;
+        if self.command_buffer_index > self.compute_per_buffer {
+            self.end_current_encoder();
+            self.command_buffer.commit();
+            self.command_buffer = self.command_queue.new_command_buffer().to_owned();
+            self.command_buffer_index = 0;
+            flushed = true;
+        }
+        if self.current_encoder.is_none() {
+            self.current_encoder =
+                Some(self.command_buffer.new_compute_command_encoder().to_owned());
+        }
+        self.command_buffer_index += 1;
+        Ok(flushed)
+    }
+
+    fn end_current_encoder(&mut self) {
+        if let Some(encoder) = self.current_encoder.take() {
+            encoder.end_encoding();
+        }
+    }
+
     pub fn wait_until_completed(&mut self) -> Result<()> {
+        self.end_current_encoder();
         match self.command_buffer.status() {
             metal::MTLCommandBufferStatus::NotEnqueued
             | metal::MTLCommandBufferStatus::Enqueued => self.command_buffer.commit(),
@@ -87,6 +116,53 @@ impl Commands {
         self.command_buffer_index = 0;
 
         Ok(())
+    }
+}
+
+pub struct CommandEncoderGuard<'a> {
+    commands: std::sync::RwLockWriteGuard<'a, Commands>,
+}
+
+impl AsRef<metal::ComputeCommandEncoderRef> for CommandEncoderGuard<'_> {
+    fn as_ref(&self) -> &metal::ComputeCommandEncoderRef {
+        self.commands
+            .current_encoder
+            .as_ref()
+            .expect("compute encoder guard has no active encoder")
+    }
+}
+
+pub struct PersistentEncoder<'a>(&'a metal::ComputeCommandEncoderRef);
+
+impl AsRef<metal::ComputeCommandEncoderRef> for PersistentEncoder<'_> {
+    fn as_ref(&self) -> &metal::ComputeCommandEncoderRef {
+        self.0
+    }
+}
+
+impl candle_metal_kernels::utils::EncoderProvider for &CommandEncoderGuard<'_> {
+    type Encoder<'a>
+        = PersistentEncoder<'a>
+    where
+        Self: 'a;
+
+    fn encoder(&self) -> Self::Encoder<'_> {
+        PersistentEncoder(
+            self.commands
+                .current_encoder
+                .as_ref()
+                .expect("compute encoder guard has no active encoder"),
+        )
+    }
+}
+
+impl CommandEncoderGuard<'_> {
+    pub fn set_label(&self, label: &str) {
+        self.commands
+            .current_encoder
+            .as_ref()
+            .expect("compute encoder guard has no active encoder")
+            .set_label(label);
     }
 }
 
@@ -189,6 +265,15 @@ impl MetalDevice {
             self.drop_unused_buffers()?
         }
         Ok(command_buffer)
+    }
+
+    pub fn command_encoder(&self) -> Result<CommandEncoderGuard<'_>> {
+        let mut commands = self.commands.write().map_err(MetalError::from)?;
+        let flushed = commands.command_encoder()?;
+        if flushed {
+            self.drop_unused_buffers()?;
+        }
+        Ok(CommandEncoderGuard { commands })
     }
 
     pub fn wait_until_completed(&self) -> Result<()> {

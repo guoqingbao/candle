@@ -405,9 +405,9 @@ fn check_shape(shape: &Shape, block_size: usize) -> Result<()> {
 }
 
 impl QTensor {
-    /// Concatenate two-dimensional quantized CUDA tensors by rows without
-    /// dequantizing or requantizing their payload. GGUF rows contain an
-    /// integral number of blocks, so this preserves every checkpoint bit.
+    /// Concatenate two-dimensional accelerator-backed quantized tensors by
+    /// rows without dequantizing or requantizing their payload. GGUF rows
+    /// contain an integral number of blocks, so every checkpoint bit is kept.
     pub fn cat_rows(tensors: &[&QTensor]) -> Result<Self> {
         let first = tensors
             .first()
@@ -438,7 +438,17 @@ impl QTensor {
                     .collect::<Result<Vec<_>>>()?;
                 QStorage::Cuda(cuda::QCudaStorage::cat_rows(&storages)?)
             }
-            _ => crate::bail!("quantized row concatenation is currently CUDA-only"),
+            QStorage::Metal(_) => {
+                let storages = tensors
+                    .iter()
+                    .map(|tensor| match &tensor.storage {
+                        QStorage::Metal(storage) => Ok(storage),
+                        _ => crate::bail!("quantized row concatenation requires one Metal device"),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                QStorage::Metal(metal::QMetalStorage::cat_rows(&storages)?)
+            }
+            _ => crate::bail!("quantized row concatenation requires one accelerator device"),
         };
         Ok(Self {
             storage,

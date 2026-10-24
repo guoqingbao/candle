@@ -144,51 +144,52 @@ impl crate::CustomOp1 for ArgSort {
         use crate::backend::BackendStorage;
         use crate::DType;
 
-        let name = {
-            if self.asc {
-                match storage.dtype() {
-                    DType::BF16 => "asort_asc_bf16",
-                    DType::F16 => "asort_asc_f16",
-                    DType::F32 => "asort_asc_f32",
-                    DType::F64 => "asort_asc_f64",
-                    DType::U8 | DType::F8E8M0 | DType::F8E4M3 => "asort_asc_u8",
-                    DType::U32 => "asort_asc_u32",
-                    DType::I64 => "asort_asc_i64",
-                }
-            } else {
-                match storage.dtype() {
-                    DType::BF16 => "asort_desc_bf16",
-                    DType::F16 => "asort_desc_f16",
-                    DType::F32 => "asort_desc_f32",
-                    DType::F64 => "asort_desc_f64",
-                    DType::U8 | DType::F8E8M0 | DType::F8E4M3 => "asort_desc_u8",
-                    DType::U32 => "asort_desc_u32",
-                    DType::I64 => "asort_desc_i64",
-                }
-            }
-        };
         let device = storage.device();
         let kernels = device.kernels();
-        let command_buffer = device.command_buffer()?;
         let el = layout.shape().elem_count();
         let ncols = self.last_dim;
         let nrows = el / ncols;
+        let dtype = match storage.dtype() {
+            DType::BF16 => candle_metal_kernels::DType::BF16,
+            DType::F16 => candle_metal_kernels::DType::F16,
+            DType::F32 => candle_metal_kernels::DType::F32,
+            DType::U8 | DType::F8E8M0 | DType::F8E4M3 => candle_metal_kernels::DType::U8,
+            DType::U32 => candle_metal_kernels::DType::U32,
+            DType::I64 => candle_metal_kernels::DType::I64,
+            DType::F64 => crate::bail!("Metal argsort does not support f64"),
+        };
         let src = crate::metal_backend::buffer_o(storage.buffer(), layout, storage.dtype());
         let dst = device.new_buffer(el, DType::U32, "asort")?;
-        let mut ncols_pad = 1;
-        while ncols_pad < ncols {
-            ncols_pad *= 2;
-        }
-        candle_metal_kernels::call_arg_sort(
+        let tn = 8;
+        let bn = match ncols.div_ceil(tn) {
+            257.. if !matches!(dtype, candle_metal_kernels::DType::I64) => 512,
+            129.. => 256,
+            0..129 => 128,
+        };
+        let nblocks = ncols.div_ceil(bn * tn);
+        let scratch = if nblocks > 1 {
+            Some(candle_metal_kernels::MlxSortScratch::new(
+                device.new_buffer(el, storage.dtype(), "argsort_values_0")?,
+                device.new_buffer(el, storage.dtype(), "argsort_values_1")?,
+                device.new_buffer(el, DType::U32, "argsort_indices_0")?,
+                device.new_buffer(el, DType::U32, "argsort_indices_1")?,
+                device.new_buffer(nrows * (nblocks + 1), DType::U32, "argsort_partitions")?,
+            ))
+        } else {
+            None
+        };
+        let command_encoder = device.command_encoder()?;
+        candle_metal_kernels::call_mlx_arg_sort(
             device.metal_device(),
-            &command_buffer,
+            &command_encoder,
             kernels,
-            name,
+            dtype,
+            self.asc,
             nrows,
             ncols,
-            ncols_pad,
             src,
             &dst,
+            scratch.as_ref(),
         )
         .map_err(crate::Error::wrap)?;
         let dst = crate::MetalStorage::new(dst, device.clone(), el, DType::U32);

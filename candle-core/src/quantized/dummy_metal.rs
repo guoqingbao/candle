@@ -8,6 +8,10 @@ pub struct QMetalStorage {
 }
 
 impl QMetalStorage {
+    pub(crate) fn cat_rows(_: &[&Self]) -> Result<Self> {
+        Err(Error::NotCompiledWithMetalSupport)
+    }
+
     pub fn zeros(_: &MetalDevice, _: usize, _: GgmlDType) -> Result<Self> {
         Err(Error::NotCompiledWithMetalSupport)
     }

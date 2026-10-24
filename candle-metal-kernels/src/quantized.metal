@@ -2501,8 +2501,10 @@ void kernel_mul_mv_q8_0_f32_impl(
                    uint3     tgpig,
                    uint      tiisg,
                    uint      sgitg) {
-    const int nr  = N_DST;
-    const int nsg = N_SIMDGROUP;
+    // Match llama.cpp's Q8_0 Metal mapping: 4 SIMD groups process 2 rows
+    // each, exposing more parallelism across K on Apple GPUs.
+    constexpr int nr  = 2;
+    constexpr int nsg = 4;
     const int nw  = N_SIMDWIDTH;
 
     const int nb = ne00/QK8_0;
@@ -4915,8 +4917,10 @@ void kernel_mul_mv_q4_K_f32_impl(
     const int r0 = tgpig.x;
     const int r1 = tgpig.y;
     const int im = tgpig.z;
-    //const int first_row = (r0 * N_SIMDGROUP + sgitg) * N_DST;
-    const int first_row = r0 * N_DST;
+    // Two SIMD groups process two rows each, limiting per-thread row state.
+    constexpr int N_DST_Q4K = 2;
+    constexpr int N_SIMDGROUP_Q4K = 2;
+    const int first_row = (r0 * N_SIMDGROUP_Q4K + sgitg) * N_DST_Q4K;
     const int ib_row = first_row * nb;
 
     const uint i12 = im%ne12;
@@ -4929,7 +4933,7 @@ void kernel_mul_mv_q4_K_f32_impl(
 
     float yl[16];
     float yh[16];
-    float sumf[N_DST]={0.f}, all_sum;
+    float sumf[N_DST_Q4K]={0.f}, all_sum;
 
     const int step = sizeof(block_q4_K) * nb / 2;
 
@@ -4952,7 +4956,7 @@ void kernel_mul_mv_q4_K_f32_impl(
         device const uint16_t * q1 = (device const uint16_t *)x[ib].qs + 16 * iq + 4 * ir;
         device const half     * dh = &x[ib].d;
 
-        for (int row = 0; row < N_DST; row++) {
+        for (int row = 0; row < N_DST_Q4K; row++) {
 
             sc16[0] = sc[0] & kmask1;
             sc16[1] = sc[2] & kmask1;
@@ -4990,7 +4994,7 @@ void kernel_mul_mv_q4_K_f32_impl(
         y4 += 4 * QK_K;
     }
 
-    for (int row = 0; row < N_DST; ++row) {
+    for (int row = 0; row < N_DST_Q4K; ++row) {
         all_sum = simd_sum(sumf[row]);
         if (tiisg == 0) {
             dst[r1*ne0 + im*ne0*ne1 + first_row + row] = all_sum;
@@ -5212,17 +5216,20 @@ void kernel_mul_mv_q6_K_f32_impl(
     const int64_t r1 = tgpig.y;
     const int     im = tgpig.z;
 
-    const int row = 2 * r0 + sgitg;
+    // Match llama.cpp's Q6_K mapping: two SIMD groups, two rows per group.
+    constexpr int N_DST_Q6K = 2;
+    constexpr int N_SIMDGROUP_Q6K = 2;
+    const int first_row = (r0 * N_SIMDGROUP_Q6K + sgitg) * N_DST_Q6K;
 
     const uint i12 = im%ne12;
     const uint i13 = im/ne12;
 
     const uint offset0 = (i12/r2)*(nb*ne01) + (i13/r3)*(nb*ne01*ne02);
 
-    device const block_q6_K * x = (device const block_q6_K *) src0 + row * nb + offset0;
+    device const block_q6_K * x = (device const block_q6_K *) src0 + first_row * nb + offset0;
     device const float     * yy = (device const float      *) src1 + r1*ne10 + im*ne00*ne1;
 
-    float sumf = 0;
+    float sumf[N_DST_Q6K] = {0.f};
 
     const int tid  = tiisg/2;
     const int ix   = tiisg%2;
@@ -5238,30 +5245,40 @@ void kernel_mul_mv_q6_K_f32_impl(
 
     for (int i = ix; i < nb; i += 2) {
 
-        device const uint8_t * q1 = x[i].ql + q_offset_l;
-        device const uint8_t * q2 = q1 + 32;
-        device const uint8_t * qh = x[i].qh + q_offset_h;
-        device const int8_t  * sc = x[i].scales + is;
-
         device const float * y = yy + i * QK_K + y_offset;
-
-        const float dall = x[i].d;
-
-        float4 sums = {0.f, 0.f, 0.f, 0.f};
+        float yl[16];
         for (int l = 0; l < n; ++l) {
-            sums[0] += y[l+ 0] * ((int8_t)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
-            sums[1] += y[l+32] * ((int8_t)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
-            sums[2] += y[l+64] * ((int8_t)((q1[l]  >> 4) | ((qh[l] & kmask3) << 0)) - 32);
-            sums[3] += y[l+96] * ((int8_t)((q2[l]  >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
+            yl[4*l + 0] = y[l + 0];
+            yl[4*l + 1] = y[l + 32];
+            yl[4*l + 2] = y[l + 64];
+            yl[4*l + 3] = y[l + 96];
         }
 
-        sumf += dall * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
+        for (int row = 0; row < N_DST_Q6K; ++row) {
+            device const block_q6_K * block = x + i + row * nb;
+            device const uint8_t * q1 = block->ql + q_offset_l;
+            device const uint8_t * q2 = q1 + 32;
+            device const uint8_t * qh = block->qh + q_offset_h;
+            device const int8_t * sc = block->scales + is;
+
+            float4 sums = {0.f, 0.f, 0.f, 0.f};
+            for (int l = 0; l < n; ++l) {
+                sums[0] += yl[4*l + 0] * ((int8_t)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
+                sums[1] += yl[4*l + 1] * ((int8_t)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
+                sums[2] += yl[4*l + 2] * ((int8_t)((q1[l]  >> 4) | ((qh[l] & kmask3) << 0)) - 32);
+                sums[3] += yl[4*l + 3] * ((int8_t)((q2[l]  >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
+            }
+
+            sumf[row] += block->d * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
+        }
 
     }
 
-    const float tot = simd_sum(sumf);
-    if (tiisg == 0) {
-        dst[r1*ne0 + im*ne0*ne1 + row] = tot;
+    for (int row = 0; row < N_DST_Q6K; ++row) {
+        const float tot = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < ne01) {
+            dst[r1*ne0 + im*ne0*ne1 + first_row + row] = tot;
+        }
     }
 }
 

@@ -623,10 +623,12 @@ fn run_mlx_sort<T: Clone>(v: &[T], ncols: usize) -> Vec<u32> {
         command_buffer,
         &kernels,
         DType::F32,
+        true,
         nrows,
         ncols,
         BufferOffset::zero_offset(&input),
         &output,
+        None,
     )
     .unwrap();
     command_buffer.commit();

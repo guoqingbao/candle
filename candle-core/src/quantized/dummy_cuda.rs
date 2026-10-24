@@ -8,6 +8,10 @@ pub struct QCudaStorage {
 }
 
 impl QCudaStorage {
+    pub(crate) fn cat_rows(_: &[&Self]) -> Result<Self> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
+
     pub fn zeros(_: &CudaDevice, _: usize, _: GgmlDType) -> Result<Self> {
         Err(Error::NotCompiledWithCudaSupport)
     }

@@ -9,7 +9,7 @@ pub mod mlx_gemm;
 pub mod sort;
 pub mod utils;
 pub use mlx_gemm::{call_mlx_gemm, GemmDType};
-pub use sort::{call_arg_sort, call_mlx_arg_sort};
+pub use sort::{call_arg_sort, call_mlx_arg_sort, MlxSortScratch};
 pub use utils::BufferOffset;
 use utils::{get_block_dims, linear_split, EncoderParam, EncoderProvider};
 
@@ -2310,14 +2310,16 @@ pub fn call_quantized_matmul_mv_t(
     let r3: u32 = (ne13 / ne03) as u32;
 
     let (nth0, nth1, align) = match dtype {
-        GgmlDType::Q4_0
-        | GgmlDType::Q4_1
-        | GgmlDType::Q5_0
-        | GgmlDType::Q5_1
-        | GgmlDType::Q8_0
-        | GgmlDType::Q8_1 => {
+        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_1 => {
             let nth0 = 8;
             let nth1 = 8;
+            let align = 8;
+            (nth0, nth1, align)
+        }
+        GgmlDType::Q8_0 => {
+            // Four SIMD groups, two rows per group; matches llama.cpp.
+            let nth0 = 4;
+            let nth1 = 32;
             let align = 8;
             (nth0, nth1, align)
         }
@@ -2330,8 +2332,9 @@ pub fn call_quantized_matmul_mv_t(
             (nth0, nth1, align)
         }
         GgmlDType::Q4K => {
-            let nth0 = 4;
-            let nth1 = 8;
+            // Two SIMD groups compute two rows each.
+            let nth0 = 64;
+            let nth1 = 1;
             let align = 4;
             (nth0, nth1, align)
         }
@@ -2358,9 +2361,10 @@ pub fn call_quantized_matmul_mv_t(
             (nth0, nth1, align)
         }
         GgmlDType::Q6K => {
-            let nth0 = 2;
-            let nth1 = 32;
-            let align = 2;
+            // Two SIMD groups, two output rows per group; matches llama.cpp.
+            let nth0 = 64;
+            let nth1 = 1;
+            let align = 4;
             (nth0, nth1, align)
         }
         GgmlDType::F16 | GgmlDType::BF16 | GgmlDType::Q8K => {
